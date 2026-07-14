@@ -294,7 +294,14 @@ the row-and-lane idea for live MIDI sequencing on a Raspberry Pi.
 
 ## Install
 
-On Raspberry Pi OS or Debian:
+SHR-DAW is developed and hardware-tested on Patchbox OS based on Debian 12
+(Bookworm). A clean Debian 11 (Bullseye) ARM64 environment resolves all required
+packages, builds the locked project with Rust 1.85, and passes its test suite,
+but Bullseye has not been tested with audio/MIDI hardware. Raspberry Pi
+OS Bullseye and Debian or Raspberry Pi OS 13 (Trixie) are expected to work but
+have not been tested.
+
+On Patchbox OS, Raspberry Pi OS, or Debian:
 
 ```sh
 ./scripts/install.sh
@@ -348,6 +355,56 @@ tree somewhere else.
 The product and Cargo package are named `shr-daw`, while the executable remains
 `shr`. Existing `shsynth` configuration and data paths are retained for
 compatibility with prior installations.
+
+### Display and terminal size
+
+SHR-DAW is designed for a 40×20 terminal and adapts its layout to the terminal
+cell dimensions it receives. It reports when the terminal is too small, but the
+current installer does not change font size or desktop/display settings.
+
+Pixel resolution alone is not enough to choose a font: the terminal emulator,
+window decorations, scaling, and fullscreen state also determine how many rows
+and columns fit. A future setup step should detect the active output and
+terminal, then offer a backed-up font/profile change appropriate to that
+combination. Per-user terminal settings, such as LXTerminal's configuration on
+Patchbox OS, normally do not need `sudo`; Linux console fonts and system-wide
+display configuration may do. SHR-DAW must never silently change either.
+
+### Optional Codex-assisted setup and recovery
+
+`install.sh` and `shr-setup` are the normal installation path and are expected
+to work without AI. For recovery, unusual hardware, or a heavily rewired rig,
+users may optionally install and sign in to Codex CLI on the Raspberry Pi and
+run the repository's assisted-setup brief. See the official
+[Codex CLI documentation](https://developers.openai.com/codex/cli/) for current
+installation and sign-in instructions. Then run:
+
+```sh
+cd /path/to/shr-daw
+codex -C . "$(cat docs/CODEX_ASSISTED_SETUP.md)"
+```
+
+This is useful when editing the configuration by hand would mean discovering
+and correlating many raw MIDI numbers: 12 continuous synth controls, the main
+encoder and its press, a lock control, and as many as eight command pads. Codex
+can observe the controller while the user moves one control at a time, identify
+CCs, notes, and relative-encoder behavior, back up the existing files, and
+write a checked `controller.conf`. It can also inspect JACK/ALSA routes, repair
+failed dependencies, adapt terminal sizing, configure private SoundFonts, and
+help with complex per-page MIDI routing.
+
+The assisted path follows the same safety rules as SHR-DAW: machine-specific
+values stay in user configuration, existing ideas and recordings are
+preserved, downloads retain source and licence information, unrelated
+processes are left alone, and audible JACK/synth tests require explicit user
+permission. Generic installer bugs should be fixed and validated in the
+project rather than hidden in a one-machine workaround.
+
+Full interactive MIDI learn is planned, as is a USB device infobank containing
+known controller/audio-interface identities and reviewed mapping profiles. The
+infobank should make common devices automatic while MIDI learn handles unknown
+ones. Codex-assisted discovery is the optional bridge for uncommon or deeply
+customized setups until those features exist.
 
 ## Screens
 
