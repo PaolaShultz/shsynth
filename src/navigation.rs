@@ -7,6 +7,7 @@ pub enum Screen {
     Ideas,
     Tracker,
     TrackerFiles,
+    TrackerPages,
     AudioRecorder,
 }
 
@@ -23,6 +24,7 @@ pub enum Action {
     OpenIdeas,
     OpenTracker,
     OpenTrackerFiles,
+    OpenTrackerPages,
     Back,
     TapTempo,
     SaveNew,
@@ -41,6 +43,10 @@ pub enum Action {
     PreviousTrack,
     NextTrack,
     SaveSong,
+    AddPage,
+    EditPageTarget,
+    EditPageChannel,
+    ConfirmPageManager,
     AudioRecord,
     AudioStop,
 }
@@ -83,7 +89,7 @@ const IDEAS: &[PadAssignment] = &[
     p(PadAction::TapTempo, Action::DeleteIdea, "DELETE"),
 ];
 const TRACKER: &[PadAssignment] = &[
-    p(PadAction::Arp, Action::OpenTrackerFiles, "FILE"),
+    p(PadAction::Arp, Action::OpenTrackerPages, "PAGES"),
     p(PadAction::Pad, Action::TrackerEdit, "EDIT"),
     p(PadAction::Prog, Action::PreviousTrack, "LANE−"),
     p(PadAction::Loop, Action::NextTrack, "LANE+"),
@@ -91,6 +97,16 @@ const TRACKER: &[PadAssignment] = &[
     p(PadAction::Play, Action::ToggleTracker, "PLAY"),
     p(PadAction::Rec, Action::SaveSong, "SAVE"),
     p(PadAction::TapTempo, Action::TapTempo, "TAP"),
+];
+const TRACKER_PAGES: &[PadAssignment] = &[
+    p(PadAction::Arp, Action::OpenTrackerFiles, "FILE"),
+    p(PadAction::Pad, Action::AddPage, "ADD"),
+    p(PadAction::Prog, Action::PreviousTrack, "PAGE−"),
+    p(PadAction::Loop, Action::NextTrack, "PAGE+"),
+    p(PadAction::Stop, Action::Back, "CANCEL"),
+    p(PadAction::Play, Action::EditPageTarget, "TARGET"),
+    p(PadAction::Rec, Action::EditPageChannel, "CHANNEL"),
+    p(PadAction::TapTempo, Action::ConfirmPageManager, "DONE"),
 ];
 const TRACKER_FILES: &[PadAssignment] = &[
     p(PadAction::Arp, Action::Noop, ""),
@@ -117,6 +133,7 @@ pub fn assignments(screen: Screen) -> &'static [PadAssignment] {
         Screen::Ideas => IDEAS,
         Screen::Tracker => TRACKER,
         Screen::TrackerFiles => TRACKER_FILES,
+        Screen::TrackerPages => TRACKER_PAGES,
         Screen::AudioRecorder => AUDIO_RECORDER,
     }
 }
@@ -172,9 +189,22 @@ mod tests {
         );
         assert_eq!(
             pad_action(Screen::Tracker, PadAction::Arp),
-            Some(Action::OpenTrackerFiles)
+            Some(Action::OpenTrackerPages)
         );
-        assert_eq!(assignments(Screen::Tracker)[0].label, "FILE");
+        assert_eq!(assignments(Screen::Tracker)[0].label, "PAGES");
+        assert_eq!(assignments(Screen::TrackerPages).len(), 8);
+        assert_eq!(
+            pad_action(Screen::TrackerPages, PadAction::Pad),
+            Some(Action::AddPage)
+        );
+        assert_eq!(
+            pad_action(Screen::TrackerPages, PadAction::Play),
+            Some(Action::EditPageTarget)
+        );
+        assert_eq!(
+            pad_action(Screen::TrackerPages, PadAction::Rec),
+            Some(Action::EditPageChannel)
+        );
         assert_eq!(assignments(Screen::TrackerFiles).len(), 8);
         assert_eq!(assignments(Screen::TrackerFiles)[0].label, "");
         assert_eq!(

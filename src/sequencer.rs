@@ -1,5 +1,5 @@
-//! Hardware MIDI accompaniment sequencing. Song editing/storage and event
-//! planning are independent from the owned software-synth lifecycle.
+//! Multi-destination FT2-style sequencing. Song editing/storage and event
+//! planning remain independent from the owned software-synth lifecycle.
 use crate::config::{BankSelectMode, ExternalMidiConfig};
 use anyhow::{anyhow, bail, Context, Result};
 use midir::{MidiOutput, MidiOutputConnection};
@@ -12,10 +12,8 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-pub const SONG_VERSION: u8 = 2;
+pub const SONG_VERSION: u8 = 3;
 pub const LANES_PER_PAGE: usize = 4;
-pub const PAGE_COUNT: usize = 2;
-pub const TOTAL_LANES: usize = LANES_PER_PAGE * PAGE_COUNT;
 #[cfg(test)]
 const DEFAULT_GESTURE_SETTLE: Duration = Duration::from_millis(45);
 
@@ -40,7 +38,31 @@ pub struct Page {
     pub program: u8,
     pub velocity: u8,
     pub percussion: bool,
+    pub target: PageTarget,
+    /// Reserved for a later small per-page MIDI setup sequence. It is stored
+    /// and routed, but deliberately has no editor yet.
+    pub setup: Vec<Vec<u8>>,
     pub lanes: Vec<Lane>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum PageTarget {
+    /// The one software instrument currently owned and monitored by SHSynth.
+    ActiveInstrument,
+    /// An exact ALSA MIDI output port name selected by the user.
+    Midi(String),
+    /// Version 1/2 compatibility route from `external_midi.output`.
+    ConfiguredExternal,
+}
+
+impl PageTarget {
+    pub fn label(&self) -> &str {
+        match self {
+            Self::ActiveInstrument => "SHSynth instrument",
+            Self::Midi(name) => name,
+            Self::ConfiguredExternal => "Configured MIDI output",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -163,7 +185,10 @@ impl Song {
             ),
         ];
         let mut patterns = BTreeMap::new();
-        patterns.insert(0, Pattern::empty(config.default_pattern_rows, TOTAL_LANES));
+        patterns.insert(
+            0,
+            Pattern::empty(config.default_pattern_rows, pages.len() * LANES_PER_PAGE),
+        );
         Self {
             name: "untitled".into(),
             tempo: config.default_tempo,
@@ -179,8 +204,8 @@ impl Song {
         if !(20..=300).contains(&self.tempo) || !(1..=16).contains(&self.steps_per_beat) {
             bail!("song tempo/steps out of range");
         }
-        if self.order.is_empty() || self.pages.len() != PAGE_COUNT {
-            bail!("song needs an order and exactly two pages");
+        if self.order.is_empty() || self.pages.is_empty() || self.pages.len() > 64 {
+            bail!("song needs an order and 1..=64 pages");
         }
         if self
             .pages
@@ -200,7 +225,11 @@ impl Song {
             if pattern.rows.is_empty() || pattern.rows.len() > 256 {
                 bail!("pattern must have 1..=256 rows");
             }
-            if pattern.rows.iter().any(|row| row.len() != TOTAL_LANES) {
+            if pattern
+                .rows
+                .iter()
+                .any(|row| row.len() != self.pages.len() * LANES_PER_PAGE)
+            {
                 bail!("pattern track count mismatch");
             }
         }
@@ -209,7 +238,7 @@ impl Song {
 }
 
 impl Page {
-    fn new(name: &str, channel: u8, percussion: bool, program: u8) -> Self {
+    pub fn new(name: &str, channel: u8, percussion: bool, program: u8) -> Self {
         Self {
             name: name.into(),
             enabled: true,
@@ -219,6 +248,8 @@ impl Page {
             program,
             velocity: 96,
             percussion,
+            target: PageTarget::ConfiguredExternal,
+            setup: Vec::new(),
             lanes: (1..=LANES_PER_PAGE)
                 .map(|lane| Lane {
                     name: format!("L{lane}"),
@@ -226,6 +257,29 @@ impl Page {
                 })
                 .collect(),
         }
+    }
+}
+
+impl Song {
+    pub fn add_page(&mut self, target: PageTarget, channel: u8) -> Result<usize> {
+        if channel > 15 {
+            bail!("MIDI channel out of range");
+        }
+        let number = self.pages.len() + 1;
+        let mut page = Page::new(&format!("PAGE {number}"), channel, false, 0);
+        page.target = target;
+        self.pages.push(page);
+        for pattern in self.patterns.values_mut() {
+            for row in &mut pattern.rows {
+                row.extend(std::iter::repeat(Cell::default()).take(LANES_PER_PAGE));
+            }
+        }
+        self.validate()?;
+        Ok(self.pages.len() - 1)
+    }
+
+    pub fn total_lanes(&self) -> usize {
+        self.pages.len() * LANES_PER_PAGE
     }
 }
 
@@ -301,7 +355,7 @@ pub fn encode(song: &Song) -> Result<String> {
     );
     for (page_index, page) in song.pages.iter().enumerate() {
         out.push_str(&format!(
-            "page={page_index}|{}|{}|{}|{}|{}|{}|{}|{}\n",
+            "page={page_index}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",
             escape(&page.name),
             u8::from(page.enabled),
             page.channel + 1,
@@ -309,13 +363,24 @@ pub fn encode(song: &Song) -> Result<String> {
             page.bank_lsb,
             page.program,
             page.velocity,
-            u8::from(page.percussion)
+            u8::from(page.percussion),
+            target_text(&page.target)
         ));
         for (lane_index, lane) in page.lanes.iter().enumerate() {
             out.push_str(&format!(
                 "lane={page_index}|{lane_index}|{}|{}\n",
                 escape(&lane.name),
                 u8::from(lane.enabled)
+            ));
+        }
+        for message in &page.setup {
+            out.push_str(&format!(
+                "setup={page_index}|{}\n",
+                message
+                    .iter()
+                    .map(|byte| format!("{byte:02X}"))
+                    .collect::<Vec<_>>()
+                    .join(":")
             ));
         }
     }
@@ -347,7 +412,7 @@ pub fn decode(text: &str) -> Result<Song> {
         .strip_prefix("SHSYNTH-SONG ")
         .context("not an SHSynth song")?
         .parse::<u8>()?;
-    if version != 1 && version != SONG_VERSION {
+    if !matches!(version, 1 | 2 | SONG_VERSION) {
         bail!("unsupported song version {version}; file was not changed");
     }
     let mut name = None;
@@ -357,6 +422,7 @@ pub fn decode(text: &str) -> Result<Song> {
     let mut order = None;
     let mut pages = BTreeMap::new();
     let mut lanes = Vec::new();
+    let mut setup = Vec::new();
     let mut legacy_tracks = BTreeMap::new();
     let mut patterns: BTreeMap<u16, Pattern> = BTreeMap::new();
     let mut cells = Vec::new();
@@ -391,13 +457,16 @@ pub fn decode(text: &str) -> Result<Song> {
                         program: midi_value(f[6])?,
                         velocity: midi_value(f[7])?,
                         percussion: f[8] == "1",
+                        target: PageTarget::ConfiguredExternal,
+                        setup: Vec::new(),
                         lanes: Vec::new(),
                     },
                 );
             }
-            "page" if version == SONG_VERSION => {
+            "page" if version >= 2 => {
                 let f = value.split('|').collect::<Vec<_>>();
-                if f.len() != 9 {
+                let expected = if version == 2 { 9 } else { 10 };
+                if f.len() != expected {
                     bail!("invalid page");
                 }
                 pages.insert(
@@ -411,11 +480,18 @@ pub fn decode(text: &str) -> Result<Song> {
                         program: midi_value(f[6])?,
                         velocity: midi_value(f[7])?,
                         percussion: f[8] == "1",
+                        target: if version == 2 {
+                            PageTarget::ConfiguredExternal
+                        } else {
+                            parse_target(f[9])?
+                        },
+                        setup: Vec::new(),
                         lanes: Vec::new(),
                     },
                 );
             }
-            "lane" if version == SONG_VERSION => lanes.push(value.to_owned()),
+            "lane" if version >= 2 => lanes.push(value.to_owned()),
+            "setup" if version == SONG_VERSION => setup.push(value.to_owned()),
             "pattern" => {
                 let (number, rows) = value.split_once('|').context("invalid pattern")?;
                 patterns.insert(number.parse()?, Pattern::empty(rows.parse()?, 0));
@@ -427,15 +503,15 @@ pub fn decode(text: &str) -> Result<Song> {
     if version == 1 && !legacy_tracks.keys().copied().eq(0..legacy_tracks.len()) {
         bail!("legacy tracks must be contiguous");
     }
-    if version == SONG_VERSION && !pages.keys().copied().eq(0..PAGE_COUNT) {
-        bail!("pages must be numbered 0 and 1");
+    if version >= 2 && !pages.keys().copied().eq(0..pages.len()) {
+        bail!("pages must be contiguous from zero");
     }
     let (mut pages, legacy_lane_map) = if version == 1 {
         convert_legacy_pages(&legacy_tracks)
     } else {
         (pages.into_values().collect::<Vec<_>>(), Vec::new())
     };
-    if version == SONG_VERSION {
+    if version >= 2 {
         for value in lanes {
             let f = value.split('|').collect::<Vec<_>>();
             if f.len() != 4 {
@@ -454,9 +530,28 @@ pub fn decode(text: &str) -> Result<Song> {
             });
         }
     }
+    for value in setup {
+        let (page, bytes) = value.split_once('|').context("invalid setup")?;
+        let page = pages
+            .get_mut(page.parse::<usize>()?)
+            .context("setup page missing")?;
+        let message = if bytes.is_empty() {
+            Vec::new()
+        } else {
+            bytes
+                .split(':')
+                .map(|byte| u8::from_str_radix(byte, 16).context("invalid setup byte"))
+                .collect::<Result<Vec<_>>>()?
+        };
+        if message.is_empty() || message.len() > 256 {
+            bail!("setup message must contain 1..=256 bytes");
+        }
+        page.setup.push(message);
+    }
+    let total_lanes = pages.len() * LANES_PER_PAGE;
     for pattern in patterns.values_mut() {
         for row in &mut pattern.rows {
-            row.resize(TOTAL_LANES, Cell::default());
+            row.resize(total_lanes, Cell::default());
         }
     }
     for value in cells {
@@ -548,7 +643,7 @@ pub fn save(base: &Path, song: &Song, overwrite: bool) -> Result<PathBuf> {
             .next()
             .and_then(|header| header.strip_prefix("SHSYNTH-SONG "))
             .and_then(|version| version.parse::<u8>().ok())
-            .is_some_and(|version| version == 1 || version == SONG_VERSION);
+            .is_some_and(|version| matches!(version, 1 | 2 | SONG_VERSION));
         if !supported {
             bail!("refusing to overwrite unsupported/newer song file");
         }
@@ -617,6 +712,7 @@ pub struct ScheduledMessage {
     pub order: usize,
     pub row: usize,
     pub lane: Option<usize>,
+    pub target: Option<PageTarget>,
 }
 
 pub fn schedule(
@@ -626,22 +722,23 @@ pub fn schedule(
     start_row: usize,
 ) -> Result<Vec<ScheduledMessage>> {
     song.validate()?;
-    for page in &song.pages {
-        if !config.channels.contains(&page.channel) {
-            bail!(
-                "song uses MIDI channel {} outside the capability profile",
-                page.channel + 1
-            );
-        }
-        if page.percussion && config.percussion_channel != Some(page.channel) {
-            bail!("song drums page is not on the configured percussion channel");
-        }
-    }
     let mut result = Vec::new();
     let mut at = Duration::ZERO;
     let mut tempo = song.tempo;
-    let mut active: Vec<Option<u8>> = vec![None; TOTAL_LANES];
-    let mut programmed = [false; PAGE_COUNT];
+    let mut active: Vec<Option<u8>> = vec![None; song.total_lanes()];
+    let mut programmed = vec![false; song.pages.len()];
+    for page in song.pages.iter().filter(|page| page.enabled) {
+        for message in &page.setup {
+            push(
+                &mut result,
+                Duration::ZERO,
+                start_order,
+                start_row,
+                message.clone(),
+                Some(page.target.clone()),
+            );
+        }
+    }
     for (order_index, pattern_number) in song.order.iter().enumerate().skip(start_order) {
         let pattern = &song.patterns[pattern_number];
         let first_row = if order_index == start_order {
@@ -655,17 +752,26 @@ pub fn schedule(
             // A row is part of the transport even when it contains no MIDI.
             // Keep this marker ahead of messages at the same instant so the
             // play cursor moves before that row's notes are sent.
-            push(&mut result, at, order_index, row_index, Vec::new());
+            push(&mut result, at, order_index, row_index, Vec::new(), None);
             if config.send_transport {
                 let clocks = (24 / usize::from(song.steps_per_beat)).max(1);
-                for clock in 0..clocks {
-                    push(
-                        &mut result,
-                        at + row_duration.mul_f64(clock as f64 / clocks as f64),
-                        order_index,
-                        row_index,
-                        vec![0xf8],
-                    );
+                let targets = song
+                    .pages
+                    .iter()
+                    .filter(|page| page.enabled)
+                    .map(|page| page.target.clone())
+                    .collect::<BTreeSet<_>>();
+                for target in targets {
+                    for clock in 0..clocks {
+                        push(
+                            &mut result,
+                            at + row_duration.mul_f64(clock as f64 / clocks as f64),
+                            order_index,
+                            row_index,
+                            vec![0xf8],
+                            Some(target.clone()),
+                        );
+                    }
                 }
             }
             for (lane_index, cell) in row.iter().enumerate() {
@@ -705,6 +811,7 @@ pub fn schedule(
                                 row_index,
                                 vec![0x80 | page.channel, old, 0],
                                 lane_index,
+                                &page.target,
                             );
                         }
                         push_lane(
@@ -718,6 +825,7 @@ pub fn schedule(
                                 cell.velocity.unwrap_or(page.velocity),
                             ],
                             lane_index,
+                            &page.target,
                         );
                         active[lane_index] = Some(note);
                         let gate = row_duration.mul_f64(f64::from(song.gate_percent) / 100.0);
@@ -728,6 +836,7 @@ pub fn schedule(
                             row_index,
                             vec![0x80 | page.channel, note, 0],
                             lane_index,
+                            &page.target,
                         );
                     }
                     Note::Off => {
@@ -739,6 +848,7 @@ pub fn schedule(
                                 row_index,
                                 vec![0x80 | page.channel, note, 0],
                                 lane_index,
+                                &page.target,
                             );
                         }
                     }
@@ -753,6 +863,7 @@ pub fn schedule(
                             row_index,
                             vec![0x80 | page.channel, note, 0],
                             lane_index,
+                            &page.target,
                         );
                     }
                 }
@@ -765,6 +876,7 @@ pub fn schedule(
                             row_index,
                             vec![0x80 | page.channel, note, 0],
                             lane_index,
+                            &page.target,
                         );
                         push_lane(
                             &mut result,
@@ -777,6 +889,7 @@ pub fn schedule(
                                 cell.velocity.unwrap_or(page.velocity),
                             ],
                             lane_index,
+                            &page.target,
                         );
                     }
                 }
@@ -794,6 +907,7 @@ pub fn schedule(
                 0,
                 vec![0x80 | page.channel, note, 0],
                 lane_index,
+                &page.target,
             );
         }
     }
@@ -802,7 +916,7 @@ pub fn schedule(
     // the exact end of the scheduled pattern/order span.
     if let Some((order, pattern_number)) = song.order.iter().enumerate().next_back() {
         let row = song.patterns[pattern_number].rows.len().saturating_sub(1);
-        push(&mut result, at, order, row, Vec::new());
+        push(&mut result, at, order, row, Vec::new(), None);
     }
     result.sort_by_key(|message| message.at);
     Ok(result)
@@ -825,6 +939,7 @@ fn append_program(
             order,
             row,
             vec![0xb0 | page.channel, 0, page.bank_msb],
+            Some(page.target.clone()),
         ),
         BankSelectMode::Cc0Cc32 => {
             push(
@@ -833,6 +948,7 @@ fn append_program(
                 order,
                 row,
                 vec![0xb0 | page.channel, 0, page.bank_msb],
+                Some(page.target.clone()),
             );
             push(
                 out,
@@ -840,20 +956,36 @@ fn append_program(
                 order,
                 row,
                 vec![0xb0 | page.channel, 32, page.bank_lsb],
+                Some(page.target.clone()),
             );
         }
     }
     if config.program_changes {
-        push(out, at, order, row, vec![0xc0 | page.channel, program]);
+        push(
+            out,
+            at,
+            order,
+            row,
+            vec![0xc0 | page.channel, program],
+            Some(page.target.clone()),
+        );
     }
 }
-fn push(out: &mut Vec<ScheduledMessage>, at: Duration, order: usize, row: usize, bytes: Vec<u8>) {
+fn push(
+    out: &mut Vec<ScheduledMessage>,
+    at: Duration,
+    order: usize,
+    row: usize,
+    bytes: Vec<u8>,
+    target: Option<PageTarget>,
+) {
     out.push(ScheduledMessage {
         at,
         bytes,
         order,
         row,
         lane: None,
+        target,
     });
 }
 
@@ -864,6 +996,7 @@ fn push_lane(
     row: usize,
     bytes: Vec<u8>,
     lane: usize,
+    target: &PageTarget,
 ) {
     out.push(ScheduledMessage {
         at,
@@ -871,6 +1004,7 @@ fn push_lane(
         order,
         row,
         lane: Some(lane),
+        target: Some(target.clone()),
     });
 }
 
@@ -880,8 +1014,8 @@ fn message_channel(bytes: &[u8]) -> Option<u8> {
     (0x80..=0xef).contains(&status).then_some(status & 0x0f)
 }
 
-pub fn panic_messages(config: &ExternalMidiConfig) -> Vec<Vec<u8>> {
-    let channels = config.channels.iter().copied().collect::<BTreeSet<_>>();
+pub fn panic_messages(channels: impl IntoIterator<Item = u8>) -> Vec<Vec<u8>> {
+    let channels = channels.into_iter().collect::<BTreeSet<_>>();
     channels
         .into_iter()
         .flat_map(|ch| {
@@ -902,13 +1036,14 @@ pub struct SequencerStatus {
     pub row: usize,
     pub error: Option<String>,
     pub generation: u64,
+    pub targets: BTreeMap<PageTarget, Option<String>>,
 }
 enum Transport {
     Play(Song, usize, usize),
     Stop,
     Mute(usize, bool),
-    Thru(Vec<u8>),
-    CancelThru(u8),
+    Thru(PageTarget, Vec<u8>),
+    CancelThru(PageTarget, u8),
     Tempo(u16),
     Shutdown,
 }
@@ -919,12 +1054,14 @@ pub struct LiveInput {
 }
 
 impl LiveInput {
-    pub fn send(&self, message: &[u8]) {
-        let _ = self.tx.send(Transport::Thru(message.to_vec()));
+    pub fn send(&self, target: &PageTarget, message: &[u8]) {
+        let _ = self
+            .tx
+            .send(Transport::Thru(target.clone(), message.to_vec()));
     }
 
-    pub fn cancel(&self, channel: u8) {
-        let _ = self.tx.send(Transport::CancelThru(channel));
+    pub fn cancel(&self, target: &PageTarget, channel: u8) {
+        let _ = self.tx.send(Transport::CancelThru(target.clone(), channel));
     }
 }
 
@@ -935,14 +1072,14 @@ pub struct Sequencer {
     config: ExternalMidiConfig,
 }
 impl Sequencer {
-    pub fn start(config: &ExternalMidiConfig) -> Self {
+    pub fn start(config: &ExternalMidiConfig, instrument: crate::engine::SharedOutput) -> Self {
         let (tx, rx) = mpsc::channel();
         let status = Arc::new(Mutex::new(SequencerStatus::default()));
         let thread_status = Arc::clone(&status);
         let cfg = config.clone();
         let handle = thread::Builder::new()
             .name("shsynth-sequencer".into())
-            .spawn(move || run_transport(rx, thread_status, cfg))
+            .spawn(move || run_transport(rx, thread_status, cfg, instrument))
             .ok();
         Self {
             tx,
@@ -986,7 +1123,10 @@ impl Sequencer {
     }
     pub fn thru(&self, message: &[u8]) {
         if self.config.live_thru {
-            let _ = self.tx.send(Transport::Thru(message.to_vec()));
+            let _ = self.tx.send(Transport::Thru(
+                PageTarget::ConfiguredExternal,
+                message.to_vec(),
+            ));
         }
     }
     pub fn status(&self) -> SequencerStatus {
@@ -995,7 +1135,7 @@ impl Sequencer {
     pub fn unavailable_label(&self) -> String {
         self.status()
             .error
-            .unwrap_or_else(|| "Casio MIDI unavailable".into())
+            .unwrap_or_else(|| "tracker target unavailable".into())
     }
 }
 impl Drop for Sequencer {
@@ -1011,22 +1151,18 @@ fn run_transport(
     rx: mpsc::Receiver<Transport>,
     status: Arc<Mutex<SequencerStatus>>,
     config: ExternalMidiConfig,
+    instrument: crate::engine::SharedOutput,
 ) {
-    let mut output = connect_output(&config).map_err(|e| e.to_string());
-    if output.is_ok() {
-        isolate_external_route(&config);
-    }
-    if let Ok(mut s) = status.lock() {
-        s.available = output.is_ok();
-        s.error = output.as_ref().err().cloned();
-    }
+    let mut outputs = DestinationPool::new(config.clone(), instrument);
     let mut messages = Vec::new();
     let mut index = 0;
     let mut started = Instant::now();
     let mut muted = BTreeSet::new();
-    let mut lane_channels = Vec::new();
+    let mut lane_routes: Vec<(PageTarget, u8)> = Vec::new();
     let mut active_notes: BTreeMap<usize, BTreeSet<u8>> = BTreeMap::new();
-    let mut thru_notes: BTreeMap<u8, BTreeSet<u8>> = BTreeMap::new();
+    let mut note_owners: BTreeMap<(PageTarget, u8, u8), BTreeSet<usize>> = BTreeMap::new();
+    let mut thru_notes: BTreeMap<(PageTarget, u8), BTreeSet<u8>> = BTreeMap::new();
+    let mut transport_targets = BTreeSet::new();
     let mut transport_tempo = config.default_tempo;
     loop {
         let timeout = messages
@@ -1036,13 +1172,26 @@ fn run_transport(
             .min(Duration::from_millis(50));
         match rx.recv_timeout(timeout) {
             Ok(Transport::Play(song, order, row)) => {
-                isolate_external_route(&config);
-                send_panic(&mut output, &config);
-                lane_channels = song
+                cleanup_lanes(&mut outputs, &lane_routes, &mut active_notes);
+                note_owners.clear();
+                cleanup_thru(&mut outputs, &mut thru_notes);
+                lane_routes = song
                     .pages
                     .iter()
-                    .flat_map(|page| std::iter::repeat(page.channel).take(LANES_PER_PAGE))
+                    .flat_map(|page| {
+                        std::iter::repeat((page.target.clone(), page.channel)).take(LANES_PER_PAGE)
+                    })
                     .collect();
+                transport_targets = song
+                    .pages
+                    .iter()
+                    .filter(|page| page.enabled)
+                    .map(|page| page.target.clone())
+                    .collect();
+                for target in &transport_targets {
+                    outputs.refresh(target);
+                }
+                update_target_status(&status, &outputs, &transport_targets);
                 match schedule(&song, &config, order, row) {
                     Ok(planned) => messages = planned,
                     Err(error) => {
@@ -1059,8 +1208,11 @@ fn run_transport(
                 transport_tempo = song.tempo;
                 muted.clear();
                 active_notes.clear();
+                note_owners.clear();
                 if config.send_transport {
-                    let _ = send(&mut output, &[0xfa]);
+                    for target in &transport_targets {
+                        let _ = outputs.send(target, &[0xfa]);
+                    }
                 }
                 if let Ok(mut s) = status.lock() {
                     s.playing = true;
@@ -1071,22 +1223,33 @@ fn run_transport(
             Ok(Transport::Stop) => {
                 messages.clear();
                 index = 0;
-                send_panic(&mut output, &config);
-                active_notes.clear();
+                cleanup_lanes(&mut outputs, &lane_routes, &mut active_notes);
+                note_owners.clear();
+                cleanup_thru(&mut outputs, &mut thru_notes);
                 if config.send_transport {
-                    let _ = send(&mut output, &[0xfc]);
+                    for target in &transport_targets {
+                        let _ = outputs.send(target, &[0xfc]);
+                    }
                 }
                 if let Ok(mut s) = status.lock() {
                     s.playing = false;
                 }
             }
             Ok(Transport::Mute(lane, value)) => {
-                if let Some(channel) = lane_channels.get(lane).copied() {
+                if let Some((target, channel)) = lane_routes.get(lane).cloned() {
                     if value {
                         muted.insert(lane);
                         if let Some(notes) = active_notes.remove(&lane) {
                             for note in notes {
-                                let _ = send(&mut output, &[0x80 | channel, note, 0]);
+                                if release_note_owner(
+                                    &mut note_owners,
+                                    lane,
+                                    &target,
+                                    channel,
+                                    note,
+                                ) {
+                                    let _ = outputs.send(&target, &[0x80 | channel, note, 0]);
+                                }
                             }
                         }
                     } else {
@@ -1094,8 +1257,8 @@ fn run_transport(
                     }
                 }
             }
-            Ok(Transport::Thru(message)) => {
-                if let Err(error) = send(&mut output, &message) {
+            Ok(Transport::Thru(target, message)) => {
+                if let Err(error) = outputs.send(&target, &message) {
                     if let Ok(mut s) = status.lock() {
                         s.available = false;
                         s.error = Some(error);
@@ -1104,10 +1267,13 @@ fn run_transport(
                     let channel = status & 0x0f;
                     match status & 0xf0 {
                         0x90 if *velocity > 0 => {
-                            thru_notes.entry(channel).or_default().insert(*note);
+                            thru_notes
+                                .entry((target.clone(), channel))
+                                .or_default()
+                                .insert(*note);
                         }
                         0x80 | 0x90 => {
-                            if let Some(notes) = thru_notes.get_mut(&channel) {
+                            if let Some(notes) = thru_notes.get_mut(&(target.clone(), channel)) {
                                 notes.remove(note);
                             }
                         }
@@ -1115,10 +1281,10 @@ fn run_transport(
                     }
                 }
             }
-            Ok(Transport::CancelThru(channel)) => {
-                if let Some(notes) = thru_notes.remove(&channel) {
+            Ok(Transport::CancelThru(target, channel)) => {
+                if let Some(notes) = thru_notes.remove(&(target.clone(), channel)) {
                     for note in notes {
-                        let _ = send(&mut output, &[0x80 | channel, note, 0]);
+                        let _ = outputs.send(&target, &[0x80 | channel, note, 0]);
                     }
                 }
             }
@@ -1128,7 +1294,9 @@ fn run_transport(
                 transport_tempo = bpm;
             }
             Ok(Transport::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                send_panic(&mut output, &config);
+                cleanup_lanes(&mut outputs, &lane_routes, &mut active_notes);
+                note_owners.clear();
+                cleanup_thru(&mut outputs, &mut thru_notes);
                 break;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -1138,10 +1306,36 @@ fn run_transport(
             .filter(|m| started + m.at <= Instant::now())
         {
             let muted_message = message.lane.is_some_and(|lane| muted.contains(&lane));
-            let send_error = if message.bytes.is_empty() || muted_message {
+            let mut shared_note_off = false;
+            if !muted_message {
+                if let (Some(lane), Some(target), [midi_status, note, ..]) = (
+                    message.lane,
+                    message.target.as_ref(),
+                    message.bytes.as_slice(),
+                ) {
+                    let channel = midi_status & 0x0f;
+                    match midi_status & 0xf0 {
+                        0x90 if message.bytes.get(2).copied().unwrap_or(0) > 0 => {
+                            note_owners
+                                .entry((target.clone(), channel, *note))
+                                .or_default()
+                                .insert(lane);
+                        }
+                        0x80 | 0x90 => {
+                            shared_note_off =
+                                !release_note_owner(&mut note_owners, lane, target, channel, *note);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let send_error = if message.bytes.is_empty() || muted_message || shared_note_off {
                 None
             } else {
-                send(&mut output, &message.bytes).err()
+                message
+                    .target
+                    .as_ref()
+                    .and_then(|target| outputs.send(target, &message.bytes).err())
             };
             if !muted_message {
                 if let (Some(lane), [status, note, ..]) = (message.lane, message.bytes.as_slice()) {
@@ -1159,14 +1353,13 @@ fn run_transport(
                 }
             }
             if let Some(error) = send_error {
-                messages.clear();
-                index = 0;
                 if let Ok(mut s) = status.lock() {
                     s.available = false;
-                    s.playing = false;
+                    if let Some(target) = &message.target {
+                        s.targets.insert(target.clone(), Some(error.clone()));
+                    }
                     s.error = Some(error);
                 }
-                continue;
             }
             if let Ok(mut s) = status.lock() {
                 s.order = message.order;
@@ -1175,10 +1368,156 @@ fn run_transport(
             index += 1;
         }
         if !messages.is_empty() && index == messages.len() {
-            send_panic(&mut output, &config);
-            active_notes.clear();
+            cleanup_lanes(&mut outputs, &lane_routes, &mut active_notes);
+            note_owners.clear();
             index = 0;
             started = Instant::now();
+        }
+    }
+}
+
+struct DestinationPool {
+    config: ExternalMidiConfig,
+    instrument: crate::engine::SharedOutput,
+    hardware: BTreeMap<PageTarget, std::result::Result<MidiOutputConnection, String>>,
+}
+
+impl DestinationPool {
+    fn new(config: ExternalMidiConfig, instrument: crate::engine::SharedOutput) -> Self {
+        Self {
+            config,
+            instrument,
+            hardware: BTreeMap::new(),
+        }
+    }
+
+    fn ensure(&mut self, target: &PageTarget) {
+        if matches!(target, PageTarget::ActiveInstrument) || self.hardware.contains_key(target) {
+            return;
+        }
+        let connection = connect_target(&self.config, target).map_err(|error| error.to_string());
+        self.hardware.insert(target.clone(), connection);
+    }
+
+    fn refresh(&mut self, target: &PageTarget) {
+        if target != &PageTarget::ActiveInstrument {
+            self.hardware.remove(target);
+        }
+        self.ensure(target);
+    }
+
+    fn send(&mut self, target: &PageTarget, bytes: &[u8]) -> std::result::Result<(), String> {
+        if target == &PageTarget::ActiveInstrument {
+            return self
+                .instrument
+                .lock()
+                .map_err(|_| "active instrument route lock failed".to_string())?
+                .as_mut()
+                .ok_or_else(|| "active SHSynth instrument is offline".to_string())?
+                .send(bytes)
+                .map_err(|error| error.to_string());
+        }
+        self.ensure(target);
+        let output = self.hardware.get_mut(target).expect("target was ensured");
+        let result = match output {
+            Ok(output) => output.send(bytes).map_err(|error| error.to_string()),
+            Err(error) => return Err(error.clone()),
+        };
+        if let Err(error) = &result {
+            *output = Err(error.clone());
+        }
+        result
+    }
+
+    fn error(&self, target: &PageTarget) -> Option<String> {
+        if target == &PageTarget::ActiveInstrument {
+            return self
+                .instrument
+                .lock()
+                .ok()
+                .and_then(|output| output.is_none().then(|| "instrument offline".into()));
+        }
+        self.hardware
+            .get(target)
+            .and_then(|output| output.as_ref().err().cloned())
+    }
+}
+
+fn update_target_status(
+    status: &Arc<Mutex<SequencerStatus>>,
+    outputs: &DestinationPool,
+    targets: &BTreeSet<PageTarget>,
+) {
+    if let Ok(mut status) = status.lock() {
+        status.targets = targets
+            .iter()
+            .map(|target| (target.clone(), outputs.error(target)))
+            .collect();
+        status.available = status.targets.values().any(Option::is_none);
+        status.error = status.targets.iter().find_map(|(target, error)| {
+            error
+                .as_ref()
+                .map(|error| format!("{}: {error}", target.label()))
+        });
+    }
+}
+
+fn cleanup_lanes(
+    outputs: &mut DestinationPool,
+    lane_routes: &[(PageTarget, u8)],
+    active: &mut BTreeMap<usize, BTreeSet<u8>>,
+) {
+    for (target, message) in planned_lane_cleanup(lane_routes, &std::mem::take(active)) {
+        let _ = outputs.send(&target, &message);
+    }
+}
+
+fn planned_lane_cleanup(
+    lane_routes: &[(PageTarget, u8)],
+    active: &BTreeMap<usize, BTreeSet<u8>>,
+) -> Vec<(PageTarget, Vec<u8>)> {
+    active
+        .iter()
+        .flat_map(|(lane, notes)| {
+            lane_routes
+                .get(*lane)
+                .into_iter()
+                .flat_map(move |(target, channel)| {
+                    notes
+                        .iter()
+                        .map(move |note| (target.clone(), vec![0x80 | channel, *note, 0]))
+                })
+        })
+        .collect()
+}
+
+fn release_note_owner(
+    owners: &mut BTreeMap<(PageTarget, u8, u8), BTreeSet<usize>>,
+    lane: usize,
+    target: &PageTarget,
+    channel: u8,
+    note: u8,
+) -> bool {
+    let key = (target.clone(), channel, note);
+    let last = if let Some(lanes) = owners.get_mut(&key) {
+        lanes.remove(&lane);
+        lanes.is_empty()
+    } else {
+        true
+    };
+    if last {
+        owners.remove(&key);
+    }
+    last
+}
+
+fn cleanup_thru(
+    outputs: &mut DestinationPool,
+    active: &mut BTreeMap<(PageTarget, u8), BTreeSet<u8>>,
+) {
+    for ((target, channel), notes) in std::mem::take(active) {
+        for note in notes {
+            let _ = outputs.send(&target, &[0x80 | channel, note, 0]);
         }
     }
 }
@@ -1196,13 +1535,20 @@ fn rescale_schedule(
         message.at = elapsed + remaining.mul_f64(scale);
     }
 }
-fn isolate_external_route(config: &ExternalMidiConfig) {
-    crate::engine::retain_midi_destination(&config.client_name, &config.output_match);
-}
-fn connect_output(config: &ExternalMidiConfig) -> Result<MidiOutputConnection> {
-    if !config.enabled {
-        bail!("Casio MIDI disabled (tracker remains offline)");
-    }
+fn connect_target(
+    config: &ExternalMidiConfig,
+    target: &PageTarget,
+) -> Result<MidiOutputConnection> {
+    let wanted = match target {
+        PageTarget::ConfiguredExternal => {
+            if !config.enabled {
+                bail!("configured MIDI output is disabled");
+            }
+            &config.output_match
+        }
+        PageTarget::Midi(name) => name,
+        PageTarget::ActiveInstrument => bail!("active instrument uses the monitored route"),
+    };
     let output = MidiOutput::new(&config.client_name)?;
     let port = output
         .ports()
@@ -1211,32 +1557,28 @@ fn connect_output(config: &ExternalMidiConfig) -> Result<MidiOutputConnection> {
             output
                 .port_name(p)
                 .map(|n| {
-                    n.to_lowercase()
-                        .contains(&config.output_match.to_lowercase())
+                    n == *wanted
+                        || (matches!(target, PageTarget::ConfiguredExternal)
+                            && n.to_lowercase().contains(&wanted.to_lowercase()))
                 })
                 .unwrap_or(false)
         })
-        .context("Casio MIDI unavailable")?;
+        .with_context(|| format!("MIDI output {wanted:?} is offline"))?;
     output
-        .connect(&port, "SHSynth accompaniment")
+        .connect(&port, "SHSynth tracker page")
         .map_err(|e| anyhow!(e.to_string()))
 }
-fn send(
-    output: &mut std::result::Result<MidiOutputConnection, String>,
-    bytes: &[u8],
-) -> std::result::Result<(), String> {
-    match output {
-        Ok(output) => output.send(bytes).map_err(|error| error.to_string()),
-        Err(error) => Err(error.clone()),
-    }
-}
-fn send_panic(
-    output: &mut std::result::Result<MidiOutputConnection, String>,
-    config: &ExternalMidiConfig,
-) {
-    for message in panic_messages(config) {
-        let _ = send(output, &message);
-    }
+
+pub fn available_midi_outputs(client_name: &str) -> Result<Vec<String>> {
+    let output = MidiOutput::new(client_name)?;
+    let mut names = output
+        .ports()
+        .iter()
+        .filter_map(|port| output.port_name(port).ok())
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    Ok(names)
 }
 
 pub fn diagnostic(config: &ExternalMidiConfig) -> Result<String> {
@@ -1263,6 +1605,8 @@ pub fn diagnostic(config: &ExternalMidiConfig) -> Result<String> {
         program: 0,
         velocity: 64,
         percussion: false,
+        target: PageTarget::ConfiguredExternal,
+        setup: Vec::new(),
         lanes: (1..=LANES_PER_PAGE)
             .map(|lane| Lane {
                 name: format!("L{lane}"),
@@ -1278,6 +1622,7 @@ pub fn diagnostic(config: &ExternalMidiConfig) -> Result<String> {
         0,
         0,
         vec![0x90 | page.channel, 60, 64],
+        Some(page.target.clone()),
     );
     push(
         &mut dry,
@@ -1285,6 +1630,7 @@ pub fn diagnostic(config: &ExternalMidiConfig) -> Result<String> {
         0,
         0,
         vec![0x80 | page.channel, 60, 0],
+        Some(page.target.clone()),
     );
     if let Some(channel) = config.percussion_channel {
         if config.program_changes {
@@ -1295,23 +1641,32 @@ pub fn diagnostic(config: &ExternalMidiConfig) -> Result<String> {
                     0,
                     0,
                     vec![0xc0 | channel, program],
+                    Some(page.target.clone()),
                 );
             }
         }
-        push(&mut dry, Duration::ZERO, 0, 0, vec![0x90 | channel, 36, 96]);
+        push(
+            &mut dry,
+            Duration::ZERO,
+            0,
+            0,
+            vec![0x90 | channel, 36, 96],
+            Some(page.target.clone()),
+        );
         push(
             &mut dry,
             Duration::from_millis(125),
             0,
             0,
             vec![0x80 | channel, 36, 0],
+            Some(page.target.clone()),
         );
     }
     let messages = dry
         .iter()
         .map(|m| format!("{:?} @ {}ms", m.bytes, m.at.as_millis()))
         .chain(
-            panic_messages(config)
+            panic_messages(config.channels.iter().copied())
                 .iter()
                 .map(|m| format!("{m:?} panic")),
         )
@@ -1328,6 +1683,25 @@ fn escape(value: &str) -> String {
         .replace('|', "%7C")
         .replace('\n', "%0A")
         .replace('\r', "%0D")
+}
+fn target_text(target: &PageTarget) -> String {
+    match target {
+        PageTarget::ActiveInstrument => "instrument".into(),
+        PageTarget::ConfiguredExternal => "configured".into(),
+        PageTarget::Midi(name) => format!("midi:{}", escape(name)),
+    }
+}
+fn parse_target(value: &str) -> Result<PageTarget> {
+    match value {
+        "instrument" => Ok(PageTarget::ActiveInstrument),
+        "configured" => Ok(PageTarget::ConfiguredExternal),
+        _ => value
+            .strip_prefix("midi:")
+            .map(unescape)
+            .transpose()?
+            .map(PageTarget::Midi)
+            .context("invalid page target"),
+    }
 }
 fn unescape(value: &str) -> Result<String> {
     Ok(value
@@ -1460,7 +1834,7 @@ mod tests {
     fn row_timing_pattern_transition_and_tempo() {
         let c = config();
         let mut s = Song::new(&c);
-        s.patterns.insert(1, Pattern::empty(64, TOTAL_LANES));
+        s.patterns.insert(1, Pattern::empty(64, s.total_lanes()));
         s.order.push(1);
         s.patterns.get_mut(&0).unwrap().rows[1][0] = Cell {
             note: Note::On(61),
@@ -1480,7 +1854,8 @@ mod tests {
     fn live_tempo_change_rescales_remaining_schedule_monotonically() {
         let c = config();
         let mut song = Song::new(&c);
-        song.patterns.insert(0, Pattern::empty(4, TOTAL_LANES));
+        song.patterns
+            .insert(0, Pattern::empty(4, song.total_lanes()));
         let mut messages = schedule(&song, &c, 0, 0).unwrap();
         rescale_schedule(&mut messages, 1, Duration::from_millis(100), 120, 60);
         let times = messages
@@ -1495,7 +1870,7 @@ mod tests {
     #[test]
     fn panic_covers_every_channel_with_sound_off() {
         let c = config();
-        let p = panic_messages(&c);
+        let p = panic_messages(c.channels.iter().copied());
         for ch in c.channels {
             assert!(p.contains(&vec![0xb0 | ch, 120, 0]));
             assert!(p.contains(&vec![0xb0 | ch, 123, 0]));
@@ -1549,7 +1924,7 @@ mod tests {
     fn empty_rows_advance_at_row_timing_and_hold_the_loop_boundary() {
         let c = config();
         let mut s = Song::new(&c);
-        s.patterns.insert(0, Pattern::empty(4, TOTAL_LANES));
+        s.patterns.insert(0, Pattern::empty(4, s.total_lanes()));
         let m = schedule(&s, &c, 0, 0).unwrap();
         let ticks = m
             .iter()
@@ -1689,7 +2064,7 @@ mod tests {
         assert_eq!(song.pages[0].channel, 0);
         assert_eq!(song.pages[1].channel, 1);
         assert_eq!(song.pages[1].program, 9);
-        assert!(encode(&song).unwrap().starts_with("SHSYNTH-SONG 2\n"));
+        assert!(encode(&song).unwrap().starts_with("SHSYNTH-SONG 3\n"));
     }
 
     #[test]
@@ -1731,12 +2106,137 @@ mod tests {
     fn disabled_or_missing_destination_is_an_offline_error_only() {
         let mut c = config();
         c.enabled = false;
-        assert!(connect_output(&c)
+        assert!(connect_target(&c, &PageTarget::ConfiguredExternal)
             .err()
             .expect("disabled output must stay offline")
             .to_string()
             .contains("disabled"));
         let song = Song::new(&c);
         assert!(schedule(&song, &c, 0, 0).is_ok());
+    }
+
+    #[test]
+    fn pages_can_be_added_and_every_page_stays_four_lanes_wide() {
+        let mut song = Song::new(&config());
+        song.add_page(PageTarget::Midi("Port B".into()), 4).unwrap();
+        song.add_page(PageTarget::ActiveInstrument, 7).unwrap();
+        assert_eq!(song.pages.len(), 4);
+        assert!(song
+            .pages
+            .iter()
+            .all(|page| page.lanes.len() == LANES_PER_PAGE));
+        assert!(song.patterns[&0].rows.iter().all(|row| row.len() == 16));
+    }
+
+    #[test]
+    fn pages_schedule_simultaneously_to_independent_devices_and_channels() {
+        let c = config();
+        let mut song = Song::new(&c);
+        song.pages[0].target = PageTarget::Midi("Hardware A".into());
+        song.pages[0].channel = 2;
+        song.pages[1].target = PageTarget::Midi("Hardware B".into());
+        song.pages[1].channel = 11;
+        let row = &mut song.patterns.get_mut(&0).unwrap().rows[0];
+        row[0].note = Note::On(60);
+        row[4].note = Note::On(36);
+        let notes = schedule(&song, &c, 0, 0)
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.bytes.first().is_some_and(|b| b & 0xf0 == 0x90))
+            .collect::<Vec<_>>();
+        assert!(notes.iter().any(|message| {
+            message.target == Some(PageTarget::Midi("Hardware A".into()))
+                && message.bytes[0] == 0x92
+        }));
+        assert!(notes.iter().any(|message| {
+            message.target == Some(PageTarget::Midi("Hardware B".into()))
+                && message.bytes[0] == 0x9b
+        }));
+    }
+
+    #[test]
+    fn active_instrument_and_shared_device_channels_remain_distinct() {
+        let c = config();
+        let mut song = Song::new(&c);
+        song.pages[0].target = PageTarget::ActiveInstrument;
+        song.pages[0].channel = 5;
+        song.pages[1].target = PageTarget::Midi("One box".into());
+        song.pages[1].channel = 9;
+        song.add_page(PageTarget::Midi("One box".into()), 10)
+            .unwrap();
+        let row = &mut song.patterns.get_mut(&0).unwrap().rows[0];
+        row[0].note = Note::On(60);
+        row[4].note = Note::On(61);
+        row[8].note = Note::On(62);
+        let notes = schedule(&song, &c, 0, 0)
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.bytes.first().is_some_and(|b| b & 0xf0 == 0x90))
+            .collect::<Vec<_>>();
+        assert!(notes
+            .iter()
+            .any(|m| { m.target == Some(PageTarget::ActiveInstrument) && m.bytes[0] == 0x95 }));
+        assert!(notes.iter().any(|m| m.bytes[0] == 0x99));
+        assert!(notes.iter().any(|m| m.bytes[0] == 0x9a));
+    }
+
+    #[test]
+    fn offline_exact_target_and_setup_round_trip_without_rebinding() {
+        let mut song = Song::new(&config());
+        song.pages[0].target = PageTarget::Midi("Missing forever".into());
+        song.pages[0].setup = vec![vec![0xb3, 0, 12], vec![0xc3, 7]];
+        let decoded = decode(&encode(&song).unwrap()).unwrap();
+        assert_eq!(decoded, song);
+        assert!(schedule(&decoded, &config(), 0, 0)
+            .unwrap()
+            .iter()
+            .any(|m| {
+                m.target == Some(PageTarget::Midi("Missing forever".into()))
+                    && m.bytes == [0xb3, 0, 12]
+            }));
+    }
+
+    #[test]
+    fn version_two_converts_to_configured_route_and_version_three() {
+        let v2 = "SHSYNTH-SONG 2\nname=v2\ntempo=120\nsteps=4\ngate=80\norder=0\npage=0|MELODY|1|1|0|0|0|96|0\npage=1|DRUMS|1|2|0|0|9|96|1\nlane=0|0|L1|1\nlane=0|1|L2|1\nlane=0|2|L3|1\nlane=0|3|L4|1\nlane=1|0|L1|1\nlane=1|1|L2|1\nlane=1|2|L3|1\nlane=1|3|L4|1\npattern=0|1\ncell=0|0|0|60|96|-|-\n";
+        let song = decode(v2).unwrap();
+        assert!(song
+            .pages
+            .iter()
+            .all(|page| page.target == PageTarget::ConfiguredExternal));
+        assert!(encode(&song).unwrap().starts_with("SHSYNTH-SONG 3\n"));
+    }
+
+    #[test]
+    fn cleanup_is_owned_by_lane_destination_and_channel() {
+        let routes = vec![
+            (PageTarget::Midi("A".into()), 0),
+            (PageTarget::Midi("A".into()), 1),
+            (PageTarget::ActiveInstrument, 0),
+        ];
+        let active = BTreeMap::from([
+            (0, BTreeSet::from([60])),
+            (1, BTreeSet::from([61])),
+            (2, BTreeSet::from([62])),
+        ]);
+        assert_eq!(
+            planned_lane_cleanup(&routes, &active),
+            vec![
+                (PageTarget::Midi("A".into()), vec![0x80, 60, 0]),
+                (PageTarget::Midi("A".into()), vec![0x81, 61, 0]),
+                (PageTarget::ActiveInstrument, vec![0x80, 62, 0]),
+            ]
+        );
+    }
+
+    #[test]
+    fn shared_note_is_released_only_after_its_last_lane_owner() {
+        let target = PageTarget::Midi("shared".into());
+        let key = (target.clone(), 3, 60);
+        let mut owners = BTreeMap::from([(key.clone(), BTreeSet::from([0, 1]))]);
+        assert!(!release_note_owner(&mut owners, 0, &target, 3, 60));
+        assert_eq!(owners[&key], BTreeSet::from([1]));
+        assert!(release_note_owner(&mut owners, 1, &target, 3, 60));
+        assert!(!owners.contains_key(&key));
     }
 }

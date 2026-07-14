@@ -49,12 +49,13 @@ MIDI recording state, and the 12 hands-on synthv1 controls.
 
 ### MIDI routing
 
-The routing setup can choose:
+The routing setup and song pages can choose:
 
 - the controller MIDI input;
 - the MIDI destination for each software synth;
-- the external MIDI output;
-- external MIDI channels and drum notes;
+- a different hardware MIDI output and channel for every tracker page;
+- the active SHSynth software instrument as a tracker-page target;
+- a compatibility/default external MIDI output and optional drum note map;
 - live thru, program changes, bank select, and MIDI transport;
 - the left and right JACK playback ports;
 - the left and right JACK recording ports.
@@ -68,14 +69,17 @@ The pattern screen is based on the quick top-to-bottom flow of FastTracker II.
 It has rows, lanes, pages, an order list, step entry, note off, blank steps,
 program changes, delay, retrigger, cut, tempo changes, mute, and looped play.
 
-The current song has two four-lane pages:
+Every page has four note lanes. A new song starts with `MELODY` and `DRUMS`,
+but it can have more pages. Each page stores its own target device and MIDI
+channel. Pages can play together through several hardware outputs and the one
+active SHSynth software instrument. A MIDI chord can fill up to four lanes in
+one step. Notes keep their velocity and the cursor moves to the next row.
 
-- `MELODY`;
-- `DRUMS`.
-
-Both pages can play at the same time. A MIDI chord can fill up to four lanes in
-one step. Notes keep their velocity and the cursor moves to the next row. A
-single controller note also enters one step.
+Open **PAGES** to select a page, add a four-lane page, choose a currently
+available MIDI output or the active SHSynth instrument, and choose channel
+1–16. Press **DONE** to keep the changes or **CANCEL** to restore the song as
+it was. If saved hardware is unplugged, the page says `OFFLINE`; its notes and
+saved target are kept and the page remains editable.
 
 Patterns can use:
 
@@ -91,7 +95,7 @@ eight command pads are:
 
 | Pad | Action |
 |---|---|
-| 1 | FILE |
+| 1 | PAGES |
 | 2 | EDIT |
 | 3 | LANE− |
 | 4 | LANE+ |
@@ -103,6 +107,22 @@ eight command pads are:
 While editing, the main encoder moves through rows. Pressing it adds a blank
 step. The ERASE pad clears the selected cell and moves down one row. Hold the
 TAP pad and turn the encoder to change tempo.
+
+The page-management pad layout is:
+
+| Pad | Action |
+|---|---|
+| 1 | FILE |
+| 2 | ADD four-lane page |
+| 3 | PAGE− |
+| 4 | PAGE+ |
+| 5 | CANCEL / BACK |
+| 6 | TARGET |
+| 7 | CHANNEL |
+| 8 | DONE / CONFIRM |
+
+The main encoder also selects pages and changes target/channel choices. Its
+press confirms the current choice.
 
 ### MIDI ideas
 
@@ -120,21 +140,13 @@ and errors.
 An interrupted recording stays as `.wav.part`. SHSynth tries to recover it on
 the next recording start.
 
-## Where this is going
+## Page routing and the first test rig
 
-The Casiotone route was the first test, not the final design. The next pattern
-routing work is:
-
-- choose a MIDI output device for each page;
-- choose the output channel for each page;
-- add an optional MIDI setup sequence for each device;
-- add another FT2 page that can drive the active SHSynth instrument;
-- let more pages drive more software and hardware instruments.
-
-The short-term goal is to chain several MIDI devices and control a small
-orchestra from one Raspberry Pi. Pattern data already stores page roles,
-channels, programs, and lanes. The next step is to move the remaining shared
-output settings into each page.
+SHSynth is a Raspberry Pi mini DAW and MIDI routing hub, not a controller for
+one keyboard. The Casiotone was only the proof-of-concept hardware device.
+Current songs store page targets and channels directly. A reserved per-page
+MIDI setup list is also preserved by the song format for later work, but there
+is intentionally no large setup-message editor on the small tracker screen.
 
 ## FastTracker II credit
 
@@ -206,6 +218,7 @@ tree somewhere else.
 - **Playback:** play, view notes and chords, adjust synthv1, and record ideas.
 - **Ideas:** load, preview, play, save, and delete MIDI ideas.
 - **FT2:** edit and play patterns.
+- **Pages:** add/select four-lane pages and set each target and channel.
 - **Files:** manage songs and patterns.
 - **Audio Recorder:** record the configured JACK stereo input.
 
@@ -240,7 +253,7 @@ Important `shsynth.conf` groups:
 | `fluidsynth.*` | FluidSynth command, SoundFonts, gain, and MIDI port |
 | `midi.*` | controller input and automatic routing |
 | `audio.*` | JACK playback outputs |
-| `external_midi.*` | current FT2 hardware output and channels |
+| `external_midi.*` | compatibility/default tracker route, timing, program/bank and drum-map defaults |
 | `capture.*` | JACK recording input and output directory |
 
 List or change controller mappings with:
@@ -281,7 +294,11 @@ shr casio diagnostic
 
 `shr casio diagnostic` is an old command name from the first test rig. It does
 not send MIDI. It lists output ports and shows the messages that would be used.
-It will get a hardware-neutral name as routing becomes page-based.
+The tracker UI itself is device-neutral and stores exact selected ports in the
+song.
+
+See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for page targets, song
+format compatibility, and offline-device behavior.
 
 ## License
 

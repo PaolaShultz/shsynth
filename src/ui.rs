@@ -8,7 +8,7 @@ use crate::navigation::{self, Action, Screen};
 use crate::pads::TapTempo;
 use crate::preset::{BackendKind, Catalog, Preset};
 use crate::recording::{self, Recorder, TimedEvent};
-use crate::sequencer::{self, Cell, GestureCapture, Note, Song, LANES_PER_PAGE, TOTAL_LANES};
+use crate::sequencer::{self, Cell, GestureCapture, Note, PageTarget, Song, LANES_PER_PAGE};
 use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, MouseButton, MouseEvent, MouseEventKind},
@@ -67,6 +67,13 @@ struct Playback {
     index: usize,
     started: Instant,
 }
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum PageManagerMode {
+    #[default]
+    Pages,
+    Target,
+    Channel,
+}
 struct App {
     catalogs: Vec<Catalog>,
     backend_index: usize,
@@ -117,6 +124,12 @@ struct App {
     song_previewing: bool,
     sequencer: sequencer::Sequencer,
     tracker_live_input: sequencer::LiveInput,
+    page_manager_original: Option<Song>,
+    page_manager_mode: PageManagerMode,
+    page_target_candidates: Vec<PageTarget>,
+    available_page_outputs: Vec<String>,
+    page_target_selected: usize,
+    page_channel_draft: u8,
     audio_recorder: AudioRecorder,
 }
 impl App {
@@ -138,7 +151,8 @@ impl App {
             .map(|catalog| catalog.presets.clone())
             .unwrap_or_default();
         let song = Song::new(&config.external_midi);
-        let sequencer = sequencer::Sequencer::start(&config.external_midi);
+        let sequencer =
+            sequencer::Sequencer::start(&config.external_midi, Arc::clone(&midi_output));
         let tracker_live_input = sequencer.live_input();
         if let Ok(mut input) = tracker_input.lock() {
             *input = Some(tracker_live_input.clone());
@@ -194,6 +208,12 @@ impl App {
             song_previewing: false,
             sequencer,
             tracker_live_input,
+            page_manager_original: None,
+            page_manager_mode: PageManagerMode::Pages,
+            page_target_candidates: Vec::new(),
+            available_page_outputs: Vec::new(),
+            page_target_selected: 0,
+            page_channel_draft: 0,
             audio_recorder,
         }
     }
@@ -315,7 +335,7 @@ impl App {
         self.tracker_gesture.cancel();
         self.tracker_gesture_anchor = None;
         if let Some(page) = self.song.pages.get(self.tracker_page) {
-            self.tracker_live_input.cancel(page.channel);
+            self.tracker_live_input.cancel(&page.target, page.channel);
         }
     }
     fn tracker_single_note(&mut self, note: u8, velocity: u8) {
@@ -386,6 +406,7 @@ impl App {
         if let Ok(mut route) = self.tracker_route.lock() {
             route.configure(
                 self.screen == Screen::Tracker && self.tracker_edit,
+                page.target.clone(),
                 page.channel,
                 page.percussion,
                 page.program,
@@ -398,7 +419,7 @@ impl App {
         let next = if direction < 0 {
             current.saturating_sub(1)
         } else {
-            (current + 1).min(TOTAL_LANES - 1)
+            (current + 1).min(self.song.total_lanes().saturating_sub(1))
         };
         let page = next / LANES_PER_PAGE;
         self.cancel_tracker_gesture();
@@ -411,6 +432,192 @@ impl App {
         self.tracker_page = (self.tracker_page + 1) % self.song.pages.len().max(1);
         self.sync_tracker_route();
         self.status = format!("{} page", self.song.pages[self.tracker_page].name);
+    }
+    fn refresh_page_targets(&mut self) {
+        let mut targets = vec![PageTarget::ActiveInstrument];
+        if !self.config.external_midi.output_match.is_empty() {
+            targets.push(PageTarget::ConfiguredExternal);
+        }
+        if let Ok(outputs) =
+            sequencer::available_midi_outputs(&self.config.external_midi.client_name)
+        {
+            let managed = [
+                self.config.midi_output_match.as_str(),
+                self.config.yoshimi.backend.midi_output_match.as_str(),
+                self.config.fluidsynth.backend.midi_output_match.as_str(),
+            ];
+            self.available_page_outputs = outputs
+                .into_iter()
+                .filter(|name| {
+                    let name = name.to_lowercase();
+                    !managed
+                        .iter()
+                        .any(|needle| !needle.is_empty() && name.contains(&needle.to_lowercase()))
+                })
+                .collect();
+            targets.extend(
+                self.available_page_outputs
+                    .iter()
+                    .cloned()
+                    .map(PageTarget::Midi),
+            );
+        } else {
+            self.available_page_outputs.clear();
+        }
+        if let Some(target) = self
+            .song
+            .pages
+            .get(self.tracker_page)
+            .map(|page| page.target.clone())
+        {
+            targets.push(target);
+        }
+        targets.sort();
+        targets.dedup();
+        self.page_target_candidates = targets;
+    }
+    fn target_online(&self, target: &PageTarget) -> bool {
+        match target {
+            PageTarget::ActiveInstrument => self.engine.is_some(),
+            PageTarget::ConfiguredExternal => {
+                self.config.external_midi.enabled
+                    && self.available_page_outputs.iter().any(|name| {
+                        name.to_lowercase()
+                            .contains(&self.config.external_midi.output_match.to_lowercase())
+                    })
+            }
+            PageTarget::Midi(name) => self.available_page_outputs.contains(name),
+        }
+    }
+    fn open_page_manager(&mut self) {
+        self.tracker_stop();
+        self.set_tracker_edit(false);
+        self.page_manager_original = Some(self.song.clone());
+        self.page_manager_mode = PageManagerMode::Pages;
+        self.refresh_page_targets();
+        self.screen = Screen::TrackerPages;
+        self.status = "select page · TARGET or CHANNEL · DONE saves changes".into();
+    }
+    fn cancel_page_manager(&mut self) {
+        if let Some(song) = self.page_manager_original.take() {
+            self.song = song;
+        }
+        self.tracker_page = self
+            .tracker_page
+            .min(self.song.pages.len().saturating_sub(1));
+        self.tracker_track = self.tracker_track.min(LANES_PER_PAGE - 1);
+        self.page_manager_mode = PageManagerMode::Pages;
+        self.screen = Screen::Tracker;
+        self.sync_tracker_route();
+        self.status = "page changes cancelled".into();
+    }
+    fn confirm_page_manager(&mut self) {
+        if self.page_manager_mode != PageManagerMode::Pages {
+            self.confirm_page_field();
+            return;
+        }
+        self.page_manager_original = None;
+        self.screen = Screen::Tracker;
+        self.sync_tracker_route();
+        self.status = format!("{} pages ready", self.song.pages.len());
+    }
+    fn move_page_selection(&mut self, direction: i8) {
+        if self.page_manager_mode != PageManagerMode::Pages {
+            return;
+        }
+        self.tracker_page = if direction < 0 {
+            self.tracker_page.saturating_sub(1)
+        } else {
+            (self.tracker_page + 1).min(self.song.pages.len().saturating_sub(1))
+        };
+        self.refresh_page_targets();
+    }
+    fn add_tracker_page(&mut self) {
+        if self.page_manager_mode != PageManagerMode::Pages {
+            return;
+        }
+        let target = self
+            .song
+            .pages
+            .get(self.tracker_page)
+            .map(|page| page.target.clone())
+            .unwrap_or(PageTarget::ConfiguredExternal);
+        let channel = self
+            .song
+            .pages
+            .get(self.tracker_page)
+            .map_or(0, |page| page.channel);
+        match self.song.add_page(target, channel) {
+            Ok(page) => {
+                self.tracker_page = page;
+                self.tracker_track = 0;
+                self.refresh_page_targets();
+                self.status = "page added · four empty lanes · choose target/channel".into();
+            }
+            Err(error) => self.status = format!("add page: {error}"),
+        }
+    }
+    fn edit_page_target(&mut self) {
+        if self.page_manager_mode != PageManagerMode::Pages {
+            return;
+        }
+        self.refresh_page_targets();
+        let current = &self.song.pages[self.tracker_page].target;
+        self.page_target_selected = self
+            .page_target_candidates
+            .iter()
+            .position(|target| target == current)
+            .unwrap_or(0);
+        self.page_manager_mode = PageManagerMode::Target;
+        self.status = "turn encoder for target · press to confirm · STOP cancels field".into();
+    }
+    fn edit_page_channel(&mut self) {
+        if self.page_manager_mode != PageManagerMode::Pages {
+            return;
+        }
+        self.page_channel_draft = self.song.pages[self.tracker_page].channel;
+        self.page_manager_mode = PageManagerMode::Channel;
+        self.status = "turn encoder for channel 1–16 · press to confirm".into();
+    }
+    fn confirm_page_field(&mut self) {
+        if let Some(page) = self.song.pages.get_mut(self.tracker_page) {
+            match self.page_manager_mode {
+                PageManagerMode::Target => {
+                    if let Some(target) = self.page_target_candidates.get(self.page_target_selected)
+                    {
+                        page.target = target.clone();
+                    }
+                }
+                PageManagerMode::Channel => page.channel = self.page_channel_draft,
+                PageManagerMode::Pages => return,
+            }
+        }
+        self.page_manager_mode = PageManagerMode::Pages;
+        self.status = "page route updated · DONE to keep or CANCEL to restore".into();
+    }
+    fn cancel_page_field(&mut self) {
+        self.page_manager_mode = PageManagerMode::Pages;
+        self.status = "field change cancelled".into();
+    }
+    fn turn_page_manager(&mut self, direction: i8) {
+        match self.page_manager_mode {
+            PageManagerMode::Pages => self.move_page_selection(direction),
+            PageManagerMode::Target => {
+                let last = self.page_target_candidates.len().saturating_sub(1);
+                self.page_target_selected = if direction < 0 {
+                    self.page_target_selected.saturating_sub(1)
+                } else {
+                    (self.page_target_selected + 1).min(last)
+                };
+            }
+            PageManagerMode::Channel => {
+                self.page_channel_draft = if direction < 0 {
+                    self.page_channel_draft.saturating_sub(1)
+                } else {
+                    self.page_channel_draft.saturating_add(1).min(15)
+                };
+            }
+        }
     }
     fn toggle_tracker_page_mute(&mut self) {
         if let Some(page) = self.song.pages.get_mut(self.tracker_page) {
@@ -486,10 +693,16 @@ impl App {
             return;
         }
         self.sequencer.play(&self.song, order, row);
-        self.status = if status.available {
+        let offline = self
+            .song
+            .pages
+            .iter()
+            .filter(|page| page.enabled && !self.target_online(&page.target))
+            .count();
+        self.status = if offline == 0 {
             format!("tracker playing · {notes} note events")
         } else {
-            self.sequencer.unavailable_label()
+            format!("tracker playing · {notes} events · {offline} target(s) offline")
         };
     }
     fn save_song(&mut self) {
@@ -529,6 +742,8 @@ impl App {
                 self.tracker_page = 0;
                 self.tracker_track = 0;
                 self.screen = Screen::Tracker;
+                self.refresh_page_targets();
+                self.sync_tracker_route();
                 self.status = format!("loaded {name}");
             }
             Err(e) => self.status = format!("song load: {e}"),
@@ -611,8 +826,9 @@ impl App {
         } else {
             32
         };
+        let lanes = self.song.total_lanes();
         if let Some(pattern) = self.song.patterns.get_mut(&number) {
-            *pattern = sequencer::Pattern::empty(rows, TOTAL_LANES);
+            *pattern = sequencer::Pattern::empty(rows, lanes);
         }
         self.tracker_row = 0;
         self.confirm_pattern_clear = false;
@@ -626,7 +842,10 @@ impl App {
         let number = self.song.patterns.keys().next_back().copied().unwrap_or(0) + 1;
         self.song.patterns.insert(
             number,
-            sequencer::Pattern::empty(self.config.external_midi.default_pattern_rows, TOTAL_LANES),
+            sequencer::Pattern::empty(
+                self.config.external_midi.default_pattern_rows,
+                self.song.total_lanes(),
+            ),
         );
         self.song.order.push(number);
         self.tracker_order = self.song.order.len() - 1;
@@ -908,10 +1127,10 @@ impl App {
         if self.screen == Screen::Tracker {
             let tracker = self.sequencer.status();
             self.follow_tracker_transport(&tracker);
-            if !tracker.available {
+            if tracker.playing && !tracker.available {
                 self.cancel_tracker_gesture();
                 if let Some(error) = tracker.error {
-                    self.status = format!("Casio MIDI unavailable: {error}");
+                    self.status = format!("tracker target unavailable: {error}");
                 }
             }
         }
@@ -1189,6 +1408,8 @@ fn perform(
             } else if a.screen == Screen::Tracker {
                 a.cancel_tracker_gesture();
                 a.tracker_row = a.tracker_row.saturating_sub(1);
+            } else if a.screen == Screen::TrackerPages {
+                a.turn_page_manager(-1);
             } else if a.screen == Screen::Presets {
                 a.selected = a.selected.saturating_sub(1);
             }
@@ -1202,6 +1423,8 @@ fn perform(
             } else if a.screen == Screen::Tracker {
                 a.cancel_tracker_gesture();
                 a.tracker_row = (a.tracker_row + 1).min(a.tracker_rows().saturating_sub(1));
+            } else if a.screen == Screen::TrackerPages {
+                a.turn_page_manager(1);
             } else if a.screen == Screen::Presets {
                 a.selected = (a.selected + 1).min(a.presets.len().saturating_sub(1));
             }
@@ -1232,6 +1455,7 @@ fn perform(
             }
             Screen::Tracker => a.tracker_skip(),
             Screen::TrackerFiles => a.load_song(),
+            Screen::TrackerPages => a.confirm_page_manager(),
             Screen::AudioRecorder => a.toggle_audio_recording(),
         },
         Action::Cancel => {
@@ -1246,15 +1470,23 @@ fn perform(
         Action::OpenIdeas => a.open_ideas(),
         Action::OpenTracker => {
             a.screen = Screen::Tracker;
+            a.refresh_page_targets();
             a.sync_tracker_route();
-            let tracker = a.sequencer.status();
-            a.status = if tracker.available {
+            let page_online = a
+                .song
+                .pages
+                .get(a.tracker_page)
+                .is_some_and(|page| a.target_online(&page.target));
+            a.status = if page_online {
                 "tracker ready · EDIT toggles entry · encoder press skips".into()
             } else {
-                a.sequencer.unavailable_label()
+                "tracker page target offline · PAGES to change it".into()
             };
         }
         Action::OpenTrackerFiles => {
+            if a.screen == Screen::TrackerPages {
+                a.confirm_page_manager();
+            }
             a.set_tracker_edit(false);
             a.song_list = sequencer::list(&sequencer::songs_dir());
             a.song_selected = a.song_selected.min(a.song_list.len().saturating_sub(1));
@@ -1264,7 +1496,16 @@ fn perform(
             a.screen = Screen::TrackerFiles;
             a.status = "song files · select an action".into();
         }
+        Action::OpenTrackerPages => a.open_page_manager(),
         Action::Back => {
+            if a.screen == Screen::TrackerPages {
+                if a.page_manager_mode == PageManagerMode::Pages {
+                    a.cancel_page_manager();
+                } else {
+                    a.cancel_page_field();
+                }
+                return false;
+            }
             if a.screen == Screen::TrackerFiles && a.song_previewing {
                 a.sequencer.stop();
                 a.song_previewing = false;
@@ -1336,11 +1577,23 @@ fn perform(
             a.status = format!("step edit {}", if a.tracker_edit { "on" } else { "off" });
         }
         Action::PreviousTrack => {
-            a.move_tracker_lane(-1);
+            if a.screen == Screen::TrackerPages {
+                a.move_page_selection(-1);
+            } else {
+                a.move_tracker_lane(-1);
+            }
         }
         Action::NextTrack => {
-            a.move_tracker_lane(1);
+            if a.screen == Screen::TrackerPages {
+                a.move_page_selection(1);
+            } else {
+                a.move_tracker_lane(1);
+            }
         }
+        Action::AddPage => a.add_tracker_page(),
+        Action::EditPageTarget => a.edit_page_target(),
+        Action::EditPageChannel => a.edit_page_channel(),
+        Action::ConfirmPageManager => a.confirm_page_manager(),
         Action::SaveSong => a.save_song(),
         Action::AudioRecord => a.toggle_audio_recording(),
         Action::AudioStop => match a.audio_recorder.stop() {
@@ -1457,8 +1710,9 @@ fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<Mi
             }
             KeyCode::Char('X') => {
                 let n = a.tracker_pattern_number();
+                let lanes = a.song.total_lanes();
                 if let Some(p) = a.song.patterns.get_mut(&n) {
-                    *p = crate::sequencer::Pattern::empty(p.rows.len(), TOTAL_LANES);
+                    *p = crate::sequencer::Pattern::empty(p.rows.len(), lanes);
                 }
                 return false;
             }
@@ -1675,6 +1929,7 @@ fn draw<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         Screen::Ideas => draw_ideas(f, a),
         Screen::Tracker => draw_tracker(f, a),
         Screen::TrackerFiles => draw_tracker_files(f, a),
+        Screen::TrackerPages => draw_tracker_pages(f, a),
         Screen::AudioRecorder => draw_audio_recorder(f, a),
     }
     draw_pad_lock(f, a);
@@ -1716,6 +1971,15 @@ fn draw_pad_buttons<B: Backend>(f: &mut Frame<B>, a: &mut App) {
             } else {
                 ""
             }
+        } else if a.screen == Screen::TrackerPages && a.page_manager_mode != PageManagerMode::Pages
+        {
+            if assignment.pad == crate::pads::PadAction::Stop {
+                "CANCEL"
+            } else if assignment.pad == crate::pads::PadAction::TapTempo {
+                "CONFIRM"
+            } else {
+                ""
+            }
         } else if a.screen == Screen::Tracker
             && a.tracker_edit
             && assignment.pad == crate::pads::PadAction::TapTempo
@@ -1745,7 +2009,10 @@ fn draw_status_bar<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     if z.height == 0 {
         return;
     }
-    let bpm = if matches!(a.screen, Screen::Tracker | Screen::TrackerFiles) {
+    let bpm = if matches!(
+        a.screen,
+        Screen::Tracker | Screen::TrackerFiles | Screen::TrackerPages
+    ) {
         format!("{} BPM", a.song.tempo)
     } else {
         a.tap
@@ -2093,11 +2360,9 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         ),
         rect(z.x, z.y, z.width, 1),
     );
-    let available = if transport.available {
-        "Casio MIDI ready"
-    } else {
-        "Casio MIDI unavailable"
-    };
+    let page = &a.song.pages[a.tracker_page];
+    let page_online = a.target_online(&page.target);
+    let available = if page_online { "ONLINE" } else { "OFFLINE" };
     f.render_widget(
         Paragraph::new(truncate(
             &format!(
@@ -2108,7 +2373,7 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
             ),
             z.width as usize,
         ))
-        .style(Style::default().fg(if transport.available {
+        .style(Style::default().fg(if page_online {
             Color::DarkGray
         } else {
             Color::Yellow
@@ -2190,11 +2455,13 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     f.render_widget(
         Paragraph::new(truncate(
             &format!(
-                "{} L{} ch{} p{} {} · .=SKIP press=SKIP",
+                "P{}/{} {} L{} ch{} {} {}",
+                a.tracker_page + 1,
+                a.song.pages.len(),
                 page.name,
                 a.tracker_track + 1,
                 page.channel + 1,
-                page.program,
+                truncate(page.target.label(), 10),
                 if !page.enabled {
                     "PAGE MUTE"
                 } else if !lane.enabled {
@@ -2210,6 +2477,112 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         .style(Style::default().fg(Color::DarkGray)),
         rect(z.x, z.y + z.height.saturating_sub(4), z.width, 1),
     );
+}
+
+fn draw_tracker_pages<B: Backend>(f: &mut Frame<B>, a: &mut App) {
+    let z = f.size();
+    f.render_widget(
+        Paragraph::new("TRACKER PAGES · 4 LANES EACH").style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        rect(z.x, z.y, z.width, 1),
+    );
+    let body_height = z.height.saturating_sub(5);
+    match a.page_manager_mode {
+        PageManagerMode::Pages => {
+            let rows = usize::from(body_height);
+            let start = a.tracker_page.saturating_sub(rows.saturating_sub(1));
+            let lines = a
+                .song
+                .pages
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(rows)
+                .map(|(index, page)| {
+                    let online = a.target_online(&page.target);
+                    let text = format!(
+                        "{}{:02} {:<8} ch{:02} {} {}",
+                        if index == a.tracker_page { "▶" } else { " " },
+                        index + 1,
+                        truncate(&page.name, 8),
+                        page.channel + 1,
+                        truncate(page.target.label(), 12),
+                        if online { "" } else { "OFFLINE" }
+                    );
+                    Spans::from(Span::styled(
+                        truncate(&text, usize::from(z.width)),
+                        if index == a.tracker_page {
+                            Style::default().fg(Color::Black).bg(Color::Yellow)
+                        } else if online {
+                            Style::default()
+                        } else {
+                            Style::default().fg(Color::Yellow)
+                        },
+                    ))
+                })
+                .collect::<Vec<_>>();
+            f.render_widget(
+                Paragraph::new(lines).block(
+                    Block::default()
+                        .title(format!(" {} pages ", a.song.pages.len()))
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Green)),
+                ),
+                rect(z.x, z.y + 1, z.width, body_height),
+            );
+        }
+        PageManagerMode::Target => {
+            let target = a
+                .page_target_candidates
+                .get(a.page_target_selected)
+                .map(PageTarget::label)
+                .unwrap_or("no MIDI outputs");
+            let online = a
+                .page_target_candidates
+                .get(a.page_target_selected)
+                .is_some_and(|target| a.target_online(target));
+            f.render_widget(
+                Paragraph::new(vec![
+                    Spans::from("TARGET DEVICE"),
+                    Spans::from(""),
+                    Spans::from(Span::styled(
+                        format!(
+                            "▶ {}",
+                            truncate(target, usize::from(z.width.saturating_sub(6)))
+                        ),
+                        Style::default().fg(Color::Black).bg(Color::Yellow),
+                    )),
+                    Spans::from(if online {
+                        "ONLINE"
+                    } else {
+                        "OFFLINE · data is kept"
+                    }),
+                    Spans::from("turn encoder · press to confirm"),
+                ])
+                .block(Block::default().borders(Borders::ALL)),
+                rect(z.x, z.y + 1, z.width, body_height),
+            );
+        }
+        PageManagerMode::Channel => {
+            f.render_widget(
+                Paragraph::new(vec![
+                    Spans::from("MIDI CHANNEL"),
+                    Spans::from(""),
+                    Spans::from(Span::styled(
+                        format!("▶ {:02}", a.page_channel_draft + 1),
+                        Style::default().fg(Color::Black).bg(Color::Yellow),
+                    )),
+                    Spans::from("turn encoder 1–16"),
+                    Spans::from("press to confirm"),
+                ])
+                .block(Block::default().borders(Borders::ALL)),
+                rect(z.x, z.y + 1, z.width, body_height),
+            );
+        }
+    }
 }
 
 fn draw_tracker_files<B: Backend>(f: &mut Frame<B>, a: &mut App) {
@@ -2411,6 +2784,7 @@ mod tests {
         render(40, 20, Screen::Ideas);
         render(40, 20, Screen::Tracker);
         render(40, 20, Screen::TrackerFiles);
+        render(40, 20, Screen::TrackerPages);
         render(40, 20, Screen::AudioRecorder);
     }
     #[test]
@@ -2420,6 +2794,7 @@ mod tests {
         render(38, 14, Screen::Ideas);
         render(38, 14, Screen::Tracker);
         render(38, 14, Screen::TrackerFiles);
+        render(38, 14, Screen::TrackerPages);
         render(38, 14, Screen::AudioRecorder);
         render(30, 8, Screen::Presets);
         render(30, 8, Screen::Tracker)
@@ -2458,6 +2833,61 @@ mod tests {
             .map(|c| c.symbol.as_str())
             .collect::<String>();
         assert!(text.contains("DRUMS"));
+    }
+    #[test]
+    fn page_management_is_fully_reachable_with_pads_and_encoder_actions() {
+        let p = presets();
+        let mut a = app(&p);
+        a.screen = Screen::Tracker;
+        perform(Action::OpenTrackerPages, &mut a, Path::new("/none"), None);
+        assert_eq!(a.screen, Screen::TrackerPages);
+        perform(Action::AddPage, &mut a, Path::new("/none"), None);
+        assert_eq!(a.song.pages.len(), 3);
+        assert_eq!(a.song.pages[2].lanes.len(), 4);
+
+        perform(Action::EditPageTarget, &mut a, Path::new("/none"), None);
+        assert_eq!(a.page_manager_mode, PageManagerMode::Target);
+        perform(Action::Down, &mut a, Path::new("/none"), None);
+        perform(Action::Activate, &mut a, Path::new("/none"), None);
+        assert_eq!(a.page_manager_mode, PageManagerMode::Pages);
+
+        perform(Action::EditPageChannel, &mut a, Path::new("/none"), None);
+        perform(Action::Down, &mut a, Path::new("/none"), None);
+        perform(Action::Activate, &mut a, Path::new("/none"), None);
+        assert_eq!(a.song.pages[2].channel, 1);
+
+        perform(Action::PreviousTrack, &mut a, Path::new("/none"), None);
+        assert_eq!(a.tracker_page, 1);
+        perform(Action::NextTrack, &mut a, Path::new("/none"), None);
+        assert_eq!(a.tracker_page, 2);
+        perform(Action::ConfirmPageManager, &mut a, Path::new("/none"), None);
+        assert_eq!(a.screen, Screen::Tracker);
+        assert!(a.page_manager_original.is_none());
+    }
+
+    #[test]
+    fn page_management_cancel_restores_song_and_offline_target_renders_at_40x20() {
+        let p = presets();
+        let mut a = app(&p);
+        let original = a.song.clone();
+        a.open_page_manager();
+        a.add_tracker_page();
+        a.song.pages[a.tracker_page].target = PageTarget::Midi("UNPLUGGED DEVICE".into());
+        a.refresh_page_targets();
+        let b = TestBackend::new(40, 20);
+        let mut t = Terminal::new(b).unwrap();
+        t.draw(|f| draw(f, &mut a)).unwrap();
+        let text = t
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect::<String>();
+        assert!(text.contains("OFFLINE"));
+        assert!(text.contains("TARGET"));
+        a.cancel_page_manager();
+        assert_eq!(a.song, original);
     }
     #[test]
     fn tracker_cursor_uses_readable_black_for_the_entire_note_cell() {
@@ -3069,6 +3499,7 @@ mod tests {
             Screen::Ideas,
             Screen::Tracker,
             Screen::TrackerFiles,
+            Screen::TrackerPages,
             Screen::AudioRecorder,
         ] {
             let mut a = app(&p);

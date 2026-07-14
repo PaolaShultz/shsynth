@@ -121,7 +121,7 @@ impl Default for RuntimeConfig {
             cpu_temperature_path: None,
             external_midi: ExternalMidiConfig {
                 enabled: false,
-                client_name: "shs-casio".into(),
+                client_name: "shs-tracker".into(),
                 output_match: String::new(),
                 max_tracks: 4,
                 channels: vec![0, 1, 2, 9],

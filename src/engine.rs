@@ -43,6 +43,7 @@ pub type SharedTrackerInput = Arc<Mutex<Option<crate::sequencer::LiveInput>>>;
 #[derive(Clone)]
 pub struct TrackerRoute {
     enabled: bool,
+    target: crate::sequencer::PageTarget,
     channel: u8,
     note_map: [u8; 128],
     program: Option<u8>,
@@ -61,6 +62,7 @@ impl Default for TrackerRoute {
     fn default() -> Self {
         Self {
             enabled: false,
+            target: crate::sequencer::PageTarget::ConfiguredExternal,
             channel: 0,
             note_map: std::array::from_fn(|note| note as u8),
             program: None,
@@ -73,6 +75,7 @@ impl TrackerRoute {
     pub fn configure(
         &mut self,
         enabled: bool,
+        target: crate::sequencer::PageTarget,
         channel: u8,
         percussion: bool,
         program: u8,
@@ -80,6 +83,7 @@ impl TrackerRoute {
     ) {
         self.revision = self.revision.wrapping_add(1);
         self.enabled = enabled;
+        self.target = target;
         self.channel = channel;
         self.note_map = std::array::from_fn(|note| note as u8);
         self.program = config.program_changes.then_some(program);
@@ -589,8 +593,9 @@ fn connect_midi_input(
     let output2 = Arc::clone(&output);
     let mut pad_locked = false;
     let mut lock_pressed = false;
-    let mut preview_notes: [Option<(u8, u8)>; 128] = [None; 128];
-    let mut preview_programs: [Option<u8>; 16] = [None; 16];
+    let mut preview_notes: [Option<(crate::sequencer::PageTarget, u8, u8)>; 128] =
+        std::array::from_fn(|_| None);
+    let mut preview_programs = std::collections::BTreeMap::new();
     let mut route_revision = 0;
     let connection = input
         .connect(
@@ -648,7 +653,7 @@ fn connect_midi_input(
                             .is_some_and(|route| route.revision != route_revision)
                         {
                             route_revision = route.as_ref().map_or(0, |route| route.revision);
-                            preview_programs = [None; 16];
+                            preview_programs.clear();
                         }
                         let mut preview = None;
                         let mut program = None;
@@ -660,29 +665,38 @@ fn connect_midi_input(
                                     preview_notes[usize::from(source_note)].take().or_else(|| {
                                         route.as_ref().and_then(|route| {
                                             route.enabled.then(|| {
-                                                (route.channel, route.mapped_note(source_note))
+                                                (
+                                                    route.target.clone(),
+                                                    route.channel,
+                                                    route.mapped_note(source_note),
+                                                )
                                             })
                                         })
                                     });
                             } else if let Some(route) = route.filter(|route| route.enabled) {
-                                let destination = (route.channel, route.mapped_note(source_note));
-                                preview_notes[usize::from(source_note)] = Some(destination);
+                                let destination = (
+                                    route.target.clone(),
+                                    route.channel,
+                                    route.mapped_note(source_note),
+                                );
+                                preview_notes[usize::from(source_note)] = Some(destination.clone());
                                 preview = Some(destination);
                                 program = route.program;
                             }
                         }
-                        if let Some((channel, note)) = preview {
+                        if let Some((target, channel, note)) = preview {
                             let preview_message = [status & 0xf0 | channel, note, message[2]];
                             let _ = tx.send(MidiEvent::Raw(preview_message.to_vec()));
                             if let Ok(input) = tracker_input.lock() {
                                 if let Some(input) = input.as_ref() {
                                     if let Some(program) = program.filter(|program| {
-                                        preview_programs[usize::from(channel)] != Some(*program)
+                                        preview_programs.get(&(target.clone(), channel))
+                                            != Some(program)
                                     }) {
-                                        input.send(&[0xc0 | channel, program]);
-                                        preview_programs[usize::from(channel)] = Some(program);
+                                        input.send(&target, &[0xc0 | channel, program]);
+                                        preview_programs.insert((target.clone(), channel), program);
                                     }
-                                    input.send(&preview_message);
+                                    input.send(&target, &preview_message);
                                 }
                             }
                         } else if !tracker_consumes_note {
@@ -1048,7 +1062,14 @@ mod tests {
         config.percussion_input_base = 60;
         config.percussion_notes = vec![36, 38, 40];
         let mut route = TrackerRoute::default();
-        route.configure(true, 2, true, 9, &config);
+        route.configure(
+            true,
+            crate::sequencer::PageTarget::ConfiguredExternal,
+            2,
+            true,
+            9,
+            &config,
+        );
         assert!(route.enabled);
         assert_eq!(route.channel, 2);
         assert_eq!(route.program, Some(9));
@@ -1059,7 +1080,14 @@ mod tests {
         assert!(tracker_edit_consumes_note(Some(&route), &[0x90, 60, 0]));
         assert!(tracker_edit_consumes_note(Some(&route), &[0x80, 60, 0]));
         assert!(!tracker_edit_consumes_note(Some(&route), &[0xb0, 1, 64]));
-        route.configure(false, 2, true, 9, &config);
+        route.configure(
+            false,
+            crate::sequencer::PageTarget::ConfiguredExternal,
+            2,
+            true,
+            9,
+            &config,
+        );
         assert!(!tracker_edit_consumes_note(Some(&route), &[0x90, 60, 100]));
     }
 
