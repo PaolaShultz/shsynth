@@ -30,7 +30,8 @@ One Raspberry Pi can sit in the middle of a small setup:
 MIDI controller ──> SHR-DAW ──> synthv1 / Yoshimi / FluidSynth ──> JACK out
                          └────> FT2 pattern pages ──> MIDI hardware
 
-JACK input ──> SHR-DAW stereo recorder ──> WAV
+Audio line input ──┬──> interface direct monitor ──> audio output
+                   └──> JACK capture ──> SHR-DAW stereo recorder ──> WAV
 ```
 
 SHR-DAW reads the controller once. It keeps menu buttons and mapped controls
@@ -269,6 +270,14 @@ The Audio Recorder writes the selected JACK stereo pair as 24-bit WAV. The
 JACK callback only moves samples into a fixed ring buffer. A normal disk thread
 writes the file. The screen shows time, sample rate, file size, dropped frames,
 and errors.
+
+Live line input is deliberately monitored in the audio interface, not routed
+through SHR-DAW or from JACK capture back to JACK playback. The interface's
+direct-monitor balance makes it easy to mix external instruments with SHR-DAW's
+software instruments without adding a software-monitoring process or its
+latency and CPU cost. JACK capture remains available to the Audio Recorder.
+Software monitoring can be added later if a routing or effects use case makes
+it worthwhile.
 
 An interrupted recording stays as `.wav.part`. SHR-DAW tries to recover it on
 the next recording start.
