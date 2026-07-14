@@ -186,7 +186,7 @@ MIDI recording state, and the 12 hands-on synthv1 controls.
 The routing setup and song pages can choose:
 
 - the controller MIDI input;
-- the MIDI destination for each software synth;
+- the MIDI input port that SHR-DAW sends notes and controls to for each software synth;
 - a different hardware MIDI output and channel for every tracker page;
 - the active SHR-DAW software instrument as a tracker-page target;
 - a configured external MIDI output and optional drum note map;
@@ -447,6 +447,8 @@ legacy preset bank is not in Git because its archive has no clear license note.
 See [THIRD_PARTY.md](THIRD_PARTY.md) when making packages or adding sounds.
 
 For new synthv1 sounds, see [docs/NEW_PATCHES.md](docs/NEW_PATCHES.md).
+
+---
 
 <p align="center">
 While I was releasing the first version of this software, my uncle died. So I dedicate this project to him.<br>
