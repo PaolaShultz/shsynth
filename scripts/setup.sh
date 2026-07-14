@@ -235,6 +235,9 @@ controller_input="$CHOSEN"
 replace_values "$RUNTIME_CONFIG" midi.autoconnect true
 replace_values "$RUNTIME_CONFIG" midi.input "$controller_input"
 replace_values "$CONTROLLER_CONFIG" input "$controller_input"
+if [[ -n "${SHSYNTH_PRESET_DIR:-}" ]]; then
+  replace_values "$RUNTIME_CONFIG" synthv1.presets "$SHSYNTH_PRESET_DIR"
+fi
 replace_values "$RUNTIME_CONFIG" capture.directory \
   "${XDG_DATA_HOME:-$HOME/.local/share}/shsynth/recordings"
 
