@@ -2,13 +2,36 @@
   <img src="docs/images/shr-daw-header.png" alt="shr-daw" width="100%">
 </p>
 
-SHR-DAW is a small Raspberry Pi mini DAW. It runs in a 40×20 terminal and is
-made for hands-on use with a MIDI controller, a small screen, and an audio
-interface. The name means **Shome Rust DAW**.
+SHR-DAW is a small Raspberry Pi mini DAW that runs in a 40×20 terminal. A MIDI
+controller, external synthesizer, dedicated screen, and USB audio interface can
+all be added, but none of them is required to start. The name means **Shome
+Rust DAW**.
 
 It can play software instruments, route MIDI, sequence hardware, save MIDI
 ideas, and record stereo audio. The goal is a portable music box that can grow
 from one synth into a hub for many MIDI instruments.
+
+## Start with what you have
+
+The large hardware diagrams below show a fully expanded example, not a shopping
+list. Useful configurations include:
+
+- **Software only:** run the terminal locally or over SSH, load synthv1,
+  Yoshimi, or FluidSynth, and send its JACK output to any configured Pi,
+  HDMI, or USB audio output.
+- **Computer keyboard only:** navigate the complete UI and use FT2 step edit to
+  enter notes with `Z S X D C V G B H N J M`, then play the pattern through the
+  active software instrument. No MIDI keyboard, mouse, or external MIDI device
+  is required.
+- **Add a MIDI keyboard:** play and record with velocity and chords instead of
+  entering every step from the computer keyboard.
+- **Add hardware when useful:** a control surface, external synths, audio
+  interface, mixer, capture input, and dedicated display are independent
+  upgrades rather than prerequisites.
+
+Computer-keyboard step entry works now. Free live performance of a software
+synth from the computer keyboard, a wider key range, and expanded bindings such
+as F1–F12 are planned; the README does not treat them as finished features.
 
 <p align="center">
   <img src="docs/images/shr-daw-ft2-tracker.png" alt="shr-daw FT2-style four-lane tracker" width="480">
@@ -20,23 +43,23 @@ work on real hardware. SHR-DAW is not a controller made for that keyboard. All
 device names, MIDI routes, channels, control maps, and JACK ports live in
 configuration files.
 
-## The idea
+## An expanded setup
 
-One Raspberry Pi can sit in the middle of a small setup:
+One Raspberry Pi can eventually sit in the middle of a much larger setup. Every
+device around it in this example is optional:
 
 ![Physical SHR-DAW connections: controller, Raspberry Pi, display, USB audio/MIDI interface, chained MIDI instruments, mixer, monitors, and headphones](docs/images/shr-daw-physical-connections.png)
 
-```text
-MIDI controller ──> SHR-DAW ──> synthv1 / Yoshimi / FluidSynth ──> JACK out
-                         └────> FT2 pattern pages ──> MIDI hardware
+On a narrow mobile screen, the same optional paths are:
 
-Audio line input ──┬──> interface direct monitor ──> audio output
-                   └──> JACK capture ──> SHR-DAW stereo recorder ──> WAV
-```
+- controller or computer-keyboard input → SHR-DAW;
+- SHR-DAW → synthv1, Yoshimi, or FluidSynth → JACK audio output;
+- FT2 pages → optional external MIDI hardware;
+- optional audio input → direct monitoring and/or the stereo WAV recorder.
 
-SHR-DAW reads the controller once. It keeps menu buttons and mapped controls
-inside the app, then sends musical MIDI to the right place. This avoids double
-notes and random direct connections from desktop MIDI tools.
+When a MIDI controller is present, SHR-DAW reads it once. It keeps menu buttons
+and mapped controls inside the app, then sends musical MIDI to the right place.
+This avoids double notes and random direct connections from desktop MIDI tools.
 
 Only one managed software synth runs at a time. Changing the synth sends All
 Notes Off, stops the process started by SHR-DAW, and starts the next one.
@@ -127,23 +150,35 @@ The routing setup and song pages can choose:
 - the active SHR-DAW software instrument as a tracker-page target;
 - a configured external MIDI output and optional drum note map;
 - live thru, program changes, bank select, and MIDI transport;
+- data-driven MIDI device profiles with named program browsing;
 - the left and right JACK playback ports;
 - the left and right JACK recording ports.
 
 The setup wizard finds ALSA MIDI ports and JACK audio ports. Exact names can
-also be typed when automatic detection is not enough.
+also be typed when automatic detection is not enough. When configuring an
+external hardware output it also offers installed device-profile ids; the
+numeric fallback remains available for unlisted instruments.
 
 ### FT2 pattern sequencer
 
 The pattern screen is based on the quick top-to-bottom flow of FastTracker II.
-It has rows, lanes, pages, an order list, step entry, note off, blank steps,
-program changes, delay, retrigger, cut, tempo changes, mute, and looped play.
+It has rows, lanes, pages, an order list, step entry, real-time record, note
+off, blank steps, program changes, delay, retrigger, cut, tempo changes, mute,
+and looped play.
 
 Every page has four note lanes. A new song starts with `MELODY` and `DRUMS`,
 but it can have more pages. Each page stores its own target device and MIDI
 channel. Pages can play together through several hardware outputs and the one
 active SHR-DAW software instrument. A MIDI chord can fill up to four lanes in
 one step. Notes keep their velocity and the cursor moves to the next row.
+
+Choose **REC** to loop and record only the selected pattern and visible page.
+Played notes are quantized to its rows and distributed across that page's four
+lanes. During REC they are consumed before the loaded software instrument and
+sent only to the page's hardware MIDI target/channel. A page targeting the
+active SHR-DAW instrument cannot enter REC; choose a configured or exact MIDI
+output first. **STOP REC**, **STOP**, **EXIT**, and **PANIC** release auditioned
+notes safely.
 
 Choose **CELL EDIT** for the selected cell. Changes stay in a draft until
 **CONFIRM**, while **EXIT** restores the whole original cell. Choose a field
@@ -162,6 +197,16 @@ Editable fields and ranges are:
 - one command: none, cut tick 0–15, delay tick 0–15, retrigger count 1–8,
   or tempo 20–300 BPM.
 
+Selecting **PROGRAM** opens a full-height sound browser. If the page target has
+a matching JSON device profile, it shows the device's native slot labels and
+sound names; otherwise it remains a generic MIDI 0–127 browser. Incoming MIDI
+notes stay free for auditioning on that exact page target and channel while the
+browser is open. Turning the value changes the draft sound heard by the next
+note by transmitting its bank/program selection immediately. **CONFIRM** stores
+the program in the cell and **CANCEL** restores the original cell and selection.
+Profiles are data files under `midi-devices/`, not device logic compiled into
+the tracker.
+
 Velocity, program, gate, and retrigger require a note-on in newly confirmed
 edits. Unsupported combinations remain in the draft with a visible error. A
 cell program sends the page bank/program selection to that exact target and
@@ -179,14 +224,12 @@ available MIDI output or the active SHR-DAW instrument, and choose channel
 it was. If saved hardware is unplugged, the page says `OFFLINE`; its notes and
 saved target are kept and the page remains editable.
 
-Patterns can use:
+New or resized patterns can use 8, 16, 32, 64, or 128 rows in 4/4, and the
+matching 6, 12, 24, 48, or 96 rows in 3/4.
 
-- 4/4 with 32 rows and beat marks at rows 1, 9, 17, and 25;
-- 3/4 with 24 rows and beat marks at rows 1, 7, 13, and 19.
-
-The pattern file screen can create a new pattern, clear a pattern, choose 3/4
-or 4/4, preview a song, save, load, and delete. Songs keep all patterns and the
-order in one readable text file.
+The pattern file screen can create, clone, or clear a pattern; choose its meter
+and size; edit the multi-pattern order; preview a song; save; load; and delete.
+Songs keep every distinct pattern and the full order in one readable text file.
 
 The main workflow does not need a computer keyboard or mouse. The complete FT2,
 edit, file, order, and page-management mappings are in the table above. The
@@ -467,6 +510,23 @@ song.
 
 See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for page targets, the song
 schema, and offline-device behavior.
+
+## External MIDI device profiles
+
+Set `external_midi.profile` to a profile id for the configured hardware route.
+The first bundled profile is `roland-d-50`. It contains the 64 original D-50
+internal patch names and the 64 card-memory slots. The D-50 internal and RAM
+card memories are writable, so names shown for `I-11`–`I-88` describe the
+original factory data; `C-11`–`C-88` deliberately remain named only as card
+slots. Both groups are selectable: D-50 Program Change 0–63 addresses internal
+memory and 64–127 addresses card memory.
+
+Additional profiles can be placed in `${XDG_DATA_HOME}/shsynth/midi-devices/`
+or a directory named by `SHSYNTH_DEVICE_PROFILE_DIR`. Installed profiles live
+under `share/shsynth/midi-devices/`. A profile supplies labels and MIDI metadata;
+the FT2 editor and live audition route remain generic. The schema and sourcing
+rules are documented in
+[docs/MIDI_DEVICE_PROFILES.md](docs/MIDI_DEVICE_PROFILES.md).
 
 ## License
 
