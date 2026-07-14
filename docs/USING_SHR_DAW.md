@@ -21,6 +21,9 @@ controls.
 - **Presets** chooses an engine and sound.
 - **Playback** shows played notes, changes synthv1 controls, and records ideas.
 - **Ideas** loads, plays, saves, and deletes MIDI ideas.
+- **Help** shows compact user help; turn the encoder through rows and press a
+  highlighted link to jump sections. When possible, it also shows a temporary
+  LAN URL for the same help page.
 - **FT2** edits and plays patterns.
 - **Pages** adds four-lane pages and chooses each destination and channel.
 - **Files** manages songs, patterns, and the song order.
@@ -32,6 +35,9 @@ and values. Its press selects or confirms.
 
 Physical menu layouts with four, five, or eight buttons are supported. Read
 the [Controller interface](CONTROLLER_INTERFACE.md) for every action and menu.
+Press `?` or F1 from the keyboard to open the same in-app help. The Help screen
+tries to start `http://<LAN-IP>/help` on port 80 only while Help is open; if the
+port or network is unavailable, the local Help screen keeps working.
 
 ## MIDI ideas
 

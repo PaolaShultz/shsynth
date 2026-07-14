@@ -68,6 +68,9 @@ setup.
 - [First run](docs/FIRST_RUN.md) — configure, check, and open SHR-DAW.
 - [Using SHR-DAW](docs/USING_SHR_DAW.md) — instruments, screens, ideas, and
   audio recording.
+- [In-app help](docs/HELP.md) — compact help text shown by `?`, F1, or the
+  controller Help action. While Help is open, SHR-DAW also tries to serve the
+  same page temporarily at `http://<LAN-IP>/help`.
 - [Tracker guide](docs/TRACKER.md) — patterns, pages, step editing, live
   recording, and song files.
 - [Controller interface](docs/CONTROLLER_INTERFACE.md) — physical controls and

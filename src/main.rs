@@ -7,6 +7,7 @@ mod controller_profile;
 mod device_profile;
 mod engine;
 mod geometry;
+mod help;
 mod loop_player;
 mod midi;
 mod navigation;

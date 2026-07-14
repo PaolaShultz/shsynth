@@ -23,7 +23,8 @@ implemented.
 | Page/track manager | Select previous/next page; add four-lane page; edit target; edit channel; confirm all changes; cancel and restore the original song; open files; mute current page. |
 | Target/channel field mode | Previous/next choice, confirm field, cancel field. Encoder turn/press and menu items share these operations. |
 | Audio recorder | Start/toggle recording, stop/finalize, inspect status, back, open presets/ideas/FT2, and panic. |
-| Global/safety | Stop MIDI playback, tracker transport, recorder, managed engine, and owned notes; All Notes Off; cancel or leave the current controller level. Application exit is computer-keyboard-only. Process termination remains limited to the engine owned by SHR-DAW. |
+| Help | Compact Markdown user help, temporary LAN web help when port 80 is available, section links selected by the master encoder, page scrolling, top, and return to the previous screen. |
+| Global/safety | Stop MIDI playback, tracker transport, recorder, managed engine, and owned notes; All Notes Off; cancel or leave the current controller level. Application exit remains computer-keyboard-only. Help is also reachable from `?` or F1. Process termination remains limited to the engine owned by SHR-DAW. |
 
 The complete final screen × page × item mapping is maintained below.
 `src/navigation.rs` is the executable canonical copy: labels and dispatch
@@ -46,6 +47,9 @@ inventory for controller reachability.
 - Page 1 is always `OPS`. On every child screen and contextual editor, `EXIT`
   is page 4/item 4 and returns exactly one level. Presets is the root and has
   no MIDI Exit; quitting the application remains keyboard-only.
+- Help is a child screen. It tries to show the same help at
+  `http://<LAN-IP>/help` while open. The master encoder moves one help row at a
+  time, and encoder press follows a highlighted internal section link.
 - Empty items and pages are not drawn, are silent when pressed, and are skipped
   by page cycling. The interface exposes working actions only.
 - The rendered controller strip is centered and capped at 40 columns. Labels
@@ -60,32 +64,34 @@ Blank physical positions and wholly empty pages are omitted.
 | Presets | Ops | Load | Page up | Page down | First |
 | Presets | Engine | Engine− | Engine+ | — | Last |
 | Presets | Nav | — | Ideas | FT2 | Audio |
-| Presets | Sys | Panic | — | — | — |
+| Presets | Sys | Panic | Help | — | — |
 | Playback | Ops | Record MIDI | Rec end | Take | Save |
 | Playback | Sound | Reset controls | Finish + save | Tap tempo | — |
 | Playback | Nav | Presets | Ideas | FT2 | Audio |
-| Playback | Sys | Panic | Stop take | — | Exit |
+| Playback | Sys | Panic | Stop take | Help | Exit |
 | Ideas | Ops | Inspect | Load | Play | Delete |
 | Ideas | Capture | Record | Rec end | Save | First |
-| Ideas | Nav | Presets | — | FT2 | Audio |
+| Ideas | Nav | Presets | Help | FT2 | Audio |
 | Ideas | Sys | Panic | Stop take | Last | Exit |
+| Help | Ops | Open link | Page up | Page down | Top |
+| Help | Sys | Panic | — | — | Exit |
 | FT2 | Ops | Play here | Play from start | Step edit | Cell edit |
 | FT2 | Mode | Play | Record | Edit | N00B |
 | FT2 | Move | Order− | Order+ | Lane− | Lane+ |
 | FT2 | Sys | Panic | Stop | Tools | Exit |
 | FT2 tools | Ops | Pages/tracks | Files | Loop | Mute lane |
-| FT2 tools | Page | Next page | — | — | — |
-| FT2 tools | Sys | Panic | Stop | — | Exit |
+| FT2 tools | Page | Next page | Help | — | — |
+| FT2 tools | Sys | Panic | Stop | Help | Exit |
 | N00B setup | Ops | Root− | Root+ | Scale | Done |
-| N00B setup | Sys | Panic | Stop | — | Exit |
+| N00B setup | Sys | Panic | Stop | Help | Exit |
 | FT2 loop | Ops | Import | Play here | Start | Stop |
 | FT2 loop | BPM | BPM− | BPM+ | BPM x | Unit |
 | FT2 loop | Cut | Start− | Start+ | Length− | Length+ |
 | FT2 loop | Sys | Panic | Stop | Align | Exit |
 | FT2 loop align | Ops | Auto | Bar− | Bar+ | Done |
-| FT2 loop align | Sys | Panic | Stop | — | Exit |
+| FT2 loop align | Sys | Panic | Stop | Help | Exit |
 | FT2 record | Ops | Rec end | — | — | — |
-| FT2 record | Sys | Panic | Stop | — | Exit |
+| FT2 record | Sys | Panic | Stop | Help | Exit |
 | FT2 step edit | Ops | Blank/skip | Erase | N-off | Done |
 | FT2 step edit | Move | Order− | Order+ | Lane− | Lane+ |
 | FT2 step edit | Adjust | Program− | Program+ | Tempo− | Tempo+ |
@@ -97,18 +103,18 @@ Blank physical positions and wholly empty pages are omitted.
 | Files | Ops | Load | Save | Preview/stop | Delete |
 | Files | Pattern | New | Clone | Clear | — |
 | Files | Order | Previous | Next | Repeat | Remove |
-| Files | Sys | Panic | — | — | Exit |
+| Files | Sys | Panic | — | Help | Exit |
 | Pattern setup | Ops | 3/4 | 4/4 | Size− | Size+ |
 | Pattern setup | Apply | Confirm | Keep | — | — |
-| Pattern setup | Sys | Panic | — | — | Exit/cancel |
+| Pattern setup | Sys | Panic | — | Help | Exit/cancel |
 | Pages/tracks | Ops | Add four lanes | Target | Channel | Done |
 | Pages/tracks | Page | Page− | Page+ | Mute pg | Files |
-| Pages/tracks | Sys | Panic | Stop | — | Exit/cancel |
+| Pages/tracks | Sys | Panic | Stop | Help | Exit/cancel |
 | Target/channel editor | Ops | Confirm | — | — | — |
-| Target/channel editor | Sys | Panic | Stop | — | Exit/cancel |
+| Target/channel editor | Sys | Panic | Stop | Help | Exit/cancel |
 | Audio recorder | Ops | Record/toggle | — | — | — |
 | Audio recorder | Nav | Presets | Ideas | FT2 | — |
-| Audio recorder | Sys | Panic | Stop/finalize | — | Exit |
+| Audio recorder | Sys | Panic | Stop/finalize | Help | Exit |
 
 ## FT2 cell editor inventory and mapping
 

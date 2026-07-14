@@ -8,6 +8,7 @@ pub enum Screen {
     Presets,
     Playback,
     Ideas,
+    Help,
     Tracker,
     TrackerFiles,
     TrackerPages,
@@ -19,12 +20,13 @@ pub enum Screen {
 }
 
 impl Screen {
-    pub const COUNT: usize = 11;
+    pub const COUNT: usize = 12;
     #[cfg(test)]
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Presets,
         Self::Playback,
         Self::Ideas,
+        Self::Help,
         Self::Tracker,
         Self::TrackerFiles,
         Self::TrackerPages,
@@ -40,14 +42,15 @@ impl Screen {
             Self::Presets => 0,
             Self::Playback => 1,
             Self::Ideas => 2,
-            Self::Tracker => 3,
-            Self::TrackerFiles => 4,
-            Self::TrackerPages => 5,
-            Self::TrackerTools => 6,
-            Self::TrackerNoob => 7,
-            Self::TrackerLoop => 8,
-            Self::TrackerLoopAlign => 9,
-            Self::AudioRecorder => 10,
+            Self::Help => 3,
+            Self::Tracker => 4,
+            Self::TrackerFiles => 5,
+            Self::TrackerPages => 6,
+            Self::TrackerTools => 7,
+            Self::TrackerNoob => 8,
+            Self::TrackerLoop => 9,
+            Self::TrackerLoopAlign => 10,
+            Self::AudioRecorder => 11,
         }
     }
 
@@ -56,6 +59,7 @@ impl Screen {
             Self::Presets => "PRESETS",
             Self::Playback => "PLAYBACK",
             Self::Ideas => "IDEAS",
+            Self::Help => "HELP",
             Self::Tracker => "FT2",
             Self::TrackerFiles => "FILES",
             Self::TrackerPages => "TRACKS",
@@ -85,6 +89,7 @@ pub enum Action {
     StopAll,
     OpenPresets,
     OpenIdeas,
+    OpenHelp,
     OpenTracker,
     OpenTrackerFiles,
     OpenTrackerPages,
@@ -278,7 +283,12 @@ const PRESETS: [MenuPage; 4] = [
     ),
     page(
         "SYS",
-        [on("PANIC", Action::StopAll), off(""), off(""), off("")],
+        [
+            on("PANIC", Action::StopAll),
+            on("HELP", Action::OpenHelp),
+            off(""),
+            off(""),
+        ],
     ),
 ];
 const PLAYBACK: [MenuPage; 4] = [
@@ -314,7 +324,7 @@ const PLAYBACK: [MenuPage; 4] = [
         [
             on("PANIC", Action::StopAll),
             on("STOP", Action::StopPlayback),
-            off(""),
+            on("HELP", Action::OpenHelp),
             on("EXIT", Action::Back),
         ],
     ),
@@ -342,7 +352,7 @@ const IDEAS: [MenuPage; 4] = [
         "NAV",
         [
             on("PRESETS", Action::OpenPresets),
-            off(""),
+            on("HELP", Action::OpenHelp),
             on("FT2", Action::OpenTracker),
             on("AUDIO", Action::OpenAudioRecorder),
         ],
@@ -409,7 +419,7 @@ const TRACKER_TOOLS: [MenuPage; 4] = [
         "PAGE",
         [
             on("NEXT", Action::NextTrackerPage),
-            off(""),
+            on("HELP", Action::OpenHelp),
             off(""),
             off(""),
         ],
@@ -420,7 +430,7 @@ const TRACKER_TOOLS: [MenuPage; 4] = [
         [
             on("PANIC", Action::StopAll),
             on("STOP", Action::TrackerStop),
-            off(""),
+            on("HELP", Action::OpenHelp),
             on("EXIT", Action::Back),
         ],
     ),
@@ -442,7 +452,7 @@ const TRACKER_NOOB: [MenuPage; 4] = [
         [
             on("PANIC", Action::StopAll),
             on("STOP", Action::TrackerStop),
-            off(""),
+            on("HELP", Action::OpenHelp),
             on("EXIT", Action::Back),
         ],
     ),
@@ -502,7 +512,7 @@ const TRACKER_LOOP_ALIGN: [MenuPage; 4] = [
         [
             on("PANIC", Action::StopAll),
             on("STOP", Action::TrackerStop),
-            off(""),
+            on("HELP", Action::OpenHelp),
             on("EXIT", Action::Back),
         ],
     ),
@@ -524,7 +534,7 @@ const TRACKER_RECORD: [MenuPage; 4] = [
         [
             on("PANIC", Action::StopAll),
             on("STOP", Action::TrackerStop),
-            off(""),
+            on("HELP", Action::OpenHelp),
             on("EXIT", Action::Back),
         ],
     ),
@@ -638,7 +648,7 @@ const FILES: [MenuPage; 4] = [
         [
             on("PANIC", Action::StopAll),
             off(""),
-            off(""),
+            on("HELP", Action::OpenHelp),
             on("EXIT", Action::Back),
         ],
     ),
@@ -668,7 +678,7 @@ const PAGES: [MenuPage; 4] = [
         [
             on("PANIC", Action::StopAll),
             on("STOP", Action::TrackerStop),
-            off(""),
+            on("HELP", Action::OpenHelp),
             on("EXIT", Action::Back),
         ],
     ),
@@ -690,7 +700,7 @@ const PAGE_FIELD: [MenuPage; 4] = [
         [
             on("PANIC", Action::StopAll),
             on("STOP", Action::TrackerStop),
-            off(""),
+            on("HELP", Action::OpenHelp),
             on("EXIT", Action::Back),
         ],
     ),
@@ -720,7 +730,7 @@ const PATTERN_CLEAR: [MenuPage; 4] = [
         [
             on("PANIC", Action::StopAll),
             off(""),
-            off(""),
+            on("HELP", Action::OpenHelp),
             on("EXIT", Action::Back),
         ],
     ),
@@ -745,6 +755,29 @@ const AUDIO: [MenuPage; 4] = [
         [
             on("PANIC", Action::StopAll),
             on("STOP", Action::AudioStop),
+            on("HELP", Action::OpenHelp),
+            on("EXIT", Action::Back),
+        ],
+    ),
+];
+
+const HELP: [MenuPage; 4] = [
+    page(
+        "OPS",
+        [
+            on("OPEN", Action::Activate),
+            on("PG UP", Action::PageUp),
+            on("PG DOWN", Action::PageDown),
+            on("TOP", Action::Home),
+        ],
+    ),
+    page("", [off(""), off(""), off(""), off("")]),
+    page("", [off(""), off(""), off(""), off("")]),
+    page(
+        "SYS",
+        [
+            on("PANIC", Action::StopAll),
+            off(""),
             off(""),
             on("EXIT", Action::Back),
         ],
@@ -756,6 +789,7 @@ pub fn pages(screen: Screen, context: MenuContext) -> &'static [MenuPage; 4] {
         (Screen::Presets, _) => &PRESETS,
         (Screen::Playback, _) => &PLAYBACK,
         (Screen::Ideas, _) => &IDEAS,
+        (Screen::Help, _) => &HELP,
         (Screen::Tracker, MenuContext::TrackerNoteEdit) => &TRACKER_NOTE_EDIT,
         (Screen::Tracker, MenuContext::TrackerRecord) => &TRACKER_RECORD,
         (Screen::Tracker, MenuContext::TrackerEdit) => &TRACKER_EDIT,
@@ -849,6 +883,7 @@ mod tests {
             (Screen::Presets, MenuContext::Normal),
             (Screen::Playback, MenuContext::Normal),
             (Screen::Ideas, MenuContext::Normal),
+            (Screen::Help, MenuContext::Normal),
             (Screen::Tracker, MenuContext::Normal),
             (Screen::Tracker, MenuContext::TrackerEdit),
             (Screen::Tracker, MenuContext::TrackerRecord),
@@ -969,6 +1004,7 @@ mod tests {
             (Screen::Presets, MenuContext::Normal),
             (Screen::Playback, MenuContext::Normal),
             (Screen::Ideas, MenuContext::Normal),
+            (Screen::Help, MenuContext::Normal),
             (Screen::Tracker, MenuContext::Normal),
             (Screen::Tracker, MenuContext::TrackerEdit),
             (Screen::Tracker, MenuContext::TrackerNoteEdit),
@@ -1001,6 +1037,7 @@ mod tests {
             Action::StopAll,
             Action::OpenPresets,
             Action::OpenIdeas,
+            Action::OpenHelp,
             Action::OpenTracker,
             Action::OpenTrackerFiles,
             Action::OpenTrackerPages,

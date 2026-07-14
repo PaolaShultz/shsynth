@@ -5,6 +5,7 @@ use crate::control::{parameter_color, CONTROLS};
 use crate::device_profile::{DeviceProfile, Registry as DeviceProfiles};
 use crate::engine::{self, Engine, MidiEvent};
 use crate::geometry::{contains, rect, visible_index};
+use crate::help::{self, HelpKind};
 use crate::navigation::{self, Action, MenuContext, Screen, SlotState};
 use crate::pads::{ControllerLayout, MenuInput, TapTempo};
 use crate::preset::{BackendKind, Catalog, Preset};
@@ -174,6 +175,12 @@ struct App {
     ideas: Vec<String>,
     idea_selected: usize,
     idea_offset: usize,
+    help_selected: usize,
+    help_offset: usize,
+    help_previous: Screen,
+    web_help: Option<help::WebHelpServer>,
+    web_help_status: String,
+    web_help_enabled: bool,
     confirm_delete: Option<String>,
     confirm_load: Option<String>,
     midi_output: engine::SharedOutput,
@@ -280,6 +287,12 @@ impl App {
             ideas: recording::list(&recording::ideas_dir()).unwrap_or_default(),
             idea_selected: 0,
             idea_offset: 0,
+            help_selected: 0,
+            help_offset: 0,
+            help_previous: Screen::Presets,
+            web_help: None,
+            web_help_status: String::new(),
+            web_help_enabled: true,
             confirm_delete: None,
             confirm_load: None,
             midi_output,
@@ -1985,6 +1998,65 @@ impl App {
         self.screen = Screen::Ideas;
         self.status = "ideas · select an action".into();
     }
+    fn open_help(&mut self) {
+        if self.screen != Screen::Help {
+            self.help_previous = self.screen;
+        }
+        self.screen = Screen::Help;
+        self.start_web_help();
+        self.sync_tracker_route();
+        self.reset_context_page();
+        self.status = format!("HELP · {} · EXIT closes", self.web_help_status);
+    }
+    fn close_help(&mut self) {
+        self.web_help = None;
+        self.web_help_status.clear();
+        self.screen = self.help_previous;
+        self.sync_tracker_route();
+        self.status = format!("returned to {}", self.screen.label());
+    }
+    fn start_web_help(&mut self) {
+        if self.web_help.is_some() {
+            return;
+        }
+        if !self.web_help_enabled {
+            self.web_help_status = "web help unavailable".into();
+            return;
+        }
+        match help::start_web_help() {
+            Ok(server) => {
+                self.web_help_status = server.url().to_owned();
+                self.web_help = Some(server);
+            }
+            Err(error) => {
+                self.web_help_status = error.label().into();
+            }
+        }
+    }
+    fn move_help(&mut self, delta: isize) {
+        let last = help::lines(38).len().saturating_sub(1);
+        self.help_selected = if delta < 0 {
+            self.help_selected.saturating_sub(delta.unsigned_abs())
+        } else {
+            (self.help_selected + delta as usize).min(last)
+        };
+    }
+    fn activate_help(&mut self) {
+        let lines = help::lines(38);
+        let Some(line) = lines.get(self.help_selected) else {
+            return;
+        };
+        let Some(target) = line.target.as_deref() else {
+            self.status = "HELP · select a row ending in > to jump".into();
+            return;
+        };
+        if let Some(index) = help::target_index(&lines, target) {
+            self.help_selected = index;
+            self.status = format!("HELP · {}", lines[index].text);
+        } else {
+            self.status = format!("HELP · missing section #{target}");
+        }
+    }
     fn save_new(&mut self) {
         let Some(p) = &self.playing else {
             self.status = "load a preset before saving an idea".into();
@@ -2364,7 +2436,14 @@ fn drain(
                 }
             }
             MidiEvent::Encoder(action) => {
-                if app.controller_layout == ControllerLayout::Four {
+                if app.screen == Screen::Help {
+                    let action = match action {
+                        crate::pads::EncoderAction::Up => Action::Up,
+                        crate::pads::EncoderAction::Down => Action::Down,
+                        crate::pads::EncoderAction::Select => Action::Activate,
+                    };
+                    perform(action, app, state, Some(tx));
+                } else if app.controller_layout == ControllerLayout::Four {
                     match action {
                         crate::pads::EncoderAction::Select => {
                             app.page_select_mode = !app.page_select_mode;
@@ -2423,6 +2502,26 @@ fn perform(
     // modal confirmation owns the rest of the input dispatch.
     if action == Action::StopAll {
         a.stop_all(state);
+        return false;
+    }
+    if action == Action::OpenHelp && a.screen != Screen::Help {
+        a.open_help();
+        return false;
+    }
+    if a.screen == Screen::Help {
+        match action {
+            Action::Up => a.move_help(-1),
+            Action::Down => a.move_help(1),
+            Action::PageUp => a.move_help(-10),
+            Action::PageDown => a.move_help(10),
+            Action::Home => a.help_selected = 0,
+            Action::End => a.help_selected = help::lines(38).len().saturating_sub(1),
+            Action::Activate => a.activate_help(),
+            Action::Back => a.close_help(),
+            Action::OpenHelp => {}
+            Action::Quit | Action::StopAll => unreachable!("handled before help dispatch"),
+            _ => {}
+        }
         return false;
     }
     if a.note_editor.is_some() {
@@ -2577,6 +2676,7 @@ fn perform(
                     a.load_idea(state, tx.clone())
                 }
             }
+            Screen::Help => a.activate_help(),
             Screen::Tracker => a.tracker_skip(),
             Screen::TrackerFiles => a.load_song(),
             Screen::TrackerPages => a.confirm_page_manager(),
@@ -2593,6 +2693,7 @@ fn perform(
             a.screen = Screen::Presets;
         }
         Action::OpenIdeas => a.open_ideas(),
+        Action::OpenHelp => a.open_help(),
         Action::OpenTracker => {
             a.screen = Screen::Tracker;
             a.refresh_page_targets();
@@ -2846,6 +2947,28 @@ fn perform(
     false
 }
 fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<MidiEvent>) -> bool {
+    if matches!(code, KeyCode::F(1) | KeyCode::Char('?')) && a.screen != Screen::Help {
+        perform(Action::OpenHelp, a, state, Some(tx));
+        return false;
+    }
+    if a.screen == Screen::Help {
+        let action = match code {
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::Up),
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::Down),
+            KeyCode::PageUp => Some(Action::PageUp),
+            KeyCode::PageDown => Some(Action::PageDown),
+            KeyCode::Home => Some(Action::Home),
+            KeyCode::End => Some(Action::End),
+            KeyCode::Enter => Some(Action::Activate),
+            KeyCode::Esc | KeyCode::Char('b') => Some(Action::Back),
+            KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Char(' ') => Some(Action::StopAll),
+            _ => None,
+        };
+        if let Some(action) = action {
+            perform(action, a, state, Some(tx));
+        }
+        return false;
+    }
     if a.screen == Screen::TrackerLoop || a.screen == Screen::TrackerLoopAlign {
         let action = match code {
             KeyCode::Up => Some(Action::Up),
@@ -3201,6 +3324,8 @@ fn mouse(
         MouseEventKind::ScrollUp => {
             if a.screen == Screen::Ideas {
                 a.idea_selected = a.idea_selected.saturating_sub(1)
+            } else if a.screen == Screen::Help {
+                a.move_help(-3);
             } else {
                 a.selected = a.selected.saturating_sub(3)
             }
@@ -3208,6 +3333,8 @@ fn mouse(
         MouseEventKind::ScrollDown => {
             if a.screen == Screen::Ideas {
                 a.idea_selected = (a.idea_selected + 1).min(a.ideas.len().saturating_sub(1))
+            } else if a.screen == Screen::Help {
+                a.move_help(3);
             } else {
                 a.selected = (a.selected + 3).min(a.presets.len().saturating_sub(1))
             }
@@ -3230,6 +3357,15 @@ fn mouse(
                     } else {
                         a.idea_selected = i;
                         a.confirm_delete = None;
+                    }
+                }
+            } else if a.screen == Screen::Help && contains(a.hits.list, m.column, m.row) {
+                let i = visible_index(a.hits.list, a.help_offset, m.column, m.row).unwrap();
+                if i < help::lines(a.hits.list.width as usize).len() {
+                    if i == a.help_selected {
+                        a.activate_help();
+                    } else {
+                        a.help_selected = i;
                     }
                 }
             } else if a.screen == Screen::TrackerFiles && contains(a.hits.list, m.column, m.row) {
@@ -3283,6 +3419,7 @@ fn draw<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         Screen::Presets => draw_list(f, a),
         Screen::Playback => draw_playing(f, a),
         Screen::Ideas => draw_ideas(f, a),
+        Screen::Help => draw_help(f, a),
         Screen::Tracker => draw_tracker(f, a),
         Screen::TrackerFiles => draw_tracker_files(f, a),
         Screen::TrackerPages => draw_tracker_pages(f, a),
@@ -3297,6 +3434,64 @@ fn draw<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     if a.screen != Screen::Playback {
         draw_status_bar(f, a);
     }
+}
+fn draw_help<B: Backend>(f: &mut Frame<B>, a: &mut App) {
+    let z = f.size();
+    let header = rect(z.x, z.y, z.width, 1);
+    let body = rect(z.x, z.y + 1, z.width, z.height.saturating_sub(4));
+    let rows = body.height as usize;
+    let lines = help::lines(body.width as usize);
+    a.help_selected = a.help_selected.min(lines.len().saturating_sub(1));
+    if a.help_selected < a.help_offset {
+        a.help_offset = a.help_selected;
+    } else if rows > 0 && a.help_selected >= a.help_offset + rows {
+        a.help_offset = a.help_selected + 1 - rows;
+    }
+    a.hits.list = body;
+    let web_status = if a.web_help_status.is_empty() {
+        "web help unavailable"
+    } else {
+        &a.web_help_status
+    };
+    f.render_widget(
+        Paragraph::new(truncate(web_status, z.width as usize)).style(
+            Style::default()
+                .fg(if a.web_help.is_some() {
+                    Color::LightYellow
+                } else {
+                    Color::DarkGray
+                })
+                .add_modifier(Modifier::BOLD),
+        ),
+        header,
+    );
+    let visible = lines
+        .iter()
+        .enumerate()
+        .skip(a.help_offset)
+        .take(rows)
+        .map(|(index, line)| {
+            let style = if index == a.help_selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                match line.kind {
+                    HelpKind::Heading => Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                    HelpKind::Link => Style::default().fg(Color::Yellow),
+                    HelpKind::Blank | HelpKind::Text => Style::default().fg(Color::Gray),
+                }
+            };
+            Spans::from(Span::styled(
+                truncate(&line.text, body.width as usize),
+                style,
+            ))
+        })
+        .collect::<Vec<_>>();
+    f.render_widget(Paragraph::new(visible), body);
 }
 fn draw_tracker_child<B: Backend>(f: &mut Frame<B>, title: &str, details: &str) {
     let z = f.size();
@@ -4339,7 +4534,7 @@ mod tests {
             presets: presets.to_vec(),
             unavailable: None,
         }];
-        App::new(
+        let mut app = App::new(
             &catalogs,
             Arc::new(std::sync::Mutex::new(None)),
             Arc::new(std::sync::Mutex::new(crate::midi::Pickup::default())),
@@ -4347,7 +4542,9 @@ mod tests {
             Arc::new(std::sync::Mutex::new(engine::TrackerRoute::default())),
             Arc::new(std::sync::Mutex::new(None)),
             RuntimeConfig::default(),
-        )
+        );
+        app.web_help_enabled = false;
+        app
     }
     fn render(w: u16, h: u16, screen: Screen) {
         let p = presets();
@@ -4364,6 +4561,7 @@ mod tests {
         render(40, 20, Screen::Presets);
         render(40, 20, Screen::Playback);
         render(40, 20, Screen::Ideas);
+        render(40, 20, Screen::Help);
         render(40, 20, Screen::Tracker);
         render(40, 20, Screen::TrackerFiles);
         render(40, 20, Screen::TrackerPages);
@@ -4378,6 +4576,7 @@ mod tests {
         render(38, 14, Screen::Presets);
         render(38, 14, Screen::Playback);
         render(38, 14, Screen::Ideas);
+        render(38, 14, Screen::Help);
         render(38, 14, Screen::Tracker);
         render(38, 14, Screen::TrackerFiles);
         render(38, 14, Screen::TrackerPages);
@@ -4477,6 +4676,38 @@ mod tests {
         assert_eq!(a.menu_page(), 0);
         perform(Action::OpenTracker, &mut a, Path::new("/none"), None);
         assert_eq!(a.menu_page(), 2, "each screen remembers its page");
+    }
+    #[test]
+    fn help_opens_links_and_returns_to_previous_screen() {
+        let p = presets();
+        let mut a = app(&p);
+        a.screen = Screen::Tracker;
+
+        perform(Action::OpenHelp, &mut a, Path::new("/none"), None);
+        assert_eq!(a.screen, Screen::Help);
+        assert_eq!(a.help_previous, Screen::Tracker);
+        assert!(a.status.contains("HELP"));
+        assert_eq!(a.web_help_status, "web help unavailable");
+
+        a.help_selected = help::lines(38)
+            .iter()
+            .position(|line| line.target.as_deref() == Some("ft2-tracker"))
+            .unwrap();
+        perform(Action::Activate, &mut a, Path::new("/none"), None);
+        let lines = help::lines(38);
+        assert_eq!(
+            lines[a.help_selected].anchor.as_deref(),
+            Some("ft2-tracker")
+        );
+
+        perform(Action::Back, &mut a, Path::new("/none"), None);
+        assert_eq!(a.screen, Screen::Tracker);
+        assert!(a.web_help_status.is_empty());
+
+        a.open_note_editor();
+        perform(Action::OpenHelp, &mut a, Path::new("/none"), None);
+        assert_eq!(a.screen, Screen::Help);
+        assert!(a.note_editor.is_some());
     }
 
     #[test]
@@ -5601,6 +5832,7 @@ mod tests {
             Screen::Presets,
             Screen::Playback,
             Screen::Ideas,
+            Screen::Help,
             Screen::Tracker,
             Screen::TrackerFiles,
             Screen::TrackerPages,
