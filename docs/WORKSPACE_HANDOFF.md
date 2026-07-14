@@ -105,6 +105,18 @@ overrides can live below `${XDG_DATA_HOME}/shsynth/midi-devices/` or
 hardcoded tracker mode. FT2 Program cell editing uses the page target/channel
 for named live audition; devices without a profile retain numeric 0–127 access.
 
+USB input-controller setup is also data-driven. Reviewed JSON entries live in
+`controller-profiles/catalog.json`; installed and user-updated search paths
+mirror the external-device profile model. The generic `controller.conf` is
+empty so unknown hardware never inherits MiniLab commands. `shr-setup` runs
+`shr pads auto` for the selected ALSA input and offers the non-audible `shr
+pads learn` wizard when no profile matches. Learning supports absolute CCs,
+both relative-encoder directions, CC or note buttons, and note-based encoder
+presses while rejecting conflicts. The existing MiniLab 3 mapping moved to the
+reviewed catalog. `shr pads update` downloads only SHR's validated catalog;
+Ardour, Mixxx, Zynthian, and Pencil Research data are documented research
+sources and are not redistributed.
+
 ## Preset provenance decision
 
 Only the 21 cleared synthv1 presets listed in `THIRD_PARTY.md` belong in the

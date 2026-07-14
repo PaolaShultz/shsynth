@@ -2,6 +2,8 @@ mod audio_recorder;
 mod chord;
 mod config;
 mod control;
+mod controller_learn;
+mod controller_profile;
 mod device_profile;
 mod engine;
 mod geometry;
@@ -106,6 +108,9 @@ fn preset_dir(config: &config::RuntimeConfig) -> Result<PathBuf> {
 }
 
 fn state_dir() -> PathBuf {
+    if let Some(path) = env::var_os("SHSYNTH_STATE_DIR") {
+        return PathBuf::from(path);
+    }
     env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -164,7 +169,7 @@ fn show_log(state: &Path, count: Option<&String>) -> Result<()> {
 }
 
 fn usage() {
-    println!("Usage: shr [menu|list|status|doctor|start PRESET|stop|log [LINES]|ideas COMMAND|pads COMMAND|casio diagnostic|config init]\n\nWith no arguments, opens the terminal instrument browser.");
+    println!("Usage: shr [menu|list|status|doctor|start PRESET|stop|log [LINES]|ideas COMMAND|pads COMMAND|casio diagnostic|config init]\n\nController setup: shr pads ports|profiles|auto [PORT]|learn [PORT]|update\nWith no arguments, opens the terminal instrument browser.");
 }
 
 fn casio_command(args: &[String], config: &config::RuntimeConfig) -> Result<()> {
@@ -388,6 +393,59 @@ fn pads_command(args: &[String], state: &Path) -> Result<()> {
     let path = state.join("controller.conf");
     let mut config = pads::PadConfig::load(&path)?;
     match args.first().map(String::as_str).unwrap_or("list") {
+        "ports" => {
+            for name in controller_learn::input_names()? {
+                println!("{name}");
+            }
+            Ok(())
+        }
+        "profiles" => {
+            for profile in controller_profile::Catalog::discover().profiles() {
+                println!("{}: {} [{}]", profile.id, profile.name, profile.source);
+            }
+            Ok(())
+        }
+        "auto" | "detect" => {
+            let input = controller_learn::resolve_input(args.get(1).map(String::as_str))?;
+            config.input_match = Some(controller_learn::stable_input_match(&input));
+            if let Some(profile) = controller_profile::Catalog::discover().matching(&input) {
+                profile.apply(&mut config, &controller_learn::stable_input_match(&input))?;
+                if let Some(backup) = controller_learn::backup(&path)? {
+                    println!("Backed up {}", backup.display());
+                }
+                config.save(&path)?;
+                println!("Loaded known profile {} for {input}", profile.name);
+            } else {
+                if let Some(backup) = controller_learn::backup(&path)? {
+                    println!("Backed up {}", backup.display());
+                }
+                config.save(&path)?;
+                println!("Selected {input}; no known profile. Run `shr pads learn`.");
+            }
+            Ok(())
+        }
+        "learn" => {
+            let input = controller_learn::resolve_input(
+                args.get(1)
+                    .map(String::as_str)
+                    .or(config.input_match.as_deref()),
+            )?;
+            if config.controls.is_empty() && config.pads.is_empty() && config.cc_buttons.is_empty()
+            {
+                if let Some(profile) = controller_profile::Catalog::discover().matching(&input) {
+                    profile.apply(&mut config, &controller_learn::stable_input_match(&input))?;
+                    println!("Started with known profile {}.", profile.name);
+                }
+            }
+            controller_learn::learn(&mut config, &input)?;
+            if let Some(backup) = controller_learn::backup(&path)? {
+                println!("Backed up {}", backup.display());
+            }
+            config.save(&path)?;
+            println!("Saved learned controller mapping to {}", path.display());
+            Ok(())
+        }
+        "update" => update_controller_profiles(),
         "list" => {
             println!("input: {}", config.input_match.as_deref().unwrap_or("auto"));
             println!(
@@ -422,6 +480,11 @@ fn pads_command(args: &[String], state: &Path) -> Result<()> {
             v.sort_by_key(|x| x.0);
             for (n, a) in v {
                 println!("note {n}: {a}");
+            }
+            let mut v = config.cc_buttons.iter().collect::<Vec<_>>();
+            v.sort_by_key(|x| x.0);
+            for (cc, action) in v {
+                println!("button CC {cc}: {action}");
             }
             Ok(())
         }
@@ -473,4 +536,37 @@ fn pads_command(args: &[String], state: &Path) -> Result<()> {
         }
         other => bail!("unknown pads command: {other}"),
     }
+}
+
+fn update_controller_profiles() -> Result<()> {
+    let path = controller_profile::user_catalog_path();
+    let parent = path.parent().context("controller profile directory")?;
+    fs::create_dir_all(parent)?;
+    let temporary = path.with_extension("json.tmp");
+    let status = Command::new("curl")
+        .args([
+            "--proto",
+            "=https",
+            "--tlsv1.2",
+            "--fail",
+            "--location",
+            "--silent",
+            "--show-error",
+            controller_profile::UPDATE_URL,
+            "--output",
+        ])
+        .arg(&temporary)
+        .status()
+        .context("run curl to update controller profiles")?;
+    if !status.success() {
+        let _ = fs::remove_file(&temporary);
+        bail!("controller profile download failed");
+    }
+    let count = controller_profile::validate_catalog(&temporary)?;
+    fs::rename(&temporary, &path)?;
+    println!(
+        "Installed {count} controller profiles at {}",
+        path.display()
+    );
+    Ok(())
 }

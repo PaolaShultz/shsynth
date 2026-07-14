@@ -42,6 +42,16 @@ Anyone distributing an appliance image or bundling those binaries must comply
 with each package separately and provide their notices/source offers as
 required. This is a practical audit, not legal advice.
 
+## Controller mapping references
+
+SHR-DAW can update its own MIT-licensed, hardware-verified controller catalog.
+It does not redistribute or execute mappings from Ardour, Mixxx, or Zynthian.
+Those copyleft-licensed projects are documented as useful research sources in
+`docs/CONTROLLER_PROFILES.md`; application-specific bindings are not copied
+into this repository. Pencil Research's CC BY-SA 4.0 MIDI dataset documents
+external instruments rather than USB controller surfaces and is likewise not
+included.
+
 ## Preset bank
 
 The origin and redistribution terms of the legacy presets in

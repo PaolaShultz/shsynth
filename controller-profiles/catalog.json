@@ -1,0 +1,37 @@
+[
+  {
+    "id": "arturia-minilab-3",
+    "name": "Arturia MiniLab 3",
+    "match_names": ["minilab3", "minilab 3", "minilab mk3"],
+    "layout": 8,
+    "controls": {
+      "74": 74,
+      "71": 71,
+      "76": 76,
+      "77": 77,
+      "93": 93,
+      "18": 18,
+      "19": 19,
+      "16": 16,
+      "82": 82,
+      "83": 83,
+      "85": 85,
+      "17": 17
+    },
+    "encoder_relative_cc": 28,
+    "encoder_relative_reverse": false,
+    "encoder_press_cc": 118,
+    "lock_cc": 27,
+    "note_buttons": {
+      "36": "page-1",
+      "37": "page-2",
+      "38": "page-3",
+      "39": "page-4",
+      "40": "item-1",
+      "41": "item-2",
+      "42": "item-3",
+      "43": "item-4"
+    },
+    "source": "SHR-DAW verified factory profile"
+  }
+]

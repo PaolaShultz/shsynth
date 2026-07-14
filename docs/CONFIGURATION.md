@@ -62,9 +62,9 @@ pad.43=item-4
 The note numbers above are examples only. Use the notes sent by the configured
 controller. In four-button mode, press the configured encoder to enter visible
 page-selection mode, turn it to choose page 1–4, and press it again to restore
-normal list/row/choice operation. The main setup wizard writes the bundled
-eight-button profile; compact profiles can be edited directly or with
-`shr pads set NOTE ROLE`.
+normal list/row/choice operation. The main setup wizard loads a matching known
+profile or offers MIDI learn; compact profiles can also be edited directly or
+with `shr pads set NOTE ROLE`.
 
 Legacy role names from v1 profiles are accepted in physical order. New profiles
 should use `page-1` through `page-4`, `page-cycle`, and `item-1` through
@@ -82,6 +82,13 @@ shr pads set 51 page-cycle
 shr pads set 52 item-1
 shr pads clear 51
 ```
+
+Controller buttons may send notes (`pad.N=ROLE`) or CCs
+(`button.cc.N=ROLE`). `encoder.relative_reverse=true` supports relative
+encoders whose clockwise messages are below 64, and `encoder.press_note=N`
+supports encoder presses sent as notes. Normally `shr-setup` or `shr pads
+learn` writes these details. See
+[Automatic controller setup and MIDI learn](CONTROLLER_PROFILES.md).
 
 ## Tracker pages
 

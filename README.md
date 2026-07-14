@@ -81,6 +81,8 @@ setup.
   page targets, channels, and offline devices.
 - [MIDI device profiles](docs/MIDI_DEVICE_PROFILES.md) — named sounds and bank
   data for external instruments.
+- [Controller profiles and MIDI learn](docs/CONTROLLER_PROFILES.md) — automatic
+  matching and non-audible setup for USB input controllers.
 - [Codex-assisted setup](docs/CODEX_ASSISTED_SETUP.md) — optional help for
   unusual hardware or recovery.
 

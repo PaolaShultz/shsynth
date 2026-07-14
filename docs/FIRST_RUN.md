@@ -75,9 +75,12 @@ SoundFonts or complex external-instrument routing. Read the
 [assisted-setup brief](CODEX_ASSISTED_SETUP.md) for its safety rules. Audible
 tests and system-wide changes still require the user's permission.
 
-Interactive MIDI learn and a reviewed library of known USB devices are planned
-features. Assisted discovery is the current option for uncommon or deeply
-customized hardware.
+Known USB controllers are matched during `shr-setup`; unknown devices can be
+mapped immediately with the non-audible MIDI learner. Profiles remain ordinary
+data and learned mappings remain private. See
+[Automatic controller setup and MIDI learn](CONTROLLER_PROFILES.md). Assisted
+discovery remains useful for proprietary modes, displays, LED feedback, or
+deeply customized hardware.
 
 Next, read [Using SHR-DAW](USING_SHR_DAW.md). For a larger hardware rig, see
 [Physical connections](CONNECTIONS.md).

@@ -82,12 +82,21 @@ pub fn route_with_pad_lock<'a>(
     pad_locked: bool,
 ) -> Routed<'a> {
     let (lock_consumed, _) = pads.lock_action(message);
-    let (pad_consumed, pad) = if pad_locked {
+    let (mut pad_consumed, mut pad) = if pad_locked {
         (false, None)
     } else {
         pads.route(message)
     };
-    let (encoder_consumed, encoder) = pads.encoder_action(message);
+    if !pad_locked && !pad_consumed {
+        if let Some((action, pressed)) = pads.action_state(message) {
+            pad_consumed = true;
+            pad = pressed.then_some(action);
+        }
+    }
+    let (cc_encoder_consumed, mut encoder) = pads.encoder_action(message);
+    let (note_encoder_consumed, note_encoder) = pads.encoder_note_action(message);
+    encoder = encoder.or(note_encoder);
+    let encoder_consumed = cc_encoder_consumed || note_encoder_consumed;
     let consumed = lock_consumed || pad_consumed || encoder_consumed;
     let value = if backend == BackendKind::Synthv1
         && !consumed
@@ -150,6 +159,21 @@ mod tests {
         assert!(release.consumed);
         assert!(release.encoder.is_none());
         assert!(release.forward.is_none());
+    }
+
+    #[test]
+    fn cc_command_buttons_and_note_encoder_press_are_consumed() {
+        let pads = PadConfig {
+            cc_buttons: HashMap::from([(44, PadAction::Item1)]),
+            encoder_press_note: Some(99),
+            ..PadConfig::default()
+        };
+        let button = route(&pads, BackendKind::Synthv1, &[0xb0, 44, 127]);
+        assert_eq!(button.pad, Some(PadAction::Item1));
+        assert!(button.consumed);
+        let encoder = route(&pads, BackendKind::Synthv1, &[0x90, 99, 100]);
+        assert_eq!(encoder.encoder, Some(EncoderAction::Select));
+        assert!(encoder.consumed);
     }
 
     #[test]

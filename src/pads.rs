@@ -128,10 +128,15 @@ impl FromStr for PadAction {
 pub struct PadConfig {
     pub input_match: Option<String>,
     pub pads: HashMap<u8, PadAction>,
+    /// Incoming controller CC buttons. Note buttons remain in `pads` for
+    /// compatibility with the original profile format.
+    pub cc_buttons: HashMap<u8, PadAction>,
     /// Incoming controller CC -> synthv1 mapped CC from control::CONTROLS.
     pub controls: HashMap<u8, u8>,
     pub encoder_relative_cc: Option<u8>,
+    pub encoder_relative_reverse: bool,
     pub encoder_press_cc: Option<u8>,
+    pub encoder_press_note: Option<u8>,
     /// Dedicated toggle control; this uses the raw Shift CC, not its shifted pad layer.
     pub lock_cc: Option<u8>,
     pub layout: ControllerLayout,
@@ -142,9 +147,12 @@ impl Default for PadConfig {
         let mut config = Self {
             input_match: None,
             pads: HashMap::new(),
+            cc_buttons: HashMap::new(),
             controls: HashMap::new(),
             encoder_relative_cc: None,
+            encoder_relative_reverse: false,
             encoder_press_cc: None,
+            encoder_press_note: None,
             lock_cc: None,
             layout: ControllerLayout::Eight,
         };
@@ -172,6 +180,7 @@ impl PadConfig {
 
     fn merge(&mut self, text: &str, path: &Path) -> Result<()> {
         let mut saw_pads = false;
+        let mut saw_cc_buttons = false;
         let mut saw_controls = false;
         for (line_no, line) in text.lines().enumerate() {
             let line = line.split('#').next().unwrap_or("").trim();
@@ -198,8 +207,20 @@ impl PadConfig {
                 self.encoder_relative_cc = optional_cc(value, "encoder relative CC")?;
                 continue;
             }
+            if key.trim() == "encoder.relative_reverse" {
+                self.encoder_relative_reverse = match value.trim() {
+                    "true" | "yes" | "1" => true,
+                    "false" | "no" | "0" => false,
+                    _ => bail!("encoder.relative_reverse must be true or false"),
+                };
+                continue;
+            }
             if key.trim() == "encoder.press_cc" {
                 self.encoder_press_cc = optional_cc(value, "encoder press CC")?;
+                continue;
+            }
+            if key.trim() == "encoder.press_note" {
+                self.encoder_press_note = optional_cc(value, "encoder press note")?;
                 continue;
             }
             if key.trim() == "lock.cc" {
@@ -220,6 +241,15 @@ impl PadConfig {
                     bail!("target CC {target} is not one of the 12 mapped controls");
                 }
                 self.controls.insert(raw, target);
+                continue;
+            }
+            if let Some(raw) = key.trim().strip_prefix("button.cc.") {
+                if !saw_cc_buttons {
+                    self.cc_buttons.clear();
+                    saw_cc_buttons = true;
+                }
+                let raw: u8 = raw.parse().context("controller button CC must be 0..127")?;
+                self.cc_buttons.insert(raw, value.trim().parse()?);
                 continue;
             }
             if !saw_pads {
@@ -244,6 +274,16 @@ impl PadConfig {
             if self.controls.contains_key(&encoder_cc) {
                 bail!("encoder CC {encoder_cc} is also mapped as a synth control");
             }
+            if self.cc_buttons.contains_key(&encoder_cc) {
+                bail!("encoder CC {encoder_cc} is also mapped as a command button");
+            }
+        }
+        if self
+            .controls
+            .keys()
+            .any(|cc| self.cc_buttons.contains_key(cc))
+        {
+            bail!("a controller CC cannot be both continuous and a command button");
         }
         if self.encoder_relative_cc == self.encoder_press_cc && self.encoder_relative_cc.is_some() {
             bail!("encoder turn and press CCs must be different");
@@ -267,7 +307,7 @@ impl PadConfig {
             text.push_str(&format!("input={input}\n"));
         }
         text.push_str(&format!(
-            "menu.layout={}\nencoder.relative_cc={}\nencoder.press_cc={}\nlock.cc={}\n",
+            "menu.layout={}\nencoder.relative_cc={}\nencoder.relative_reverse={}\nencoder.press_cc={}\nencoder.press_note={}\nlock.cc={}\n",
             match self.layout {
                 ControllerLayout::Eight => 8,
                 ControllerLayout::Five => 5,
@@ -276,8 +316,12 @@ impl PadConfig {
             self.encoder_relative_cc
                 .map(|cc| cc.to_string())
                 .unwrap_or_default(),
+            self.encoder_relative_reverse,
             self.encoder_press_cc
                 .map(|cc| cc.to_string())
+                .unwrap_or_default(),
+            self.encoder_press_note
+                .map(|note| note.to_string())
                 .unwrap_or_default(),
             self.lock_cc.map(|cc| cc.to_string()).unwrap_or_default(),
         ));
@@ -285,6 +329,11 @@ impl PadConfig {
         controls.sort_by_key(|(cc, _)| **cc);
         for (incoming, target) in controls {
             text.push_str(&format!("cc.{incoming}={target}\n"));
+        }
+        let mut cc_buttons: Vec<_> = self.cc_buttons.iter().collect();
+        cc_buttons.sort_by_key(|(cc, _)| **cc);
+        for (cc, action) in cc_buttons {
+            text.push_str(&format!("button.cc.{cc}={action}\n"));
         }
         for (note, action) in entries {
             text.push_str(&format!("pad.{note}={action}\n"));
@@ -316,6 +365,13 @@ impl PadConfig {
             return None;
         }
         let kind = message[0] & 0xf0;
+        if kind == 0xb0 {
+            return self
+                .cc_buttons
+                .get(&message[1])
+                .copied()
+                .map(|action| (action, message[2] > 0));
+        }
         if kind != 0x90 && kind != 0x80 {
             return None;
         }
@@ -337,17 +393,35 @@ impl PadConfig {
             return (false, None);
         }
         if self.encoder_relative_cc == Some(message[1]) {
-            let action = match message[2].cmp(&64) {
+            let mut action = match message[2].cmp(&64) {
                 std::cmp::Ordering::Less => Some(EncoderAction::Up),
                 std::cmp::Ordering::Greater => Some(EncoderAction::Down),
                 std::cmp::Ordering::Equal => None,
             };
+            if self.encoder_relative_reverse {
+                action = action.map(|action| match action {
+                    EncoderAction::Up => EncoderAction::Down,
+                    EncoderAction::Down => EncoderAction::Up,
+                    EncoderAction::Select => EncoderAction::Select,
+                });
+            }
             return (true, action);
         }
         if self.encoder_press_cc == Some(message[1]) {
             return (true, (message[2] > 0).then_some(EncoderAction::Select));
         }
         (false, None)
+    }
+
+    pub fn encoder_note_action(&self, message: &[u8]) -> (bool, Option<EncoderAction>) {
+        if message.len() < 3 || !matches!(message[0] & 0xf0, 0x80 | 0x90) {
+            return (false, None);
+        }
+        if self.encoder_press_note != Some(message[1]) {
+            return (false, None);
+        }
+        let pressed = message[0] & 0xf0 == 0x90 && message[2] > 0;
+        (true, pressed.then_some(EncoderAction::Select))
     }
 
     /// Press and release are consumed; only a non-zero press toggles the lock.
@@ -442,15 +516,15 @@ mod tests {
         assert_eq!(c.encoder_action(&[0xb0, 118, 0]), (true, None));
     }
     #[test]
-    fn older_controller_profile_inherits_encoder_defaults() {
+    fn older_controller_profile_keeps_unspecified_encoder_controls_unmapped() {
         let path =
             std::env::temp_dir().join(format!("shsynth-controller-{}.conf", std::process::id()));
         fs::write(&path, "input=AudioBox USB 96\ncc.86=74\npad.36=arp\n").unwrap();
         let config = PadConfig::load(&path).unwrap();
         assert_eq!(config.input_match.as_deref(), Some("AudioBox USB 96"));
         assert_eq!(config.controls, HashMap::from([(86, 74)]));
-        assert_eq!(config.encoder_relative_cc, Some(28));
-        assert_eq!(config.encoder_press_cc, Some(118));
+        assert_eq!(config.encoder_relative_cc, None);
+        assert_eq!(config.encoder_press_cc, None);
         assert_eq!(config.layout, ControllerLayout::Eight);
         assert_eq!(PadAction::Arp.menu_input(), MenuInput::SelectPage(0));
         assert_eq!(PadAction::TapTempo.menu_input(), MenuInput::ActivateItem(3));
@@ -490,5 +564,28 @@ mod tests {
         assert_eq!(c.lock_action(&[0xb0, 27, 127]), (true, true));
         assert_eq!(c.lock_action(&[0xb0, 27, 0]), (true, false));
         assert_eq!(c.lock_action(&[0xb0, 28, 127]), (false, false));
+    }
+
+    #[test]
+    fn reversed_encoder_cc_buttons_and_note_press_are_supported() {
+        let c = PadConfig {
+            cc_buttons: HashMap::from([(44, PadAction::Item1)]),
+            encoder_relative_cc: Some(28),
+            encoder_relative_reverse: true,
+            encoder_press_note: Some(99),
+            ..PadConfig::default()
+        };
+        assert_eq!(
+            c.encoder_action(&[0xb0, 28, 1]),
+            (true, Some(EncoderAction::Down))
+        );
+        assert_eq!(
+            c.action_state(&[0xb0, 44, 127]),
+            Some((PadAction::Item1, true))
+        );
+        assert_eq!(
+            c.encoder_note_action(&[0x90, 99, 100]),
+            (true, Some(EncoderAction::Select))
+        );
     }
 }

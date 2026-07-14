@@ -237,6 +237,12 @@ controller_input="$CHOSEN"
 replace_values "$RUNTIME_CONFIG" midi.autoconnect true
 replace_values "$RUNTIME_CONFIG" midi.input "$controller_input"
 replace_values "$CONTROLLER_CONFIG" input "$controller_input"
+profile_result="$(SHSYNTH_STATE_DIR="$STATE_DIR" "$SHSYNTH_BIN" pads auto "$controller_input")"
+printf '%s\n' "$profile_result"
+if [[ "$profile_result" == *'no known profile'* ]] && \
+   ask_yes_no 'Learn this controller now? MIDI will not be forwarded to a synth.' yes; then
+  SHSYNTH_STATE_DIR="$STATE_DIR" "$SHSYNTH_BIN" pads learn "$controller_input"
+fi
 if [[ -n "${SHSYNTH_PRESET_DIR:-}" ]]; then
   replace_values "$RUNTIME_CONFIG" synthv1.presets "$SHSYNTH_PRESET_DIR"
 fi
