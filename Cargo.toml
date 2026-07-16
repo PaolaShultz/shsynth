@@ -3,7 +3,7 @@ name = "shr-daw"
 version = "1.0.0"
 edition = "2021"
 rust-version = "1.85"
-description = "Terminal synthv1, Yoshimi, and FluidSynth instrument appliance"
+description = "Raspberry Pi mini DAW with a Rust TUI, FT2 tracker, MIDI routing, synth hosts, loops, and recording"
 license = "MIT"
 
 [[bin]]

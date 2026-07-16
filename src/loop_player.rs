@@ -701,8 +701,9 @@ mod tests {
     fn order_and_row_convert_to_absolute_beats() {
         let config = crate::config::RuntimeConfig::default().external_midi;
         let mut song = Song::new(&config);
+        let setup = song.patterns[&0].clone();
         song.patterns
-            .insert(1, crate::sequencer::Pattern::empty(8, song.total_lanes()));
+            .insert(1, crate::sequencer::Pattern::empty_like_setup(8, &setup));
         song.order = vec![0, 1];
         assert_eq!(song_position_beats(&song, 1, 4), 17.0);
     }

@@ -18,19 +18,24 @@ possible. Each output is remembered by input channel/note, including repeated
 notes, so note-off, velocity-zero note-on, mode changes, stop, panic, and exit
 release the note actually played. Command pads remain consumed.
 
-## Patterns, pages, and lanes
+## Projects, patterns, and arrangement
 
-A song contains patterns and an order that says when to play them. Every page
-has four note lanes. A new song starts with `MELODY` and `DRUMS`, and more pages
-can be added.
+An SHR-DAW Project contains FT2 Patterns and an FT2 Arrangement. An FT2 Pattern
+is a self-contained tracker pattern. The FT2 Arrangement is the ordered chain
+of Arrangement Steps; each step references a pattern ID. Repeating a step reuses
+the same pattern until you explicitly clone or paste a new pattern.
+
+Each FT2 Pattern owns its own rows, meter, master tempo, pages, page targets,
+MIDI channels, programs, velocity defaults, mutes, percussion settings, lane
+settings, and cell data. A new Project starts with one pattern containing
+`MELODY` and `DRUMS`, and more pages can be added per pattern.
 
 Each page keeps its own MIDI target, channel, bank, program, velocity, mute,
-percussion settings, and lane settings. Pages play together, so one song can
-control several hardware instruments and the active SHR-DAW software
-instrument.
+percussion settings, and lane settings. Pages play together, so one pattern can
+control several hardware instruments and the active SHR-DAW software instrument.
 
 Open **PAGES** to add or select a page and set its target and channel. **DONE**
-keeps the changes. **CANCEL** restores the song as it was before the page editor
+keeps the changes. **CANCEL** restores the Project as it was before the page editor
 opened. A disconnected saved target is marked `OFFLINE`; its route and notes
 are not deleted.
 
@@ -41,8 +46,14 @@ four lanes, keeps its velocities, and moves the cursor to the next row. A
 computer keyboard can enter notes with `Z S X D C V G B H N J M`.
 
 The editor can add a note, note-off, or blank step. It can also change the page
-program and song tempo, mute a lane, and move through rows, lanes, pages, and
-the order.
+program and pattern master tempo, mute a lane, and move through rows, lanes,
+pages, and arrangement steps.
+
+Tempo commands inside cells still work inside the current pattern. When
+playback enters the next arrangement step, tempo starts again from that
+referenced pattern's master tempo. The arrangement boundary itself does not
+send note-off for active lanes; a lane is released by its own gate/cut/note-off,
+by a later note in the same lane, or by stop/panic/mute cleanup.
 
 ## Cell editing
 
@@ -85,10 +96,10 @@ notes.
 
 Open **TOOLS**, then **LOOP** to import a mono or stereo WAV from the configured
 inbox. Import validates it, estimates the loop length from transient pulses
-when possible, snaps the length to whole song bars, and copies it into private
+when possible, snaps the length to whole Project bars, and copies it into private
 storage below
 `${XDG_DATA_HOME:-~/.local/share}/shsynth/loops/`; user audio never enters the
-tracked repository. The song stores only the imported filename, meter, source
+tracked repository. The Project stores only the imported filename, meter, source
 BPM, 1/2x/1x/2x interpretation, non-destructive start/length in beats, and a
 bar-based placement offset.
 
@@ -101,7 +112,7 @@ controls move one beat or one measure.
 
 The loop screen's **ALIGN** child has **AUTO**, **BAR-**, and **BAR+**. **AUTO**
 re-runs the offline pulse/length estimate and resets placement to bar zero.
-**BAR-** and **BAR+** move the whole WAV placement one song bar left or right
+**BAR-** and **BAR+** move the whole WAV placement one Project bar left or right
 without changing the cut region.
 
 The loop follows FT2 play-here, play-from-start, stop, restart, order/pattern
@@ -111,28 +122,49 @@ safe but pitch changes with tempo; the limitation is explicit on screen. A
 bounded 5 ms fade is applied at cut/loop edges. The 40×20 screen shows text for
 filename, BPMs and ratio, region, state, elapsed/total time, rate, and channels.
 
-## Pattern and song files
+## Copy and Paste
+
+Pattern copy stores the complete current FT2 Pattern, including rows, pages,
+routes, channels, programs, mutes, meter, and tempo. Paste can create a new
+pattern or paste over the current pattern after confirmation. Clone remains the
+fast one-step way to copy the selected pattern into a new arrangement step.
+
+The FT2 tools clipboard can copy and paste one lane/column or one full page
+block. Lane and page paste keep note, velocity, program, gate, and command
+cells. When source and destination row counts differ, only overlapping rows are
+pasted and the status line reports truncation. Page paste targets the selected
+destination page; missing destinations are not created implicitly.
+
+## FT2 Arrangement
+
+Open **TOOLS**, then **ARR** to edit the FT2 Arrangement separately from
+pattern editing and Project files. The ARRANGE screen can select a step, append
+or insert the current pattern, duplicate or remove a step, move a step earlier
+or later, jump to the referenced pattern for editing, and play from the selected
+step.
+
+## Pattern and Project files
 
 Patterns can use 8, 16, 32, 64, or 128 rows in 4/4. The matching 3/4 sizes are
 6, 12, 24, 48, or 96 rows.
 
-The Files screen can create, clone, resize, or clear a pattern. It can edit the
-multi-pattern order, preview a song, save, load, and delete. New patterns are
-distinct records. Clone copies the selected pattern. Repeat adds another order
-reference to the same pattern.
+The Files screen saves, loads, previews, and deletes the whole Project. It also
+keeps compact pattern operations for now: create, clone, copy, paste, resize,
+or clear a pattern. New patterns are distinct records. Clone copies the selected
+pattern. Arrangement repeat/duplicate adds another step that references the
+same pattern.
 
-Songs are readable text files stored below
-`${XDG_DATA_HOME:-~/.local/share}/shsynth/songs/`. The current v1 format keeps
-all patterns, the order, page routes, setup messages, four lanes per page, and
-every cell field. Optional meter/loop records default to 4/4 and no loop for
-older v1 songs. Files with another version or shape are not loaded or
+Projects are readable `.shsong` text files stored below
+`${XDG_DATA_HOME:-~/.local/share}/shsynth/songs/`. The current development
+format stores each pattern's own tempo, meter, pages, lanes, setup messages,
+and cells. Files with another version or unknown shape are not loaded or
 overwritten.
 
 ## Detailed controls and routing
 
 See the [Controller interface](CONTROLLER_INTERFACE.md) for the full FT2 menu
 map. See [Configuration and routing](CONFIGURATION.md) for page routing, exact
-targets, note ownership, and song behavior.
+targets, note ownership, and Project behavior.
 
 FastTracker II was created by Fredrik “Mr.H” Huss and Magnus “Vogue” Högdahl of
 the demo group Triton. Learn more at

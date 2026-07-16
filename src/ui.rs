@@ -134,6 +134,18 @@ struct TrackerRecording {
     notes: usize,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LaneClipboard {
+    lane: sequencer::Lane,
+    cells: Vec<Cell>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PageClipboard {
+    page: sequencer::Page,
+    rows: Vec<Vec<Cell>>,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum TrackerMode {
     #[default]
@@ -227,6 +239,11 @@ struct App {
     loop_imports: Vec<PathBuf>,
     loop_selected: usize,
     loop_edit_bars: bool,
+    pattern_clipboard: Option<sequencer::Pattern>,
+    lane_clipboard: Option<LaneClipboard>,
+    page_clipboard: Option<PageClipboard>,
+    confirm_pattern_paste_over: bool,
+    arrange_selected: usize,
     menu_page_by_screen: [usize; Screen::COUNT],
     page_select_mode: bool,
     controller_layout: ControllerLayout,
@@ -339,6 +356,11 @@ impl App {
             loop_imports: Vec::new(),
             loop_selected: 0,
             loop_edit_bars: false,
+            pattern_clipboard: None,
+            lane_clipboard: None,
+            page_clipboard: None,
+            confirm_pattern_paste_over: false,
+            arrange_selected: 0,
             menu_page_by_screen: [0; Screen::COUNT],
             page_select_mode: false,
             controller_layout: ControllerLayout::Eight,
@@ -478,11 +500,44 @@ impl App {
             .unwrap_or(0)
     }
     fn tracker_rows(&self) -> usize {
-        self.song
-            .patterns
-            .get(&self.tracker_pattern_number())
-            .map(|p| p.rows.len())
-            .unwrap_or(0)
+        self.current_pattern().map(|p| p.rows.len()).unwrap_or(0)
+    }
+    fn current_pattern(&self) -> Option<&sequencer::Pattern> {
+        self.song.patterns.get(&self.tracker_pattern_number())
+    }
+    fn current_pattern_mut(&mut self) -> Option<&mut sequencer::Pattern> {
+        let pattern = self.tracker_pattern_number();
+        self.song.patterns.get_mut(&pattern)
+    }
+    fn current_pages(&self) -> &[sequencer::Page] {
+        self.current_pattern()
+            .map_or(&[], |pattern| pattern.pages.as_slice())
+    }
+    fn current_page(&self) -> Option<&sequencer::Page> {
+        self.current_pages().get(self.tracker_page)
+    }
+    fn current_page_mut(&mut self) -> Option<&mut sequencer::Page> {
+        let page = self.tracker_page;
+        self.current_pattern_mut()?.pages.get_mut(page)
+    }
+    fn current_tempo(&self) -> u16 {
+        self.current_pattern()
+            .map_or(self.config.external_midi.default_tempo, |pattern| {
+                pattern.tempo
+            })
+    }
+    fn current_meter(&self) -> u8 {
+        self.current_pattern().map_or(4, |pattern| pattern.meter)
+    }
+    fn current_total_lanes(&self) -> usize {
+        self.current_pattern()
+            .map_or(0, sequencer::Pattern::total_lanes)
+    }
+    fn clamp_tracker_cursor(&mut self) {
+        let pages = self.current_pages().len();
+        self.tracker_page = self.tracker_page.min(pages.saturating_sub(1));
+        self.tracker_track = self.tracker_track.min(LANES_PER_PAGE - 1);
+        self.tracker_row = self.tracker_row.min(self.tracker_rows().saturating_sub(1));
     }
     fn tracker_cell_mut(&mut self) -> Option<&mut Cell> {
         let pattern = self.song.order.get(self.tracker_order).copied()?;
@@ -529,7 +584,7 @@ impl App {
                 editor
                     .draft
                     .program
-                    .unwrap_or(self.song.pages[self.tracker_page].program),
+                    .unwrap_or_else(|| self.current_page().map_or(0, |page| page.program)),
             )
         } else {
             None
@@ -557,15 +612,15 @@ impl App {
             let program = editor
                 .draft
                 .program
-                .unwrap_or(self.song.pages[self.tracker_page].program);
+                .unwrap_or_else(|| self.current_page().map_or(0, |page| page.program));
             self.preview_tracker_program(program);
         }
     }
     fn adjust_note_editor(&mut self, direction: i8) {
-        let page_velocity = self.song.pages[self.tracker_page].velocity;
-        let page_program = self.song.pages[self.tracker_page].program;
+        let page_velocity = self.current_page().map_or(96, |page| page.velocity);
+        let page_program = self.current_page().map_or(0, |page| page.program);
         let song_gate = self.song.gate_percent;
-        let song_tempo = self.song.tempo;
+        let pattern_tempo = self.current_tempo();
         let changed_field = {
             let Some(editor) = self.note_editor.as_mut() else {
                 return;
@@ -614,7 +669,7 @@ impl App {
                         Command::Cut(0),
                         Command::Delay(0),
                         Command::Retrigger(2),
-                        Command::Tempo(song_tempo),
+                        Command::Tempo(pattern_tempo),
                     ];
                     let current = match editor.draft.command {
                         Command::None => 0,
@@ -697,7 +752,7 @@ impl App {
         };
         if field == NoteEditorField::Program {
             self.sync_tracker_route();
-            self.preview_tracker_program(self.song.pages[self.tracker_page].program);
+            self.preview_tracker_program(self.current_page().map_or(0, |page| page.program));
         }
         self.status = format!("CELL EDIT · {} cleared only", field.label());
     }
@@ -747,7 +802,7 @@ impl App {
         let restore_program = editor
             .original
             .program
-            .unwrap_or(self.song.pages[self.tracker_page].program);
+            .unwrap_or_else(|| self.current_page().map_or(0, |page| page.program));
         if let Some(cell) = self
             .song
             .patterns
@@ -786,7 +841,7 @@ impl App {
     fn cancel_tracker_gesture(&mut self) {
         self.tracker_gesture.cancel();
         self.tracker_gesture_anchor = None;
-        if let Some(page) = self.song.pages.get(self.tracker_page) {
+        if let Some(page) = self.current_page() {
             self.tracker_live_input.cancel(&page.target, page.channel);
         }
     }
@@ -908,7 +963,7 @@ impl App {
         );
     }
     fn sync_tracker_route(&self) {
-        let Some(page) = self.song.pages.get(self.tracker_page) else {
+        let Some(page) = self.current_page() else {
             return;
         };
         let program = self
@@ -932,7 +987,7 @@ impl App {
     }
 
     fn tracker_device_profile(&self) -> Option<&DeviceProfile> {
-        let page = self.song.pages.get(self.tracker_page)?;
+        let page = self.current_page()?;
         match &page.target {
             PageTarget::ConfiguredExternal => self
                 .device_profiles
@@ -943,14 +998,16 @@ impl App {
     }
 
     fn tracker_program_label(&self, program: u8) -> String {
-        let page = &self.song.pages[self.tracker_page];
+        let Some(page) = self.current_page() else {
+            return format!("MIDI program {program}");
+        };
         self.tracker_device_profile()
             .and_then(|profile| profile.program_label(page.bank_msb, page.bank_lsb, program))
             .unwrap_or_else(|| format!("MIDI program {program}"))
     }
 
     fn preview_tracker_program(&self, program: u8) {
-        let Some(page) = self.song.pages.get(self.tracker_page) else {
+        let Some(page) = self.current_page() else {
             return;
         };
         for message in self.tracker_program_messages(program) {
@@ -962,7 +1019,7 @@ impl App {
         if !self.config.external_midi.program_changes {
             return Vec::new();
         }
-        let Some(page) = self.song.pages.get(self.tracker_page) else {
+        let Some(page) = self.current_page() else {
             return Vec::new();
         };
         let mut messages = Vec::new();
@@ -984,7 +1041,7 @@ impl App {
         let next = if direction < 0 {
             current.saturating_sub(1)
         } else {
-            (current + 1).min(self.song.total_lanes().saturating_sub(1))
+            (current + 1).min(self.current_total_lanes().saturating_sub(1))
         };
         let page = next / LANES_PER_PAGE;
         self.cancel_tracker_gesture();
@@ -994,9 +1051,11 @@ impl App {
     }
     fn switch_tracker_page(&mut self) {
         self.cancel_tracker_gesture();
-        self.tracker_page = (self.tracker_page + 1) % self.song.pages.len().max(1);
+        self.tracker_page = (self.tracker_page + 1) % self.current_pages().len().max(1);
         self.sync_tracker_route();
-        self.status = format!("{} page", self.song.pages[self.tracker_page].name);
+        self.status = self
+            .current_page()
+            .map_or_else(|| "no page".into(), |page| format!("{} page", page.name));
     }
     fn refresh_page_targets(&mut self) {
         let mut targets = vec![PageTarget::ActiveInstrument];
@@ -1029,12 +1088,7 @@ impl App {
         } else {
             self.available_page_outputs.clear();
         }
-        if let Some(target) = self
-            .song
-            .pages
-            .get(self.tracker_page)
-            .map(|page| page.target.clone())
-        {
+        if let Some(target) = self.current_page().map(|page| page.target.clone()) {
             targets.push(target);
         }
         targets.sort();
@@ -1068,9 +1122,7 @@ impl App {
         if let Some(song) = self.page_manager_original.take() {
             self.song = song;
         }
-        self.tracker_page = self
-            .tracker_page
-            .min(self.song.pages.len().saturating_sub(1));
+        self.clamp_tracker_cursor();
         self.tracker_track = self.tracker_track.min(LANES_PER_PAGE - 1);
         self.page_manager_mode = PageManagerMode::Pages;
         self.screen = Screen::Tracker;
@@ -1085,7 +1137,7 @@ impl App {
         self.page_manager_original = None;
         self.screen = Screen::Tracker;
         self.sync_tracker_route();
-        self.status = format!("{} pages ready", self.song.pages.len());
+        self.status = format!("{} pages ready", self.current_pages().len());
     }
     fn move_page_selection(&mut self, direction: i8) {
         if self.page_manager_mode != PageManagerMode::Pages {
@@ -1094,7 +1146,7 @@ impl App {
         self.tracker_page = if direction < 0 {
             self.tracker_page.saturating_sub(1)
         } else {
-            (self.tracker_page + 1).min(self.song.pages.len().saturating_sub(1))
+            (self.tracker_page + 1).min(self.current_pages().len().saturating_sub(1))
         };
         self.refresh_page_targets();
     }
@@ -1103,17 +1155,14 @@ impl App {
             return;
         }
         let target = self
-            .song
-            .pages
-            .get(self.tracker_page)
+            .current_page()
             .map(|page| page.target.clone())
             .unwrap_or(PageTarget::ConfiguredExternal);
-        let channel = self
+        let channel = self.current_page().map_or(0, |page| page.channel);
+        match self
             .song
-            .pages
-            .get(self.tracker_page)
-            .map_or(0, |page| page.channel);
-        match self.song.add_page(target, channel) {
+            .add_page_to_pattern(self.tracker_pattern_number(), target, channel)
+        {
             Ok(page) => {
                 self.tracker_page = page;
                 self.tracker_track = 0;
@@ -1128,11 +1177,13 @@ impl App {
             return;
         }
         self.refresh_page_targets();
-        let current = &self.song.pages[self.tracker_page].target;
+        let Some(current) = self.current_page().map(|page| page.target.clone()) else {
+            return;
+        };
         self.page_target_selected = self
             .page_target_candidates
             .iter()
-            .position(|target| target == current)
+            .position(|target| target == &current)
             .unwrap_or(0);
         self.page_manager_mode = PageManagerMode::Target;
         self.reset_context_page();
@@ -1142,21 +1193,26 @@ impl App {
         if self.page_manager_mode != PageManagerMode::Pages {
             return;
         }
-        self.page_channel_draft = self.song.pages[self.tracker_page].channel;
+        self.page_channel_draft = self.current_page().map_or(0, |page| page.channel);
         self.page_manager_mode = PageManagerMode::Channel;
         self.reset_context_page();
         self.status = "turn encoder for channel 1–16 · press to confirm".into();
     }
     fn confirm_page_field(&mut self) {
-        if let Some(page) = self.song.pages.get_mut(self.tracker_page) {
-            match self.page_manager_mode {
+        let mode = self.page_manager_mode;
+        let selected_target = self
+            .page_target_candidates
+            .get(self.page_target_selected)
+            .cloned();
+        let channel = self.page_channel_draft;
+        if let Some(page) = self.current_page_mut() {
+            match mode {
                 PageManagerMode::Target => {
-                    if let Some(target) = self.page_target_candidates.get(self.page_target_selected)
-                    {
-                        page.target = target.clone();
+                    if let Some(target) = selected_target {
+                        page.target = target;
                     }
                 }
-                PageManagerMode::Channel => page.channel = self.page_channel_draft,
+                PageManagerMode::Channel => page.channel = channel,
                 PageManagerMode::Pages => return,
             }
         }
@@ -1190,25 +1246,25 @@ impl App {
         }
     }
     fn toggle_tracker_page_mute(&mut self) {
-        if let Some(page) = self.song.pages.get_mut(self.tracker_page) {
+        let page_index = self.tracker_page;
+        if let Some(page) = self.current_page_mut() {
             page.enabled = !page.enabled;
             let muted = !page.enabled;
             let name = page.name.clone();
-            self.sequencer.mute_page(self.tracker_page, muted);
+            self.sequencer.mute_page(page_index, muted);
             self.status = format!("{name} page {}", if muted { "muted" } else { "enabled" });
         }
     }
     fn set_tracker_tempo(&mut self, bpm: u16) {
-        self.song.tempo = bpm.clamp(20, 300);
-        self.sequencer.tempo(self.song.tempo);
-        self.status = format!("tracker tempo {} BPM", self.song.tempo);
+        let tempo = bpm.clamp(20, 300);
+        if let Some(pattern) = self.current_pattern_mut() {
+            pattern.tempo = tempo;
+        }
+        self.sequencer.tempo(tempo);
+        self.status = format!("pattern tempo {tempo} BPM");
     }
     fn tracker_keyboard_note(&self, semitone: u8) -> u8 {
-        let percussion = self
-            .song
-            .pages
-            .get(self.tracker_page)
-            .is_some_and(|page| page.percussion);
+        let percussion = self.current_page().is_some_and(|page| page.percussion);
         let base = if percussion {
             if let Some(&note) = self
                 .config
@@ -1268,8 +1324,9 @@ impl App {
         self.sequencer.play(&self.song, order, row);
         let offline = self
             .song
-            .pages
-            .iter()
+            .patterns
+            .values()
+            .flat_map(|pattern| pattern.pages.iter())
             .filter(|page| page.enabled && !self.target_online(&page.target))
             .count();
         self.status = if offline == 0 {
@@ -1289,8 +1346,10 @@ impl App {
     fn tracker_record_song(&self, pattern: u16, page: usize) -> Song {
         let mut song = self.song.clone();
         song.order = vec![pattern];
-        for (index, candidate) in song.pages.iter_mut().enumerate() {
-            candidate.enabled = index == page;
+        if let Some(pattern) = song.patterns.get_mut(&pattern) {
+            for (index, candidate) in pattern.pages.iter_mut().enumerate() {
+                candidate.enabled = index == page;
+            }
         }
         song
     }
@@ -1300,7 +1359,7 @@ impl App {
             self.stop_tracker_recording();
             return;
         }
-        let Some(page) = self.song.pages.get(self.tracker_page) else {
+        let Some(page) = self.current_page() else {
             self.status = "REC unavailable · current page is missing".into();
             return;
         };
@@ -1331,7 +1390,9 @@ impl App {
             .play(&self.tracker_record_song(pattern, page_index), 0, 0);
         self.status = format!(
             "REC pattern {pattern} · {} only · MIDI output",
-            self.song.pages[page_index].name
+            self.current_pages()
+                .get(page_index)
+                .map_or("page", |page| page.name.as_str())
         );
     }
 
@@ -1339,7 +1400,13 @@ impl App {
         let Some(recording) = self.tracker_recording.take() else {
             return false;
         };
-        if let Some(page) = self.song.pages.get(recording.page) {
+        let pattern = recording.pattern;
+        if let Some(page) = self
+            .song
+            .patterns
+            .get(&pattern)
+            .and_then(|pattern| pattern.pages.get(recording.page))
+        {
             self.tracker_live_input.cancel(&page.target, page.channel);
         }
         self.sequencer.stop();
@@ -1441,8 +1508,8 @@ impl App {
             Ok((path, decoded)) => {
                 let alignment = crate::loop_player::analyze_alignment(
                     &decoded,
-                    self.song.tempo,
-                    self.song.meter,
+                    self.current_tempo(),
+                    self.current_meter(),
                 );
                 let candidates = crate::loop_player::bpm_candidates(alignment.source_bpm);
                 let settings = sequencer::LoopSettings {
@@ -1488,8 +1555,8 @@ impl App {
             Ok(decoded) => {
                 let alignment = crate::loop_player::analyze_alignment(
                     &decoded,
-                    self.song.tempo,
-                    self.song.meter,
+                    self.current_tempo(),
+                    self.current_meter(),
                 );
                 if let Some(settings) = self.song.audio_loop.as_mut() {
                     settings.source_bpm_x100 = (alignment.source_bpm * 100.0).round() as u32;
@@ -1515,7 +1582,7 @@ impl App {
     }
 
     fn adjust_loop_offset_bars(&mut self, direction: i8) {
-        let unit = i32::from(self.song.meter.clamp(1, 16));
+        let unit = i32::from(self.current_meter().clamp(1, 16));
         if let Some(settings) = self.song.audio_loop.as_mut() {
             let delta = if direction < 0 { -unit } else { unit };
             settings.offset_beats = (settings.offset_beats + delta).clamp(-16_384, 16_384);
@@ -1551,7 +1618,7 @@ impl App {
 
     fn adjust_loop_region(&mut self, start: bool, direction: i8) {
         let unit = if self.loop_edit_bars {
-            crate::loop_player::bar_to_beat(1, self.song.meter)
+            crate::loop_player::bar_to_beat(1, self.current_meter())
         } else {
             1
         };
@@ -1750,16 +1817,16 @@ impl App {
 
     fn apply_pattern_clear(&mut self) {
         self.tracker_stop();
-        self.song.meter = self.pattern_clear_beats;
         if self.pattern_setup_new {
             self.create_pattern(self.pattern_setup_rows);
             return;
         }
         let number = self.tracker_pattern_number();
         let rows = self.pattern_setup_rows;
-        let lanes = self.song.total_lanes();
         if let Some(pattern) = self.song.patterns.get_mut(&number) {
-            *pattern = sequencer::Pattern::empty(rows, lanes);
+            let mut replacement = sequencer::Pattern::empty_like_setup(rows, pattern);
+            replacement.meter = self.pattern_clear_beats;
+            *pattern = replacement;
         }
         self.tracker_row = 0;
         self.confirm_pattern_clear = false;
@@ -1774,14 +1841,16 @@ impl App {
 
     fn create_pattern(&mut self, rows: usize) {
         self.tracker_stop();
-        self.song.meter = self.pattern_clear_beats;
         let number = self.song.patterns.keys().next_back().copied().unwrap_or(0) + 1;
-        self.song.patterns.insert(
-            number,
-            sequencer::Pattern::empty(rows, self.song.total_lanes()),
+        let pattern = sequencer::Pattern::from_config(
+            &self.config.external_midi,
+            rows,
+            self.pattern_clear_beats,
         );
+        self.song.patterns.insert(number, pattern);
         self.song.order.push(number);
         self.tracker_order = self.song.order.len() - 1;
+        self.clamp_tracker_cursor();
         self.tracker_row = 0;
         self.confirm_pattern_clear = false;
         self.pattern_setup_new = false;
@@ -1805,11 +1874,180 @@ impl App {
         self.tracker_row = 0;
         self.status = format!("cloned pattern {old} as {number}");
     }
+    fn copy_pattern(&mut self) {
+        let number = self.tracker_pattern_number();
+        let Some(pattern) = self.song.patterns.get(&number).cloned() else {
+            self.status = "no pattern to copy".into();
+            return;
+        };
+        self.pattern_clipboard = Some(pattern);
+        self.confirm_pattern_paste_over = false;
+        self.status = format!("copied pattern {number}");
+    }
+    fn paste_pattern_new(&mut self) {
+        let Some(pattern) = self.pattern_clipboard.clone() else {
+            self.status = "pattern clipboard empty".into();
+            return;
+        };
+        self.tracker_stop();
+        let number = self.song.patterns.keys().next_back().copied().unwrap_or(0) + 1;
+        self.song.patterns.insert(number, pattern);
+        self.song.order.push(number);
+        self.tracker_order = self.song.order.len() - 1;
+        self.tracker_row = 0;
+        self.clamp_tracker_cursor();
+        self.status = format!("pasted clipboard as pattern {number}");
+    }
+    fn paste_pattern_over(&mut self) {
+        let Some(pattern) = self.pattern_clipboard.clone() else {
+            self.status = "pattern clipboard empty".into();
+            return;
+        };
+        if !self.confirm_pattern_paste_over {
+            self.confirm_pattern_paste_over = true;
+            self.status = "confirm paste over current pattern".into();
+            return;
+        }
+        self.tracker_stop();
+        let number = self.tracker_pattern_number();
+        self.song.patterns.insert(number, pattern);
+        self.confirm_pattern_paste_over = false;
+        self.clamp_tracker_cursor();
+        self.status = format!("pasted over pattern {number}");
+    }
+    fn copy_lane(&mut self) {
+        let global_lane = self.tracker_page * LANES_PER_PAGE + self.tracker_track;
+        let Some(pattern) = self.current_pattern() else {
+            self.status = "lane copy unavailable".into();
+            return;
+        };
+        let Some(lane) = pattern
+            .pages
+            .get(self.tracker_page)
+            .and_then(|page| page.lanes.get(self.tracker_track))
+            .cloned()
+        else {
+            self.status = "lane copy unavailable".into();
+            return;
+        };
+        self.lane_clipboard = Some(LaneClipboard {
+            lane,
+            cells: pattern
+                .rows
+                .iter()
+                .filter_map(|row| row.get(global_lane).copied())
+                .collect(),
+        });
+        self.status = format!("copied lane {}", self.tracker_track + 1);
+    }
+    fn paste_lane(&mut self) {
+        let Some(clipboard) = self.lane_clipboard.clone() else {
+            self.status = "lane clipboard empty".into();
+            return;
+        };
+        let page_index = self.tracker_page;
+        let track = self.tracker_track;
+        let global_lane = page_index * LANES_PER_PAGE + track;
+        let Some(pattern) = self.current_pattern_mut() else {
+            self.status = "lane paste unavailable".into();
+            return;
+        };
+        let Some(page) = pattern.pages.get_mut(page_index) else {
+            self.status = "lane paste destination missing".into();
+            return;
+        };
+        if let Some(lane) = page.lanes.get_mut(track) {
+            *lane = clipboard.lane;
+        }
+        let rows = pattern.rows.len().min(clipboard.cells.len());
+        for (row, cell) in pattern
+            .rows
+            .iter_mut()
+            .take(rows)
+            .zip(clipboard.cells.iter().copied())
+        {
+            if let Some(destination) = row.get_mut(global_lane) {
+                *destination = cell;
+            }
+        }
+        self.status = if rows < clipboard.cells.len() {
+            format!("pasted lane · truncated to {rows} row(s)")
+        } else {
+            format!("pasted lane · {rows} row(s)")
+        };
+    }
+    fn copy_page_block(&mut self) {
+        let Some(pattern) = self.current_pattern() else {
+            self.status = "page copy unavailable".into();
+            return;
+        };
+        let Some(page) = pattern.pages.get(self.tracker_page).cloned() else {
+            self.status = "page copy unavailable".into();
+            return;
+        };
+        let start = self.tracker_page * LANES_PER_PAGE;
+        self.page_clipboard = Some(PageClipboard {
+            page,
+            rows: pattern
+                .rows
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .skip(start)
+                        .take(LANES_PER_PAGE)
+                        .copied()
+                        .collect()
+                })
+                .collect(),
+        });
+        self.status = format!("copied page {}", self.tracker_page + 1);
+    }
+    fn paste_page_block(&mut self) {
+        let Some(clipboard) = self.page_clipboard.clone() else {
+            self.status = "page clipboard empty".into();
+            return;
+        };
+        let page_index = self.tracker_page;
+        let start = page_index * LANES_PER_PAGE;
+        let Some(pattern) = self.current_pattern_mut() else {
+            self.status = "page paste unavailable".into();
+            return;
+        };
+        let Some(page) = pattern.pages.get_mut(page_index) else {
+            self.status = "page paste destination missing".into();
+            return;
+        };
+        *page = clipboard.page;
+        let rows = pattern.rows.len().min(clipboard.rows.len());
+        let mut lane_truncated = false;
+        for (row, source) in pattern
+            .rows
+            .iter_mut()
+            .take(rows)
+            .zip(clipboard.rows.iter())
+        {
+            let lanes = LANES_PER_PAGE.min(source.len());
+            lane_truncated |= lanes < source.len();
+            for (offset, cell) in source.iter().copied().take(lanes).enumerate() {
+                if let Some(destination) = row.get_mut(start + offset) {
+                    *destination = cell;
+                } else {
+                    lane_truncated = true;
+                }
+            }
+        }
+        let row_truncated = rows < clipboard.rows.len();
+        self.status = match (row_truncated, lane_truncated) {
+            (true, true) => format!("pasted page · truncated rows/lanes to {rows} row(s)"),
+            (true, false) => format!("pasted page · truncated to {rows} row(s)"),
+            (false, true) => "pasted page · lane truncation".into(),
+            (false, false) => format!("pasted page · {rows} row(s)"),
+        };
+    }
     fn clear_pattern_now(&mut self) {
         let number = self.tracker_pattern_number();
-        let lanes = self.song.total_lanes();
         if let Some(pattern) = self.song.patterns.get_mut(&number) {
-            *pattern = sequencer::Pattern::empty(pattern.rows.len(), lanes);
+            *pattern = sequencer::Pattern::empty_like_setup(pattern.rows.len(), pattern);
             self.tracker_row = 0;
             self.status = format!("cleared pattern {number}");
         }
@@ -1821,6 +2059,7 @@ impl App {
         } else {
             (self.tracker_order + 1).min(self.song.order.len().saturating_sub(1))
         };
+        self.clamp_tracker_cursor();
         self.tracker_row = 0;
         self.status = format!(
             "order {:02}/{:02}",
@@ -1832,6 +2071,7 @@ impl App {
         let number = self.tracker_pattern_number();
         self.song.order.insert(self.tracker_order + 1, number);
         self.tracker_order += 1;
+        self.clamp_tracker_cursor();
         self.tracker_row = 0;
         self.status = format!("repeated pattern {number} in order");
     }
@@ -1842,8 +2082,93 @@ impl App {
         }
         self.song.order.remove(self.tracker_order);
         self.tracker_order = self.tracker_order.min(self.song.order.len() - 1);
+        self.clamp_tracker_cursor();
         self.tracker_row = 0;
         self.status = "order entry removed".into();
+    }
+    fn open_arrange(&mut self) {
+        self.set_tracker_edit(false);
+        self.arrange_selected = self
+            .tracker_order
+            .min(self.song.order.len().saturating_sub(1));
+        self.screen = Screen::TrackerArrange;
+        self.reset_context_page();
+        self.status = "FT2 arrangement · chain pattern steps".into();
+    }
+    fn select_arrangement_step(&mut self, direction: i8) {
+        self.arrange_selected = if direction < 0 {
+            self.arrange_selected.saturating_sub(1)
+        } else {
+            (self.arrange_selected + 1).min(self.song.order.len().saturating_sub(1))
+        };
+        self.status = format!(
+            "arrangement step {:02}/{:02}",
+            self.arrange_selected + 1,
+            self.song.order.len()
+        );
+    }
+    fn arrangement_append_current(&mut self) {
+        let number = self.tracker_pattern_number();
+        self.song.order.push(number);
+        self.arrange_selected = self.song.order.len() - 1;
+        self.status = format!("appended pattern {number}");
+    }
+    fn arrangement_insert_current(&mut self) {
+        let number = self.tracker_pattern_number();
+        let index = self.arrange_selected.min(self.song.order.len());
+        self.song.order.insert(index, number);
+        self.arrange_selected = index;
+        self.status = format!("inserted pattern {number}");
+    }
+    fn arrangement_duplicate_step(&mut self) {
+        let Some(number) = self.song.order.get(self.arrange_selected).copied() else {
+            return;
+        };
+        self.song.order.insert(self.arrange_selected + 1, number);
+        self.arrange_selected += 1;
+        self.status = format!("duplicated step for pattern {number}");
+    }
+    fn arrangement_remove_step(&mut self) {
+        if self.song.order.len() <= 1 {
+            self.status = "cannot remove the only arrangement step".into();
+            return;
+        }
+        self.song.order.remove(self.arrange_selected);
+        self.arrange_selected = self.arrange_selected.min(self.song.order.len() - 1);
+        self.tracker_order = self.tracker_order.min(self.song.order.len() - 1);
+        self.status = "arrangement step removed".into();
+    }
+    fn arrangement_move_step(&mut self, direction: i8) {
+        let len = self.song.order.len();
+        if len < 2 {
+            return;
+        }
+        let next = if direction < 0 {
+            self.arrange_selected.saturating_sub(1)
+        } else {
+            (self.arrange_selected + 1).min(len - 1)
+        };
+        if next != self.arrange_selected {
+            self.song.order.swap(self.arrange_selected, next);
+            self.arrange_selected = next;
+            self.status = format!("moved step to {:02}", next + 1);
+        }
+    }
+    fn arrangement_jump_to_pattern(&mut self) {
+        self.tracker_order = self
+            .arrange_selected
+            .min(self.song.order.len().saturating_sub(1));
+        self.tracker_row = 0;
+        self.clamp_tracker_cursor();
+        self.screen = Screen::Tracker;
+        self.status = format!("editing pattern {}", self.tracker_pattern_number());
+    }
+    fn arrangement_play_from_step(&mut self) {
+        self.tracker_order = self
+            .arrange_selected
+            .min(self.song.order.len().saturating_sub(1));
+        self.tracker_row = 0;
+        self.tracker_play(false);
     }
     fn tracker_note_off(&mut self) {
         self.cancel_tracker_gesture();
@@ -1860,7 +2185,7 @@ impl App {
         }
     }
     fn change_program(&mut self, direction: i8) {
-        if let Some(page) = self.song.pages.get_mut(self.tracker_page) {
+        if let Some(page) = self.current_page_mut() {
             page.program = if direction < 0 {
                 page.program.saturating_sub(1)
             } else {
@@ -2600,6 +2925,8 @@ fn perform(
             } else if a.screen == Screen::TrackerFiles {
                 a.song_selected = a.song_selected.saturating_sub(1);
                 a.confirm_song_delete = None;
+            } else if a.screen == Screen::TrackerArrange {
+                a.select_arrangement_step(-1);
             } else if a.screen == Screen::Tracker {
                 a.cancel_tracker_gesture();
                 a.tracker_row = a.tracker_row.saturating_sub(1);
@@ -2617,6 +2944,8 @@ fn perform(
             } else if a.screen == Screen::TrackerFiles {
                 a.song_selected = (a.song_selected + 1).min(a.song_list.len().saturating_sub(1));
                 a.confirm_song_delete = None;
+            } else if a.screen == Screen::TrackerArrange {
+                a.select_arrangement_step(1);
             } else if a.screen == Screen::Tracker {
                 a.cancel_tracker_gesture();
                 a.tracker_row = (a.tracker_row + 1).min(a.tracker_rows().saturating_sub(1));
@@ -2679,6 +3008,7 @@ fn perform(
             Screen::Help => a.activate_help(),
             Screen::Tracker => a.tracker_skip(),
             Screen::TrackerFiles => a.load_song(),
+            Screen::TrackerArrange => a.arrangement_jump_to_pattern(),
             Screen::TrackerPages => a.confirm_page_manager(),
             Screen::TrackerTools
             | Screen::TrackerNoob
@@ -2699,9 +3029,7 @@ fn perform(
             a.refresh_page_targets();
             a.sync_tracker_route();
             let page_online = a
-                .song
-                .pages
-                .get(a.tracker_page)
+                .current_page()
                 .is_some_and(|page| a.target_online(&page.target));
             a.status = if page_online {
                 "tracker ready · EDIT toggles entry · encoder press skips".into()
@@ -2722,6 +3050,7 @@ fn perform(
             a.screen = Screen::TrackerFiles;
             a.status = "song files · select an action".into();
         }
+        Action::OpenTrackerArrange => a.open_arrange(),
         Action::OpenTrackerPages => a.open_page_manager(),
         Action::OpenTrackerTools => {
             a.screen = Screen::TrackerTools;
@@ -2764,6 +3093,7 @@ fn perform(
                 a.screen,
                 Screen::TrackerFiles
                     | Screen::TrackerTools
+                    | Screen::TrackerArrange
                     | Screen::TrackerNoob
                     | Screen::TrackerLoop
                     | Screen::TrackerLoopAlign
@@ -2856,16 +3186,16 @@ fn perform(
         }
         Action::TrackerMute => {
             let global_lane = a.tracker_page * LANES_PER_PAGE + a.tracker_track;
+            let track = a.tracker_track;
             if let Some(lane) = a
-                .song
-                .pages
-                .get_mut(a.tracker_page)
-                .and_then(|page| page.lanes.get_mut(a.tracker_track))
+                .current_page_mut()
+                .and_then(|page| page.lanes.get_mut(track))
             {
                 lane.enabled = !lane.enabled;
                 let muted = !lane.enabled;
+                let name = lane.name.clone();
                 a.sequencer.mute(global_lane, muted);
-                a.status = format!("{} {}", lane.name, if muted { "muted" } else { "enabled" });
+                a.status = format!("{} {}", name, if muted { "muted" } else { "enabled" });
             }
         }
         Action::TrackerPageMute => a.toggle_tracker_page_mute(),
@@ -2879,6 +3209,21 @@ fn perform(
             a.clear_pattern_now();
         }
         Action::ClonePattern => a.clone_pattern(),
+        Action::CopyPattern => a.copy_pattern(),
+        Action::PastePatternNew => a.paste_pattern_new(),
+        Action::PastePatternOver => a.paste_pattern_over(),
+        Action::CopyLane => a.copy_lane(),
+        Action::PasteLane => a.paste_lane(),
+        Action::CopyPage => a.copy_page_block(),
+        Action::PastePage => a.paste_page_block(),
+        Action::ArrangementAppend => a.arrangement_append_current(),
+        Action::ArrangementInsert => a.arrangement_insert_current(),
+        Action::ArrangementRemove => a.arrangement_remove_step(),
+        Action::ArrangementDuplicate => a.arrangement_duplicate_step(),
+        Action::ArrangementMoveEarlier => a.arrangement_move_step(-1),
+        Action::ArrangementMoveLater => a.arrangement_move_step(1),
+        Action::ArrangementJumpToPattern => a.arrangement_jump_to_pattern(),
+        Action::ArrangementPlayFromStep => a.arrangement_play_from_step(),
         Action::PreviousOrder => a.move_order(-1),
         Action::NextOrder => a.move_order(1),
         Action::RepeatOrder => a.repeat_order(),
@@ -2921,8 +3266,8 @@ fn perform(
         }
         Action::PreviousProgram => a.change_program(-1),
         Action::NextProgram => a.change_program(1),
-        Action::TempoDown => a.set_tracker_tempo(a.song.tempo.saturating_sub(1)),
-        Action::TempoUp => a.set_tracker_tempo(a.song.tempo.saturating_add(1)),
+        Action::TempoDown => a.set_tracker_tempo(a.current_tempo().saturating_sub(1)),
+        Action::TempoUp => a.set_tracker_tempo(a.current_tempo().saturating_add(1)),
         Action::AddPage => a.add_tracker_page(),
         Action::EditPageTarget => a.edit_page_target(),
         Action::EditPageChannel => a.edit_page_channel(),
@@ -3006,6 +3351,27 @@ fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<Mi
             }
             KeyCode::Tab | KeyCode::Char('m') | KeyCode::Char('M') => Some(Action::NoobScale),
             KeyCode::Enter => Some(Action::ConfirmNoob),
+            KeyCode::Esc | KeyCode::Char('b') => Some(Action::Back),
+            KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Char(' ') => Some(Action::StopAll),
+            _ => None,
+        };
+        if let Some(action) = action {
+            perform(action, a, state, Some(tx));
+        }
+        return false;
+    }
+    if a.screen == Screen::TrackerArrange {
+        let action = match code {
+            KeyCode::Up => Some(Action::Up),
+            KeyCode::Down => Some(Action::Down),
+            KeyCode::Enter => Some(Action::ArrangementJumpToPattern),
+            KeyCode::Char('p') | KeyCode::Char('P') => Some(Action::ArrangementPlayFromStep),
+            KeyCode::Char('a') | KeyCode::Char('A') => Some(Action::ArrangementAppend),
+            KeyCode::Char('i') | KeyCode::Char('I') => Some(Action::ArrangementInsert),
+            KeyCode::Char('d') | KeyCode::Char('D') => Some(Action::ArrangementDuplicate),
+            KeyCode::Delete | KeyCode::Backspace => Some(Action::ArrangementRemove),
+            KeyCode::Char('<') => Some(Action::ArrangementMoveEarlier),
+            KeyCode::Char('>') => Some(Action::ArrangementMoveLater),
             KeyCode::Esc | KeyCode::Char('b') => Some(Action::Back),
             KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Char(' ') => Some(Action::StopAll),
             _ => None,
@@ -3109,6 +3475,22 @@ fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<Mi
                 a.toggle_tracker_page_mute();
                 return false;
             }
+            KeyCode::Char('y') => {
+                a.copy_lane();
+                return false;
+            }
+            KeyCode::Char('u') => {
+                a.paste_lane();
+                return false;
+            }
+            KeyCode::Char('Y') => {
+                a.copy_page_block();
+                return false;
+            }
+            KeyCode::Char('U') => {
+                a.paste_page_block();
+                return false;
+            }
             KeyCode::Char('p') => {
                 a.tracker_play(false);
                 return false;
@@ -3122,23 +3504,23 @@ fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<Mi
                 return false;
             }
             KeyCode::Char('+') | KeyCode::Char('=') => {
-                if let Some(page) = a.song.pages.get_mut(a.tracker_page) {
+                if let Some(page) = a.current_page_mut() {
                     page.program = (page.program + 1).min(127);
                 }
                 return false;
             }
             KeyCode::Char('_') => {
-                if let Some(page) = a.song.pages.get_mut(a.tracker_page) {
+                if let Some(page) = a.current_page_mut() {
                     page.program = page.program.saturating_sub(1);
                 }
                 return false;
             }
             KeyCode::Char('<') => {
-                a.set_tracker_tempo(a.song.tempo.saturating_sub(1));
+                a.set_tracker_tempo(a.current_tempo().saturating_sub(1));
                 return false;
             }
             KeyCode::Char('>') => {
-                a.set_tracker_tempo(a.song.tempo.saturating_add(1));
+                a.set_tracker_tempo(a.current_tempo().saturating_add(1));
                 return false;
             }
             KeyCode::Char('v') => {
@@ -3154,20 +3536,25 @@ fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<Mi
                 return false;
             }
             KeyCode::Char('C') => {
-                let old = a.tracker_pattern_number();
-                let number = a.song.patterns.keys().next_back().copied().unwrap_or(0) + 1;
-                if let Some(p) = a.song.patterns.get(&old).cloned() {
-                    a.song.patterns.insert(number, p);
-                    a.song.order.push(number);
-                    a.tracker_order = a.song.order.len() - 1;
-                }
+                a.clone_pattern();
+                return false;
+            }
+            KeyCode::Char('B') => {
+                a.copy_pattern();
+                return false;
+            }
+            KeyCode::Char('V') => {
+                a.paste_pattern_new();
+                return false;
+            }
+            KeyCode::Char('W') => {
+                a.paste_pattern_over();
                 return false;
             }
             KeyCode::Char('X') => {
                 let n = a.tracker_pattern_number();
-                let lanes = a.song.total_lanes();
                 if let Some(p) = a.song.patterns.get_mut(&n) {
-                    *p = crate::sequencer::Pattern::empty(p.rows.len(), lanes);
+                    *p = crate::sequencer::Pattern::empty_like_setup(p.rows.len(), p);
                 }
                 return false;
             }
@@ -3422,6 +3809,7 @@ fn draw<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         Screen::Help => draw_help(f, a),
         Screen::Tracker => draw_tracker(f, a),
         Screen::TrackerFiles => draw_tracker_files(f, a),
+        Screen::TrackerArrange => draw_tracker_arrange(f, a),
         Screen::TrackerPages => draw_tracker_pages(f, a),
         Screen::TrackerTools => draw_tracker_child(f, "FT2 TOOLS", "Pages · Files · Loop · Mute"),
         Screen::TrackerNoob => draw_noob_setup(f, a),
@@ -3532,8 +3920,8 @@ fn draw_tracker_loop<B: Backend>(f: &mut Frame<B>, a: &App) {
         .unwrap_or_else(|| "(inbox empty)".into());
     let details = if let Some(settings) = &a.song.audio_loop {
         let interpreted = settings.interpreted_bpm();
-        let ratio = f64::from(a.song.tempo) / interpreted.max(0.01);
-        let bar_unit = i32::from(a.song.meter.clamp(1, 16));
+        let ratio = f64::from(a.current_tempo()) / interpreted.max(0.01);
+        let bar_unit = i32::from(a.current_meter().clamp(1, 16));
         let offset_bars = f64::from(settings.offset_beats) / f64::from(bar_unit);
         format!(
             "FT2 WAV LOOP\n{}\n\nSource {:>6.2} BPM  {}\nTarget {:>3} BPM  ratio {:.3}\nRegion beat {} +{}\nOffset {:+.0} bar(s)\nCut {} · meter {}/4\n\n{}  {} / {}\n{} Hz · {}ch\nPitch changes with tempo",
@@ -3543,13 +3931,13 @@ fn draw_tracker_loop<B: Backend>(f: &mut Frame<B>, a: &App) {
             ),
             settings.source_bpm(),
             settings.interpretation.label(),
-            a.song.tempo,
+            a.current_tempo(),
             ratio,
             settings.start_beat,
             settings.length_beats,
             offset_bars,
             if a.loop_edit_bars { "BAR" } else { "BEAT" },
-            a.song.meter,
+            a.current_meter(),
             if player.playing { "PLAY" } else { "STOP" },
             short_time(player.elapsed),
             short_time(player.duration),
@@ -3578,14 +3966,14 @@ fn draw_tracker_loop<B: Backend>(f: &mut Frame<B>, a: &App) {
 fn draw_tracker_loop_align<B: Backend>(f: &mut Frame<B>, a: &App) {
     let z = f.size();
     let details = if let Some(settings) = &a.song.audio_loop {
-        let bar_unit = i32::from(a.song.meter.clamp(1, 16));
+        let bar_unit = i32::from(a.current_meter().clamp(1, 16));
         let offset_bars = f64::from(settings.offset_beats) / f64::from(bar_unit);
         format!(
             "LOOP ALIGN\n{}\n\nAUTO measures pulse/length\nand snaps length to bars.\n\nBAR- / BAR+\nmove placement by 1 bar.\n\nLength: {} beat(s)\nOffset: {:+.0} bar(s)\nMeter: {}/4\n\nLeft/right also shift.",
             truncate(&settings.file, z.width.saturating_sub(2) as usize),
             settings.length_beats,
             offset_bars,
-            a.song.meter,
+            a.current_meter(),
         )
     } else {
         "LOOP ALIGN\n\nImport a WAV first.\n\nAUTO measures a selected loop.\nBAR- / BAR+ move by bars.\n\nEXIT returns to loop.".into()
@@ -3703,9 +4091,9 @@ fn draw_status_bar<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     }
     let bpm = if matches!(
         a.screen,
-        Screen::Tracker | Screen::TrackerFiles | Screen::TrackerPages
+        Screen::Tracker | Screen::TrackerFiles | Screen::TrackerArrange | Screen::TrackerPages
     ) {
-        format!("{} BPM", a.song.tempo)
+        format!("{} BPM", a.current_tempo())
     } else {
         a.tap
             .bpm()
@@ -4030,8 +4418,15 @@ fn draw_ideas<B: Backend>(f: &mut Frame<B>, a: &mut App) {
 }
 fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     let z = f.size();
+    a.clamp_tracker_cursor();
     let transport = a.sequencer.status();
     let pattern_number = a.tracker_pattern_number();
+    let Some(pattern) = a.current_pattern() else {
+        return;
+    };
+    let Some(page) = pattern.pages.get(a.tracker_page) else {
+        return;
+    };
     let state = if a.note_editor.is_some() {
         "CELL"
     } else if a.tracker_recording.is_some() {
@@ -4045,10 +4440,7 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     };
     f.render_widget(
         Paragraph::new(truncate(
-            &format!(
-                "{} · {} {state}",
-                a.song.pages[a.tracker_page].name, a.song.name
-            ),
+            &format!("{} · {} {state}", page.name, a.song.name),
             z.width as usize,
         ))
         .style(
@@ -4058,7 +4450,6 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         ),
         rect(z.x, z.y, z.width, 1),
     );
-    let page = &a.song.pages[a.tracker_page];
     let page_online = a.target_online(&page.target);
     let available = if page_online { "ONLINE" } else { "OFFLINE" };
     f.render_widget(
@@ -4091,7 +4482,6 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         let rows = grid.height.saturating_sub(1) as usize;
         let start = a.tracker_row.saturating_sub(rows / 2);
         let mut header = String::from("ROW");
-        let page = &a.song.pages[a.tracker_page];
         for lane in &page.lanes {
             header.push_str(&format!(
                 "{:^w$}",
@@ -4103,75 +4493,70 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
             Paragraph::new(header).style(Style::default().fg(Color::Yellow)),
             rect(grid.x, grid.y, grid.width, 1),
         );
-        if let Some(pattern) = a.song.patterns.get(&pattern_number) {
-            for (screen_row, row_index) in
-                (start..(start + rows).min(pattern.rows.len())).enumerate()
-            {
-                let y = grid.y + 1 + screen_row as u16;
-                let selected = row_index == a.tracker_row;
-                let beat_stride = if [6, 12, 24, 48, 96].contains(&pattern.rows.len()) {
-                    (pattern.rows.len() / 4).max(1)
+        for (screen_row, row_index) in (start..(start + rows).min(pattern.rows.len())).enumerate() {
+            let y = grid.y + 1 + screen_row as u16;
+            let selected = row_index == a.tracker_row;
+            let beat_stride = if [6, 12, 24, 48, 96].contains(&pattern.rows.len()) {
+                (pattern.rows.len() / 4).max(1)
+            } else {
+                8.min(pattern.rows.len()).max(1)
+            };
+            let beat_start = row_index % beat_stride == 0;
+            let mut spans = vec![Span::styled(
+                format!("{:02X} ", row_index),
+                if selected {
+                    Style::default().fg(Color::Black).bg(Color::Green)
+                } else if beat_start {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
-                    8.min(pattern.rows.len()).max(1)
-                };
-                let beat_start = row_index % beat_stride == 0;
-                let mut spans = vec![Span::styled(
-                    format!("{:02X} ", row_index),
-                    if selected {
-                        Style::default().fg(Color::Black).bg(Color::Green)
-                    } else if beat_start {
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    },
-                )];
-                for (track_index, stored_cell) in pattern.rows[row_index]
-                    .iter()
-                    .enumerate()
-                    .skip(first_track)
-                    .take(visible_tracks)
-                {
-                    let cursor = selected && track_index == first_track + a.tracker_track;
-                    let cell = a
-                        .note_editor
-                        .filter(|editor| {
-                            editor.pattern == pattern_number
-                                && editor.row == row_index
-                                && editor.lane == track_index
-                        })
-                        .map_or(*stored_cell, |editor| editor.draft);
-                    let velocity = cell.velocity.map_or("..".into(), |v| format!("{:02X}", v));
-                    let text = format!(
-                        "{} {velocity}{} ",
-                        sequencer::note_name(cell.note),
-                        cell.command.marker()
-                    );
-                    spans.push(Span::styled(
-                        format!("{text:<w$}", w = usize::from(column_width)),
-                        if cursor {
-                            // Do not combine bold with black here. Some ANSI terminals
-                            // render bold black as bright-black/gray, and incremental
-                            // redraws can then leave a note with mixed foregrounds.
-                            Style::default().fg(Color::Black).bg(Color::Yellow)
-                        } else if selected {
-                            Style::default().bg(Color::DarkGray)
-                        } else if beat_start {
-                            Style::default().fg(Color::Yellow)
-                        } else {
-                            Style::default()
-                        },
-                    ));
-                }
-                f.render_widget(
-                    Paragraph::new(Spans::from(spans)),
-                    rect(grid.x, y, grid.width, 1),
+                    Style::default().fg(Color::DarkGray)
+                },
+            )];
+            for (track_index, stored_cell) in pattern.rows[row_index]
+                .iter()
+                .enumerate()
+                .skip(first_track)
+                .take(visible_tracks)
+            {
+                let cursor = selected && track_index == first_track + a.tracker_track;
+                let cell = a
+                    .note_editor
+                    .filter(|editor| {
+                        editor.pattern == pattern_number
+                            && editor.row == row_index
+                            && editor.lane == track_index
+                    })
+                    .map_or(*stored_cell, |editor| editor.draft);
+                let velocity = cell.velocity.map_or("..".into(), |v| format!("{:02X}", v));
+                let text = format!(
+                    "{} {velocity}{} ",
+                    sequencer::note_name(cell.note),
+                    cell.command.marker()
                 );
+                spans.push(Span::styled(
+                    format!("{text:<w$}", w = usize::from(column_width)),
+                    if cursor {
+                        // Do not combine bold with black here. Some ANSI terminals
+                        // render bold black as bright-black/gray, and incremental
+                        // redraws can then leave a note with mixed foregrounds.
+                        Style::default().fg(Color::Black).bg(Color::Yellow)
+                    } else if selected {
+                        Style::default().bg(Color::DarkGray)
+                    } else if beat_start {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default()
+                    },
+                ));
             }
+            f.render_widget(
+                Paragraph::new(Spans::from(spans)),
+                rect(grid.x, y, grid.width, 1),
+            );
         }
     }
-    let page = &a.song.pages[a.tracker_page];
     let lane = &page.lanes[a.tracker_track];
     let footer = if let Some(editor) = a.note_editor {
         let command = match editor.draft.command {
@@ -4203,7 +4588,7 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         format!(
             "P{}/{} {} L{} ch{} {} {}",
             a.tracker_page + 1,
-            a.song.pages.len(),
+            pattern.pages.len(),
             page.name,
             a.tracker_track + 1,
             page.channel + 1,
@@ -4227,7 +4612,9 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
 }
 
 fn draw_tracker_program_browser<B: Backend>(f: &mut Frame<B>, a: &App, area: Rect) {
-    let page = &a.song.pages[a.tracker_page];
+    let Some(page) = a.current_page() else {
+        return;
+    };
     let selected = a
         .note_editor
         .and_then(|editor| editor.draft.program)
@@ -4269,8 +4656,9 @@ fn draw_tracker_program_browser<B: Backend>(f: &mut Frame<B>, a: &App, area: Rec
 
 fn draw_tracker_pages<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     let z = f.size();
+    a.clamp_tracker_cursor();
     f.render_widget(
-        Paragraph::new("TRACKER PAGES · 4 LANES EACH").style(
+        Paragraph::new("FT2 PATTERN PAGES · 4 LANES").style(
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
@@ -4283,8 +4671,7 @@ fn draw_tracker_pages<B: Backend>(f: &mut Frame<B>, a: &mut App) {
             let rows = usize::from(body_height);
             let start = a.tracker_page.saturating_sub(rows.saturating_sub(1));
             let lines = a
-                .song
-                .pages
+                .current_pages()
                 .iter()
                 .enumerate()
                 .skip(start)
@@ -4315,7 +4702,7 @@ fn draw_tracker_pages<B: Backend>(f: &mut Frame<B>, a: &mut App) {
             f.render_widget(
                 Paragraph::new(lines).block(
                     Block::default()
-                        .title(format!(" {} pages ", a.song.pages.len()))
+                        .title(format!(" {} pages ", a.current_pages().len()))
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Green)),
                 ),
@@ -4371,6 +4758,78 @@ fn draw_tracker_pages<B: Backend>(f: &mut Frame<B>, a: &mut App) {
             );
         }
     }
+}
+
+fn draw_tracker_arrange<B: Backend>(f: &mut Frame<B>, a: &mut App) {
+    let z = f.size();
+    a.arrange_selected = a.arrange_selected.min(a.song.order.len().saturating_sub(1));
+    f.render_widget(
+        Paragraph::new("FT2 ARRANGEMENT").style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        rect(z.x, z.y, z.width, 1),
+    );
+    let list = rect(z.x, z.y + 1, z.width, z.height.saturating_sub(5));
+    let rows = list.height.saturating_sub(2) as usize;
+    let offset = a.arrange_selected.saturating_sub(rows.saturating_sub(1));
+    let lines = a
+        .song
+        .order
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(rows)
+        .map(|(index, pattern_number)| {
+            let pattern = a.song.patterns.get(pattern_number);
+            let detail = pattern.map_or_else(
+                || "missing".into(),
+                |pattern| {
+                    format!(
+                        "{:03} rows {} BPM {}/4 {}p",
+                        pattern.rows.len(),
+                        pattern.tempo,
+                        pattern.meter,
+                        pattern.pages.len()
+                    )
+                },
+            );
+            let text = format!(
+                "{} {:02}  pat {:02}  {}",
+                if index == a.arrange_selected {
+                    ">"
+                } else {
+                    " "
+                },
+                index + 1,
+                pattern_number,
+                detail
+            );
+            Spans::from(Span::styled(
+                truncate(&text, usize::from(z.width.saturating_sub(2))),
+                if index == a.arrange_selected {
+                    Style::default().fg(Color::Black).bg(Color::Yellow)
+                } else {
+                    Style::default()
+                },
+            ))
+        })
+        .collect::<Vec<_>>();
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(format!(" {} steps ", a.song.order.len()))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Green)),
+        ),
+        list,
+    );
+    f.render_widget(
+        Paragraph::new(truncate(&a.status, z.width as usize))
+            .style(Style::default().fg(Color::DarkGray)),
+        rect(z.x, z.y + z.height.saturating_sub(4), z.width, 1),
+    );
 }
 
 fn draw_tracker_files<B: Backend>(f: &mut Frame<B>, a: &mut App) {
@@ -4564,6 +5023,7 @@ mod tests {
         render(40, 20, Screen::Help);
         render(40, 20, Screen::Tracker);
         render(40, 20, Screen::TrackerFiles);
+        render(40, 20, Screen::TrackerArrange);
         render(40, 20, Screen::TrackerPages);
         render(40, 20, Screen::TrackerTools);
         render(40, 20, Screen::TrackerNoob);
@@ -4579,6 +5039,7 @@ mod tests {
         render(38, 14, Screen::Help);
         render(38, 14, Screen::Tracker);
         render(38, 14, Screen::TrackerFiles);
+        render(38, 14, Screen::TrackerArrange);
         render(38, 14, Screen::TrackerPages);
         render(38, 14, Screen::TrackerTools);
         render(38, 14, Screen::TrackerNoob);
@@ -4737,7 +5198,7 @@ mod tests {
         let p = presets();
         let mut a = app(&p);
         a.screen = Screen::Tracker;
-        a.song.tempo = 137;
+        a.song.patterns.get_mut(&0).unwrap().tempo = 137;
         let now = Instant::now();
         a.tap.tap(now);
         a.tap.tap(now + Duration::from_millis(500));
@@ -4775,8 +5236,8 @@ mod tests {
         perform(Action::OpenTrackerPages, &mut a, Path::new("/none"), None);
         assert_eq!(a.screen, Screen::TrackerPages);
         perform(Action::AddPage, &mut a, Path::new("/none"), None);
-        assert_eq!(a.song.pages.len(), 3);
-        assert_eq!(a.song.pages[2].lanes.len(), 4);
+        assert_eq!(a.current_pages().len(), 3);
+        assert_eq!(a.current_pages()[2].lanes.len(), 4);
 
         perform(Action::EditPageTarget, &mut a, Path::new("/none"), None);
         assert_eq!(a.page_manager_mode, PageManagerMode::Target);
@@ -4787,7 +5248,7 @@ mod tests {
         perform(Action::EditPageChannel, &mut a, Path::new("/none"), None);
         perform(Action::Down, &mut a, Path::new("/none"), None);
         perform(Action::Activate, &mut a, Path::new("/none"), None);
-        assert_eq!(a.song.pages[2].channel, 1);
+        assert_eq!(a.current_pages()[2].channel, 1);
 
         perform(Action::PreviousTrack, &mut a, Path::new("/none"), None);
         assert_eq!(a.tracker_page, 1);
@@ -4805,7 +5266,7 @@ mod tests {
         let original = a.song.clone();
         a.open_page_manager();
         a.add_tracker_page();
-        a.song.pages[a.tracker_page].target = PageTarget::Midi("UNPLUGGED DEVICE".into());
+        a.current_page_mut().unwrap().target = PageTarget::Midi("UNPLUGGED DEVICE".into());
         a.refresh_page_targets();
         let b = TestBackend::new(40, 20);
         let mut t = Terminal::new(b).unwrap();
@@ -5154,7 +5615,7 @@ mod tests {
         let mut a = app(&p);
         assert_eq!(a.tracker_keyboard_note(0), 60);
         a.tracker_page = 1;
-        assert!(a.song.pages[1].percussion);
+        assert!(a.current_pages()[1].percussion);
         assert_eq!(a.tracker_keyboard_note(0), 36);
         assert_eq!(a.tracker_keyboard_note(11), 60);
         a.config.external_midi.percussion_notes = vec![36, 38, 40];
@@ -5226,7 +5687,7 @@ mod tests {
         let mut a = app(&p);
         a.screen = Screen::Tracker;
         a.config.external_midi.profile = "roland-d-50".into();
-        a.song.pages[0].target = PageTarget::ConfiguredExternal;
+        a.current_page_mut().unwrap().target = PageTarget::ConfiguredExternal;
         a.open_note_editor();
         a.select_note_editor_field(NoteEditorField::Program);
 
@@ -5242,15 +5703,15 @@ mod tests {
         assert_eq!(a.tracker_program_messages(1), vec![vec![0xc0, 1]]);
 
         a.config.external_midi.bank_select = BankSelectMode::Cc0Cc32;
-        a.song.pages[0].bank_msb = 5;
-        a.song.pages[0].bank_lsb = 9;
+        a.current_page_mut().unwrap().bank_msb = 5;
+        a.current_page_mut().unwrap().bank_lsb = 9;
         assert_eq!(
             a.tracker_program_messages(7),
             vec![vec![0xb0, 0, 5], vec![0xb0, 32, 9], vec![0xc0, 7]]
         );
         a.config.external_midi.bank_select = BankSelectMode::Off;
-        a.song.pages[0].bank_msb = 0;
-        a.song.pages[0].bank_lsb = 0;
+        a.current_page_mut().unwrap().bank_msb = 0;
+        a.current_page_mut().unwrap().bank_lsb = 0;
 
         let backend = TestBackend::new(40, 20);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -5545,6 +6006,93 @@ mod tests {
     }
 
     #[test]
+    fn pattern_clipboard_pastes_new_and_over_with_confirmation() {
+        let p = presets();
+        let mut a = app(&p);
+        a.song.patterns.get_mut(&0).unwrap().rows[0][0].note = Note::On(60);
+        a.copy_pattern();
+        a.paste_pattern_new();
+        assert_eq!(a.tracker_pattern_number(), 1);
+        assert_eq!(a.song.patterns[&1].rows[0][0].note, Note::On(60));
+        a.song.patterns.get_mut(&1).unwrap().rows[0][0].note = Note::On(61);
+        a.paste_pattern_over();
+        assert!(a.confirm_pattern_paste_over);
+        assert_eq!(a.song.patterns[&1].rows[0][0].note, Note::On(61));
+        a.paste_pattern_over();
+        assert_eq!(a.song.patterns[&1].rows[0][0].note, Note::On(60));
+    }
+
+    #[test]
+    fn lane_and_page_clipboards_paste_overlap_and_report_truncation() {
+        let p = presets();
+        let mut a = app(&p);
+        a.song.patterns.get_mut(&0).unwrap().rows[0][0] = Cell {
+            note: Note::On(60),
+            velocity: Some(77),
+            program: Some(5),
+            gate: Some(40),
+            command: Command::Delay(3),
+        };
+        a.copy_lane();
+        a.song.patterns.get_mut(&0).unwrap().rows.truncate(1);
+        a.tracker_track = 1;
+        a.paste_lane();
+        assert_eq!(a.song.patterns[&0].rows[0][1].note, Note::On(60));
+        assert_eq!(a.song.patterns[&0].rows[0][1].program, Some(5));
+        assert!(a.status.contains("truncated"));
+
+        a.tracker_track = 0;
+        a.copy_page_block();
+        a.add_tracker_page();
+        a.tracker_page = 1;
+        a.paste_page_block();
+        assert_eq!(
+            a.song.patterns[&0].rows[0][LANES_PER_PAGE].velocity,
+            Some(77)
+        );
+    }
+
+    #[test]
+    fn arrangement_screen_repeats_reorders_and_jumps_to_pattern() {
+        let p = presets();
+        let mut a = app(&p);
+        a.clone_pattern();
+        a.open_arrange();
+        assert_eq!(a.screen, Screen::TrackerArrange);
+        a.arrange_selected = 0;
+        a.arrangement_duplicate_step();
+        assert_eq!(a.song.order[1], 0);
+        a.arrangement_move_step(1);
+        assert_eq!(a.arrange_selected, 2);
+        a.arrangement_remove_step();
+        assert_eq!(a.song.order.len(), 2);
+        a.arrangement_jump_to_pattern();
+        assert_eq!(a.screen, Screen::Tracker);
+        assert_eq!(a.tracker_order, 1);
+    }
+
+    #[test]
+    fn pattern_switch_clamps_cursor_to_pattern_shape() {
+        let p = presets();
+        let mut a = app(&p);
+        let mut small = sequencer::Pattern::from_config(&a.config.external_midi, 8, 4);
+        small.pages.truncate(1);
+        for row in &mut small.rows {
+            row.truncate(LANES_PER_PAGE);
+        }
+        a.song.patterns.insert(1, small);
+        a.song.order.push(1);
+        a.tracker_page = 1;
+        a.tracker_track = 3;
+        a.tracker_row = 63;
+        a.tracker_order = 1;
+        a.clamp_tracker_cursor();
+        assert_eq!(a.tracker_page, 0);
+        assert_eq!(a.tracker_track, 3);
+        assert_eq!(a.tracker_row, 7);
+    }
+
+    #[test]
     fn pattern_setup_offers_matching_four_four_and_three_four_sizes() {
         assert_eq!(pattern_sizes(4), [8, 16, 32, 64, 128]);
         assert_eq!(pattern_sizes(3), [6, 12, 24, 48, 96]);
@@ -5567,15 +6115,16 @@ mod tests {
         let p = presets();
         let mut a = app(&p);
         a.screen = Screen::Tracker;
-        a.song.pages[0].target = PageTarget::ActiveInstrument;
+        a.current_page_mut().unwrap().target = PageTarget::ActiveInstrument;
         a.begin_tracker_recording();
         assert!(a.tracker_recording.is_none());
         assert!(a.status.contains("loaded synth stays isolated"));
 
-        a.song.pages[0].target = PageTarget::ConfiguredExternal;
+        a.current_page_mut().unwrap().target = PageTarget::ConfiguredExternal;
+        let setup = a.current_pattern().unwrap().clone();
         a.song
             .patterns
-            .insert(1, sequencer::Pattern::empty(8, a.song.total_lanes()));
+            .insert(1, sequencer::Pattern::empty_like_setup(8, &setup));
         a.song.order.push(1);
         a.tracker_order = 1;
         a.begin_tracker_recording();
@@ -5631,7 +6180,7 @@ mod tests {
         drain(&rx, &mut a, Path::new("/none"), &tx);
         assert_eq!(a.tracker_row, 1);
         let row = a.tracker_row;
-        let tempo = a.song.tempo;
+        let tempo = a.current_tempo();
         a.tracker_cell_mut().unwrap().note = Note::On(70);
         tx.send(MidiEvent::Pad(crate::pads::PadAction::Page1, true))
             .unwrap();
@@ -5642,7 +6191,7 @@ mod tests {
         tx.send(MidiEvent::Pad(crate::pads::PadAction::Item4, true))
             .unwrap();
         drain(&rx, &mut a, Path::new("/none"), &tx);
-        assert_eq!(a.song.tempo, tempo + 1);
+        assert_eq!(a.current_tempo(), tempo + 1);
         assert_eq!(a.tracker_row, (row + 1) % a.tracker_rows());
         assert_eq!(a.song.patterns[&0].rows[row][0].note, Note::Empty);
         a.select_menu_page(0);
@@ -5835,6 +6384,7 @@ mod tests {
             Screen::Help,
             Screen::Tracker,
             Screen::TrackerFiles,
+            Screen::TrackerArrange,
             Screen::TrackerPages,
             Screen::AudioRecorder,
         ] {

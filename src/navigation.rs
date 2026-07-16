@@ -11,6 +11,7 @@ pub enum Screen {
     Help,
     Tracker,
     TrackerFiles,
+    TrackerArrange,
     TrackerPages,
     TrackerTools,
     TrackerNoob,
@@ -20,15 +21,16 @@ pub enum Screen {
 }
 
 impl Screen {
-    pub const COUNT: usize = 12;
+    pub const COUNT: usize = 13;
     #[cfg(test)]
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Presets,
         Self::Playback,
         Self::Ideas,
         Self::Help,
         Self::Tracker,
         Self::TrackerFiles,
+        Self::TrackerArrange,
         Self::TrackerPages,
         Self::TrackerTools,
         Self::TrackerNoob,
@@ -45,12 +47,13 @@ impl Screen {
             Self::Help => 3,
             Self::Tracker => 4,
             Self::TrackerFiles => 5,
-            Self::TrackerPages => 6,
-            Self::TrackerTools => 7,
-            Self::TrackerNoob => 8,
-            Self::TrackerLoop => 9,
-            Self::TrackerLoopAlign => 10,
-            Self::AudioRecorder => 11,
+            Self::TrackerArrange => 6,
+            Self::TrackerPages => 7,
+            Self::TrackerTools => 8,
+            Self::TrackerNoob => 9,
+            Self::TrackerLoop => 10,
+            Self::TrackerLoopAlign => 11,
+            Self::AudioRecorder => 12,
         }
     }
 
@@ -62,6 +65,7 @@ impl Screen {
             Self::Help => "HELP",
             Self::Tracker => "FT2",
             Self::TrackerFiles => "FILES",
+            Self::TrackerArrange => "ARRANGE",
             Self::TrackerPages => "TRACKS",
             Self::TrackerTools => "FT2 TOOLS",
             Self::TrackerNoob => "N00B SETUP",
@@ -92,6 +96,7 @@ pub enum Action {
     OpenHelp,
     OpenTracker,
     OpenTrackerFiles,
+    OpenTrackerArrange,
     OpenTrackerPages,
     OpenTrackerTools,
     OpenTrackerLoop,
@@ -165,8 +170,23 @@ pub enum Action {
     DeleteSong,
     NewPattern,
     ClonePattern,
+    CopyPattern,
+    PastePatternNew,
+    PastePatternOver,
     ClearPattern,
     ClearPatternNow,
+    CopyLane,
+    PasteLane,
+    CopyPage,
+    PastePage,
+    ArrangementAppend,
+    ArrangementInsert,
+    ArrangementRemove,
+    ArrangementDuplicate,
+    ArrangementMoveEarlier,
+    ArrangementMoveLater,
+    ArrangementJumpToPattern,
+    ArrangementPlayFromStep,
     PreviousOrder,
     NextOrder,
     RepeatOrder,
@@ -411,17 +431,55 @@ const TRACKER_TOOLS: [MenuPage; 4] = [
         [
             on("PAGES", Action::OpenTrackerPages),
             on("FILES", Action::OpenTrackerFiles),
-            on("LOOP", Action::OpenTrackerLoop),
+            on("ARR", Action::OpenTrackerArrange),
             on("MUTE", Action::TrackerMute),
         ],
     ),
     page(
-        "PAGE",
+        "CLIP",
         [
-            on("NEXT", Action::NextTrackerPage),
+            on("COPY L", Action::CopyLane),
+            on("PASTE L", Action::PasteLane),
+            on("COPY P", Action::CopyPage),
+            on("PASTE P", Action::PastePage),
+        ],
+    ),
+    page(
+        "LOOP",
+        [
+            on("LOOP", Action::OpenTrackerLoop),
+            off(""),
+            off(""),
+            off(""),
+        ],
+    ),
+    page(
+        "SYS",
+        [
+            on("PANIC", Action::StopAll),
+            on("STOP", Action::TrackerStop),
             on("HELP", Action::OpenHelp),
-            off(""),
-            off(""),
+            on("EXIT", Action::Back),
+        ],
+    ),
+];
+const ARRANGE: [MenuPage; 4] = [
+    page(
+        "OPS",
+        [
+            on("PLAY", Action::ArrangementPlayFromStep),
+            on("JUMP", Action::ArrangementJumpToPattern),
+            on("APPEND", Action::ArrangementAppend),
+            on("INSERT", Action::ArrangementInsert),
+        ],
+    ),
+    page(
+        "STEP",
+        [
+            on("UP", Action::ArrangementMoveEarlier),
+            on("DOWN", Action::ArrangementMoveLater),
+            on("REPEAT", Action::ArrangementDuplicate),
+            on("REMOVE", Action::ArrangementRemove),
         ],
     ),
     page("", [off(""), off(""), off(""), off("")]),
@@ -630,15 +688,15 @@ const FILES: [MenuPage; 4] = [
         [
             on("NEW", Action::NewPattern),
             on("CLONE", Action::ClonePattern),
-            on("CLEAR", Action::ClearPattern),
-            off(""),
+            on("COPY", Action::CopyPattern),
+            on("PASTE+", Action::PastePatternNew),
         ],
     ),
     page(
-        "ORDER",
+        "EDIT",
         [
-            on("ORDER-", Action::PreviousOrder),
-            on("ORDER+", Action::NextOrder),
+            on("OVER", Action::PastePatternOver),
+            on("CLEAR", Action::ClearPattern),
             on("REPEAT", Action::RepeatOrder),
             on("REMOVE", Action::DeleteOrder),
         ],
@@ -796,6 +854,7 @@ pub fn pages(screen: Screen, context: MenuContext) -> &'static [MenuPage; 4] {
         (Screen::Tracker, _) => &TRACKER,
         (Screen::TrackerFiles, MenuContext::PatternClear) => &PATTERN_CLEAR,
         (Screen::TrackerFiles, _) => &FILES,
+        (Screen::TrackerArrange, _) => &ARRANGE,
         (Screen::TrackerPages, MenuContext::PageTarget | MenuContext::PageChannel) => &PAGE_FIELD,
         (Screen::TrackerPages, _) => &PAGES,
         (Screen::TrackerTools, _) => &TRACKER_TOOLS,

@@ -66,10 +66,10 @@ normal list/row/choice operation. The main setup wizard loads a matching known
 profile or offers MIDI learn; compact profiles can also be edited directly or
 with `shr pads set NOTE ROLE`.
 
-Legacy role names from v1 profiles are accepted in physical order. New profiles
-should use `page-1` through `page-4`, `page-cycle`, and `item-1` through
-`item-4`. Command-note on and off remain consumed; unmapped musical notes pass
-through. Disabled (`-`) and planned (`~`) entries never dispatch actions.
+Older physical role aliases are accepted in physical order. New profiles should
+use `page-1` through `page-4`, `page-cycle`, and `item-1` through `item-4`.
+Command-note on and off remain consumed; unmapped musical notes pass through.
+Disabled (`-`) and planned (`~`) entries never dispatch actions.
 
 List or change controller mappings with:
 
@@ -92,8 +92,9 @@ learn` writes these details. See
 
 ## Tracker pages
 
-Every FT2 page has four note lanes. Pages play at the same time and each page
-stores:
+Every FT2 page has four note lanes. Pages are stored inside each FT2 Pattern,
+not globally on the Project. Pages in the current pattern play at the same time
+and each page stores:
 
 - its target;
 - MIDI channel 1–16;
@@ -102,11 +103,12 @@ stores:
 - a reserved list of MIDI setup messages for later use.
 
 Open **PAGES** on the tracker screen. Use the main encoder or **PAGE−** and
-**PAGE+** to select a page. **ADD** creates another four-lane page. **TARGET**
+**PAGE+** to select a page in the selected pattern. **ADD** creates another
+four-lane page in that pattern. **TARGET**
 chooses an ALSA MIDI output that is currently visible, the active SHR-DAW
 software instrument, or the configured output. **CHANNEL**
 chooses 1–16. Encoder press confirms a field. **DONE** keeps all page changes;
-**CANCEL** restores the song from before page management opened.
+**CANCEL** restores the Project from before page management opened.
 
 The active-instrument choice always means the single software instrument that
 SHR-DAW currently owns and monitors. It does not start another engine. It is
@@ -119,7 +121,8 @@ available.
 
 ## Configured output
 
-The `external_midi.*` settings provide the configured route for new songs.
+The `external_midi.*` settings provide the configured route for new Projects
+and newly created FT2 Patterns.
 They also hold tracker timing, gate, bank/program, transport, live-thru, and
 optional drum-map defaults.
 
@@ -144,14 +147,14 @@ Use `roland-d-50` for a D-50, or leave an unknown id to retain the numeric
 installed shared-data directory, and the checkout's `midi-devices/` directory.
 Exact MIDI port targets can also match a profile's `port_matches` entries.
 
-## Song files
+## Project files
 
-Songs are stored below
-`${XDG_DATA_HOME:-~/.local/share}/shsynth/songs/`. Release-candidate song
-format v1 stores page targets, setup messages, four lanes per page, every cell
-field, and optional meter/WAV-loop settings. Older v1 files without those
-records load as 4/4 with no loop. Files with another version or shape are not
-loaded or overwritten; they can still be removed with confirmed Delete.
+Projects are stored as `.shsong` text files below
+`${XDG_DATA_HOME:-~/.local/share}/shsynth/songs/`. The current development
+format stores each FT2 Pattern as a self-contained unit with its own tempo,
+meter, page targets, setup messages, four lanes per page, and every cell field.
+Files with another version or unknown shape are not loaded or overwritten; they
+can still be removed with confirmed Delete.
 
 ## FT2 WAV loop routing and storage
 

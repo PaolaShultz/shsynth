@@ -18,7 +18,8 @@ implemented.
 | FT2 N00B | Choose chromatic root plus major/natural minor; map live notes to the nearest scale tone with downward ties; preserve exact note ownership across releases and mode changes. |
 | FT2 loop | Select/import WAV; play here/from start/stop; source BPM and half/normal/double interpretation; start/length cuts in beat or bar units; align child screen for auto bar alignment and one-bar placement shifts. |
 | FT2 cell edit | Transactional note, gate, velocity, per-note program, single command type/parameter, clear-field, confirm/cancel, step-entry handoff, stop, and panic actions. Four-button encoder page selection remains available. |
-| Tracker files | Select saved song; load; preview/stop; save with overwrite confirmation; delete with repeat confirmation; new and clone pattern; clear immediately or choose 3/4 (6/12/24/48/96 rows) / 4/4 (8/16/32/64/128 rows); previous/next/repeat/remove order entry; back/cancel and panic. |
+| Tracker files | Select saved Project; load; preview/stop; save with overwrite confirmation; delete with repeat confirmation; new, clone, copy, paste-new, paste-over, clear, or resize FT2 patterns; back/cancel and panic. |
+| FT2 arrange | Select arrangement step; append/insert current pattern; duplicate/remove step; move step earlier/later; jump to referenced pattern; play from selected step; back and panic. |
 | Pattern setup | Choose 3/4 or 4/4 and pattern size; confirm new/destructive resize, cancel, or clear while retaining the current size. |
 | Page/track manager | Select previous/next page; add four-lane page; edit target; edit channel; confirm all changes; cancel and restore the original song; open files; mute current page. |
 | Target/channel field mode | Previous/next choice, confirm field, cancel field. Encoder turn/press and menu items share these operations. |
@@ -79,8 +80,9 @@ Blank physical positions and wholly empty pages are omitted.
 | FT2 | Mode | Play | Record | Edit | N00B |
 | FT2 | Move | Order− | Order+ | Lane− | Lane+ |
 | FT2 | Sys | Panic | Stop | Tools | Exit |
-| FT2 tools | Ops | Pages/tracks | Files | Loop | Mute lane |
-| FT2 tools | Page | Next page | Help | — | — |
+| FT2 tools | Ops | Pages/tracks | Files | Arrange | Mute lane |
+| FT2 tools | Clip | Copy lane | Paste lane | Copy page | Paste page |
+| FT2 tools | Loop | Loop | — | — | — |
 | FT2 tools | Sys | Panic | Stop | Help | Exit |
 | N00B setup | Ops | Root− | Root+ | Scale | Done |
 | N00B setup | Sys | Panic | Stop | Help | Exit |
@@ -101,9 +103,12 @@ Blank physical positions and wholly empty pages are omitted.
 | FT2 cell edit | Adjust | Effect parameter | Value− | Value+ | — |
 | FT2 cell edit | Sys | Panic | Stop | — | Exit/cancel |
 | Files | Ops | Load | Save | Preview/stop | Delete |
-| Files | Pattern | New | Clone | Clear | — |
-| Files | Order | Previous | Next | Repeat | Remove |
+| Files | Pattern | New | Clone | Copy | Paste new |
+| Files | Edit | Paste over | Clear | Repeat | Remove |
 | Files | Sys | Panic | — | Help | Exit |
+| Arrange | Ops | Play | Jump | Append | Insert |
+| Arrange | Step | Up | Down | Repeat | Remove |
+| Arrange | Sys | Panic | Stop | Help | Exit |
 | Pattern setup | Ops | 3/4 | 4/4 | Size− | Size+ |
 | Pattern setup | Apply | Confirm | Keep | — | — |
 | Pattern setup | Sys | Panic | — | Help | Exit/cancel |
@@ -120,8 +125,7 @@ Blank physical positions and wholly empty pages are omitted.
 
 A cell contains `note`, optional `velocity`, optional per-note `program`,
 optional `gate`, and one `command`: none, cut, delay, retrigger, or tempo. Song
-format v1 stores all of these fields directly. There are no earlier song
-formats or migration paths in the release candidate.
+format stores all of these fields directly inside each FT2 Pattern.
 
 | Page | Item 1 | Item 2 | Item 3 | Item 4 |
 |---|---|---|---|---|
@@ -136,9 +140,9 @@ per cell. Gate is 1–100% of a row or inherited; delayed notes and retrigger
 pulses are bounded by the row. Program is a per-note override of the page
 program, routed before the note on the same exact target/channel.
 
-Physical MIDI notes and CCs remain configuration. Old v1 `arp`, `pad`, `prog`,
-`loop`, `stop`, `play`, `rec`, and `tap-tempo` pad role names load as the same
-physical first-through-eighth positions, so existing local profiles migrate to
+Physical MIDI notes and CCs remain configuration. Older `arp`, `pad`, `prog`,
+`loop`, `stop`, `play`, `rec`, and `tap-tempo` pad role aliases load as the
+same physical first-through-eighth positions, so local profiles can move to
 page 1–4 and item 1–4 without changing note numbers.
 
 ## Parameters, pickup, and extension points

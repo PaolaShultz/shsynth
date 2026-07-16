@@ -6,8 +6,9 @@ workflow, and the decisions that must survive a fresh conversation.
 
 ## Purpose and environment
 
-SHSynth is a Rust TUI appliance around `synthv1_jack`, JACK, ALSA MIDI, and a
-small physical controller. Keep it responsive at 40×20 and safe for live audio.
+SHR-DAW is a Raspberry Pi mini DAW with a Rust TUI, FT2-style tracker, synth
+hosts, MIDI routing, loops, recording, JACK/ALSA integration, and a small
+physical controller. Keep it responsive at 40×20 and safe for live audio.
 The system `cargo` may be too old; use the installed Rust 1.85 toolchain:
 
 ```sh
@@ -50,7 +51,7 @@ invent a Git author identity or expose authentication credentials.
   yellow within ±0.03, red above +0.03.
 - Command pad note-on and note-off are consumed; musical MIDI passes through.
 - Keep synthv1 0.9.29 indices/ranges in `control.rs`. Parse preset XML by name
-  because legacy files have obsolete indices.
+  because older source files can have obsolete indices.
 - Preserve user ideas, controller config, unrelated processes, and existing
   work. Do not start audible synth/JACK tests unless explicitly requested.
 
@@ -62,5 +63,5 @@ source/license information for imported patches. Update README when behavior,
 commands, mappings, storage, or hardware assumptions change. Remove stale docs
 instead of leaving conflicting instructions.
 
-Do not publish the legacy preset bank until its provenance is established; see
+Do not publish the uncleared preset bank until its provenance is established; see
 `THIRD_PARTY.md`. Project code and newly authored cleared presets use MIT.
