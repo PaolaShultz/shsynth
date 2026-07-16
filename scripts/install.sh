@@ -55,5 +55,5 @@ if $INIT_CONFIG; then
   shr-setup
 fi
 
-printf '\nInstalled: shr (Rust app), shs (legacy script)\n'
-printf 'Run `shr doctor`, then run `shr`. Reconfigure hardware with `shr-setup`.\n'
+printf '\nInstalled: shr (Rust app), shs and synth-player (compatibility aliases)\n'
+printf 'Run shr doctor, then run shr. Reconfigure hardware with shr-setup.\n'

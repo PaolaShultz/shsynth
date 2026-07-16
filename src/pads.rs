@@ -167,6 +167,13 @@ impl Default for PadConfig {
 }
 
 impl PadConfig {
+    pub fn unmapped(input_match: impl Into<String>) -> Self {
+        Self {
+            input_match: Some(input_match.into()),
+            ..Self::default()
+        }
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
@@ -183,8 +190,8 @@ impl PadConfig {
         let mut saw_cc_buttons = false;
         let mut saw_controls = false;
         for (line_no, line) in text.lines().enumerate() {
-            let line = line.split('#').next().unwrap_or("").trim();
-            if line.is_empty() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
                 continue;
             }
             let (key, value) = line.split_once('=').with_context(|| {
@@ -204,7 +211,7 @@ impl PadConfig {
                 continue;
             }
             if key.trim() == "encoder.relative_cc" {
-                self.encoder_relative_cc = optional_cc(value, "encoder relative CC")?;
+                self.encoder_relative_cc = optional_midi_number(value, "encoder relative CC")?;
                 continue;
             }
             if key.trim() == "encoder.relative_reverse" {
@@ -216,15 +223,15 @@ impl PadConfig {
                 continue;
             }
             if key.trim() == "encoder.press_cc" {
-                self.encoder_press_cc = optional_cc(value, "encoder press CC")?;
+                self.encoder_press_cc = optional_midi_number(value, "encoder press CC")?;
                 continue;
             }
             if key.trim() == "encoder.press_note" {
-                self.encoder_press_note = optional_cc(value, "encoder press note")?;
+                self.encoder_press_note = optional_midi_number(value, "encoder press note")?;
                 continue;
             }
             if key.trim() == "lock.cc" {
-                self.lock_cc = optional_cc(value, "pad lock CC")?;
+                self.lock_cc = optional_midi_number(value, "pad lock CC")?;
                 continue;
             }
             if let Some(raw) = key.trim().strip_prefix("cc.") {
@@ -232,7 +239,7 @@ impl PadConfig {
                     self.controls.clear();
                     saw_controls = true;
                 }
-                let raw: u8 = raw.parse().context("controller CC must be 0..127")?;
+                let raw = midi_number(raw, "controller CC")?;
                 let target: u8 = value
                     .trim()
                     .parse()
@@ -248,7 +255,7 @@ impl PadConfig {
                     self.cc_buttons.clear();
                     saw_cc_buttons = true;
                 }
-                let raw: u8 = raw.parse().context("controller button CC must be 0..127")?;
+                let raw = midi_number(raw, "controller button CC")?;
                 self.cc_buttons.insert(raw, value.trim().parse()?);
                 continue;
             }
@@ -257,11 +264,41 @@ impl PadConfig {
                 saw_pads = true;
             }
             let note_text = key.trim().strip_prefix("pad.").unwrap_or(key.trim());
-            let note: u8 = note_text.parse().context("pad note must be 0..127")?;
-            if note > 127 {
-                bail!("pad note must be 0..127");
-            }
+            let note = midi_number(note_text, "pad note")?;
             self.pads.insert(note, value.trim().parse()?);
+        }
+        self.validate()
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.input_match.as_ref().is_some_and(|input| {
+            input.trim().is_empty() || input.trim() != input || input.contains(['\n', '\r'])
+        }) {
+            bail!("controller input match must be a non-empty single-line value");
+        }
+        for &cc in self.controls.keys() {
+            ensure_midi_number(cc, "controller CC")?;
+        }
+        for &target in self.controls.values() {
+            if crate::control::by_cc(target).is_none() {
+                bail!("target CC {target} is not one of the 12 mapped controls");
+            }
+        }
+        for &cc in self.cc_buttons.keys() {
+            ensure_midi_number(cc, "controller button CC")?;
+        }
+        for &note in self.pads.keys() {
+            ensure_midi_number(note, "pad note")?;
+        }
+        for (number, description) in [
+            (self.encoder_relative_cc, "encoder relative CC"),
+            (self.encoder_press_cc, "encoder press CC"),
+            (self.encoder_press_note, "encoder press note"),
+            (self.lock_cc, "pad lock CC"),
+        ] {
+            if let Some(number) = number {
+                ensure_midi_number(number, description)?;
+            }
         }
         for encoder_cc in [
             self.encoder_relative_cc,
@@ -293,16 +330,26 @@ impl PadConfig {
         {
             bail!("pad lock CC must differ from encoder CCs");
         }
+        if self.encoder_press_cc.is_some() && self.encoder_press_note.is_some() {
+            bail!("encoder press must use either a CC or a note, not both");
+        }
+        if self
+            .encoder_press_note
+            .is_some_and(|note| self.pads.contains_key(&note))
+        {
+            bail!("encoder press note is also mapped as a command button");
+        }
         Ok(())
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
+        self.validate()?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         let mut entries: Vec<_> = self.pads.iter().collect();
         entries.sort_by_key(|(note, _)| **note);
-        let mut text = String::from("# SHR-DAW controller profile v2\n");
+        let mut text = String::from("# SHR-DAW controller profile v3\n");
         if let Some(input) = &self.input_match {
             text.push_str(&format!("input={input}\n"));
         }
@@ -338,10 +385,7 @@ impl PadConfig {
         for (note, action) in entries {
             text.push_str(&format!("pad.{note}={action}\n"));
         }
-        let tmp = path.with_extension("tmp");
-        fs::write(&tmp, text)?;
-        fs::rename(tmp, path)?;
-        Ok(())
+        crate::fsutil::atomic_write(path, text.as_bytes())
     }
 
     /// Returns an action only for note-on with non-zero velocity. Note-off is
@@ -433,15 +477,27 @@ impl PadConfig {
     }
 }
 
-fn optional_cc(value: &str, description: &str) -> Result<Option<u8>> {
+pub(crate) fn midi_number(value: &str, description: &str) -> Result<u8> {
+    let number = value
+        .parse::<u8>()
+        .with_context(|| format!("{description} must be 0..127"))?;
+    ensure_midi_number(number, description)?;
+    Ok(number)
+}
+
+pub(crate) fn ensure_midi_number(number: u8, description: &str) -> Result<()> {
+    if number > 127 {
+        bail!("{description} must be 0..127");
+    }
+    Ok(())
+}
+
+fn optional_midi_number(value: &str, description: &str) -> Result<Option<u8>> {
     let value = value.trim();
     if value.is_empty() {
         return Ok(None);
     }
-    value
-        .parse::<u8>()
-        .with_context(|| format!("{description} must be 0..127"))
-        .map(Some)
+    midi_number(value, description).map(Some)
 }
 
 #[derive(Debug, Default)]
@@ -587,5 +643,96 @@ mod tests {
             c.encoder_note_action(&[0x90, 99, 100]),
             (true, Some(EncoderAction::Select))
         );
+    }
+
+    #[test]
+    fn controller_numbers_are_limited_to_seven_bit_midi_values() {
+        let path = std::env::temp_dir().join(format!(
+            "shsynth-controller-range-{}.conf",
+            std::process::id()
+        ));
+        for text in [
+            "cc.128=74\n",
+            "button.cc.128=item-1\n",
+            "pad.128=item-1\n",
+            "encoder.relative_cc=128\n",
+            "encoder.press_cc=128\n",
+            "encoder.press_note=128\n",
+            "lock.cc=128\n",
+        ] {
+            fs::write(&path, text).unwrap();
+            assert!(PadConfig::load(&path).is_err(), "accepted {text:?}");
+        }
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn save_rejects_conflicting_cli_style_mutations() {
+        let path = std::env::temp_dir().join(format!(
+            "shsynth-controller-conflict-{}.conf",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let mut config = PadConfig {
+            encoder_press_note: Some(36),
+            pads: HashMap::from([(36, PadAction::Item1)]),
+            ..PadConfig::default()
+        };
+        assert!(config.save(&path).is_err());
+
+        config = PadConfig {
+            encoder_relative_cc: Some(28),
+            controls: HashMap::from([(28, 74)]),
+            ..PadConfig::default()
+        };
+        assert!(config.save(&path).is_err());
+
+        config = PadConfig {
+            encoder_press_cc: Some(118),
+            encoder_press_note: Some(99),
+            ..PadConfig::default()
+        };
+        assert!(config.save(&path).is_err());
+
+        config = PadConfig {
+            input_match: Some("controller\nmenu.layout=8".into()),
+            ..PadConfig::default()
+        };
+        assert!(config.save(&path).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn unmapped_input_drops_an_old_controller_profile() {
+        let old = PadConfig {
+            input_match: Some("Old controller".into()),
+            pads: HashMap::from([(36, PadAction::Page1)]),
+            controls: HashMap::from([(74, 74)]),
+            encoder_relative_cc: Some(28),
+            ..PadConfig::default()
+        };
+        assert!(!old.pads.is_empty());
+
+        let selected = PadConfig::unmapped("Unknown controller");
+        assert_eq!(selected.input_match.as_deref(), Some("Unknown controller"));
+        assert!(selected.pads.is_empty());
+        assert!(selected.cc_buttons.is_empty());
+        assert!(selected.controls.is_empty());
+        assert_eq!(selected.encoder_relative_cc, None);
+        assert_eq!(selected.encoder_press_cc, None);
+        assert_eq!(selected.encoder_press_note, None);
+        assert_eq!(selected.lock_cc, None);
+    }
+
+    #[test]
+    fn controller_names_can_contain_hash_characters() {
+        let path = std::env::temp_dir().join(format!(
+            "shsynth-controller-hash-{}.conf",
+            std::process::id()
+        ));
+        fs::write(&path, "# comment\ninput=Controller #1\n").unwrap();
+        let config = PadConfig::load(&path).unwrap();
+        assert_eq!(config.input_match.as_deref(), Some("Controller #1"));
+        let _ = fs::remove_file(path);
     }
 }

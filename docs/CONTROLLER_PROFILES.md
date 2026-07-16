@@ -19,7 +19,9 @@ buttons that send either notes or CCs. Conflicting assignments are rejected.
 
 The generic installed `controller.conf` is deliberately empty. An unknown
 device therefore remains a normal musical MIDI input instead of accidentally
-inheriting another controller's command notes.
+inheriting another controller's command notes. Selecting a different unknown
+device with `shr pads auto` clears the previous device's mappings before MIDI
+learn begins; the old file is backed up first.
 
 ## Commands
 
@@ -74,7 +76,8 @@ Each JSON entry has stable `id`, display `name`, normalized ALSA
 incoming physical CC numbers to the twelve canonical synthv1 CCs.
 `note_buttons` and `cc_buttons` map physical messages to page/item roles.
 Encoder, press, and optional lock messages are separate so they cannot collide
-with continuous controls.
+with continuous controls. All physical note and CC numbers must be valid MIDI
+data bytes (0–127), and an encoder press cannot reuse a command-button note.
 
 Profiles may be partial. After one is loaded, `shr pads learn` asks only for
 continuous controls and encoder functions that are still empty; command-button

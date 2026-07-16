@@ -6,6 +6,7 @@ mod controller_learn;
 mod controller_profile;
 mod device_profile;
 mod engine;
+mod fsutil;
 mod geometry;
 mod help;
 mod loop_player;
@@ -22,7 +23,7 @@ use anyhow::{bail, Context, Result};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -77,7 +78,7 @@ fn real_main() -> Result<()> {
             let arg = args.get(1).context("usage: shr start PRESET")?;
             let p = preset::resolve(&presets, arg)
                 .with_context(|| format!("unknown preset (use ENGINE:NAME): {arg}"))?;
-            start_daemon(p, &state, &runtime)
+            start_daemon(p, arg, &state, &runtime)
         }
         "daemon" => {
             let arg = args.get(1).context("internal daemon missing preset")?;
@@ -128,9 +129,11 @@ fn state_dir() -> PathBuf {
 
 fn start_daemon(
     preset: &preset::Preset,
+    selector: &str,
     state: &Path,
     config: &config::RuntimeConfig,
 ) -> Result<()> {
+    engine::validate_start(preset, state, config)?;
     engine::stop_managed(state)?;
     fs::create_dir_all(state)?;
     let log = OpenOptions::new()
@@ -138,31 +141,71 @@ fn start_daemon(
         .append(true)
         .open(state.join("engine.log"))?;
     let exe = env::current_exe()?;
-    let child = Command::new(exe)
-        .args([
-            "daemon",
-            &format!("{}:{}", preset.backend.label(), preset.name),
-        ])
+    let mut child = Command::new(exe)
+        .args(daemon_args(selector))
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log))
         .spawn()?;
     let deadline = Instant::now() + config.startup_timeout + Duration::from_secs(1);
-    while Instant::now() < deadline {
+    let failure = loop {
+        if Instant::now() >= deadline {
+            break anyhow::anyhow!("engine startup timed out");
+        }
         thread::sleep(Duration::from_millis(100));
+        match child.try_wait() {
+            Ok(Some(status)) => break anyhow::anyhow!("engine daemon exited with {status}"),
+            Ok(None) => {}
+            Err(error) => break anyhow::Error::new(error).context("check engine daemon status"),
+        }
         let status = engine::status(state);
         if status.starts_with("Running:") {
             println!("Loaded {}:{}.", preset.backend.label(), preset.name);
             return Ok(());
         }
-        if unsafe { libc::kill(child.id() as i32, 0) } != 0 {
-            break;
-        }
+    };
+    let cleanup = cleanup_failed_daemon(&mut child, state);
+    let log_path = state.join("engine.log");
+    match cleanup {
+        Ok(()) => Err(failure.context(format!("see {}", log_path.display()))),
+        Err(error) => Err(failure.context(format!(
+            "see {}; cleanup also failed: {error:#}",
+            log_path.display()
+        ))),
     }
-    bail!(
-        "engine failed to start; see {}",
-        state.join("engine.log").display()
-    )
+}
+
+fn daemon_args(selector: &str) -> [&str; 2] {
+    ["daemon", selector]
+}
+
+fn cleanup_failed_daemon(child: &mut Child, state: &Path) -> Result<()> {
+    let termination = terminate_child(child);
+    let managed = engine::stop_managed(state);
+    termination.context("terminate failed engine daemon")?;
+    managed.context("stop engine left by failed daemon startup")
+}
+
+fn terminate_child(child: &mut Child) -> std::io::Result<()> {
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    match child.kill() {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {}
+        Err(error) => return Err(error),
+    }
+    child.wait().map(|_| ())
 }
 
 fn show_log(state: &Path, count: Option<&String>) -> Result<()> {
@@ -217,13 +260,26 @@ fn doctor(config: &config::RuntimeConfig, preset_dir: &Path, state: &Path) -> Re
         state.join("shsynth.conf").is_file(),
         format!("runtime config: {}", state.join("shsynth.conf").display()),
     );
+    let controller_path = state.join("controller.conf");
+    let controller_exists = controller_path.is_file();
     check(
-        state.join("controller.conf").is_file(),
-        format!(
-            "controller config: {}",
-            state.join("controller.conf").display()
-        ),
+        controller_exists,
+        format!("controller config: {}", controller_path.display()),
     );
+    let controller = if controller_exists {
+        match pads::PadConfig::load(&controller_path) {
+            Ok(controller) => {
+                check(true, "controller config parses".into());
+                Some(controller)
+            }
+            Err(error) => {
+                check(false, format!("controller config is invalid: {error:#}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
     let jack = Command::new("jack_lsp").output().ok();
     let jack_ready = jack
         .as_ref()
@@ -266,9 +322,9 @@ fn doctor(config: &config::RuntimeConfig, preset_dir: &Path, state: &Path) -> Re
         );
     }
     if config.midi_autoconnect {
-        let controller = pads::PadConfig::load(&state.join("controller.conf")).unwrap_or_default();
         let wanted = controller
-            .input_match
+            .as_ref()
+            .and_then(|controller| controller.input_match.clone())
             .map(|input| vec![input])
             .unwrap_or_else(|| config.midi_input_matches.clone());
         let ports = Command::new("aconnect")
@@ -292,13 +348,7 @@ fn doctor(config: &config::RuntimeConfig, preset_dir: &Path, state: &Path) -> Re
 }
 
 fn command_exists(program: &str) -> bool {
-    let path = Path::new(program);
-    if path.components().count() > 1 {
-        return path.is_file();
-    }
-    env::var_os("PATH")
-        .map(|paths| env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
-        .unwrap_or(false)
+    fsutil::command_exists(program)
 }
 
 fn config_command(args: &[String], state: &Path) -> Result<()> {
@@ -339,25 +389,14 @@ fn ideas_command(
     let base = recording::ideas_dir();
     match args.first().map(String::as_str).unwrap_or("list") {
         "list" => {
-            if let Ok(entries) = fs::read_dir(&base) {
-                let mut names = entries
-                    .filter_map(Result::ok)
-                    .filter(|e| e.path().is_dir())
-                    .map(|e| e.file_name().to_string_lossy().into_owned())
-                    .collect::<Vec<_>>();
-                names.sort();
-                for n in names {
-                    println!("{n}");
-                }
+            for name in recording::list(&base)? {
+                println!("{name}");
             }
             Ok(())
         }
         "inspect" => {
             let n = args.get(1).context("usage: shr ideas inspect NAME")?;
-            print!(
-                "{}",
-                fs::read_to_string(base.join(recording::safe_name(n)).join("metadata.json"))?
-            );
+            print!("{}", recording::inspect(&base, n)?);
             Ok(())
         }
         "delete" => {
@@ -365,26 +404,33 @@ fn ideas_command(
             if args.get(2).map(String::as_str) != Some("--yes") {
                 bail!("deletion requires --yes");
             }
-            fs::remove_dir_all(base.join(recording::safe_name(n)))?;
-            Ok(())
+            recording::delete(&base, n)
         }
         "play" => {
             let n = args.get(1).context("usage: shr ideas play NAME")?;
-            let (p, events) = recording::load(&base, n)?;
+            let (p, saved_values, events) = recording::load_with_parameters(&base, n)?;
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+                signal_hook::flag::register(signal, std::sync::Arc::clone(&stop))?;
+            }
+            let mut values = engine::initial_values(&p)?;
+            values.extend(saved_values);
             let (tx, _) = std::sync::mpsc::channel();
             let router = engine::MidiRouter::start(state, config, tx)?;
             if let Ok(mut backend) = router.backend().lock() {
                 *backend = p.backend;
             }
-            router.arm_pickup(&engine::initial_values(&p)?);
+            router.arm_pickup(&values);
             let engine = engine::Engine::start(&p, state, router.output(), config)?;
-            let stop = std::sync::atomic::AtomicBool::new(false);
+            if engine.supports_parameter_reset() {
+                engine.set_mapped_parameters(&values)?;
+            }
             recording::play_events(
                 &events,
                 |m| {
                     let _ = engine.send(m);
                 },
-                &stop,
+                stop.as_ref(),
             );
             drop(engine);
             Ok(())
@@ -414,15 +460,16 @@ fn pads_command(args: &[String], state: &Path) -> Result<()> {
         }
         "auto" | "detect" => {
             let input = controller_learn::resolve_input(args.get(1).map(String::as_str))?;
-            config.input_match = Some(controller_learn::stable_input_match(&input));
+            let stable_input = controller_learn::stable_input_match(&input);
             if let Some(profile) = controller_profile::Catalog::discover().matching(&input) {
-                profile.apply(&mut config, &controller_learn::stable_input_match(&input))?;
+                profile.apply(&mut config, &stable_input)?;
                 if let Some(backup) = controller_learn::backup(&path)? {
                     println!("Backed up {}", backup.display());
                 }
                 config.save(&path)?;
                 println!("Loaded known profile {} for {input}", profile.name);
             } else {
+                config = pads::PadConfig::unmapped(stable_input);
                 if let Some(backup) = controller_learn::backup(&path)? {
                     println!("Backed up {}", backup.display());
                 }
@@ -463,21 +510,29 @@ fn pads_command(args: &[String], state: &Path) -> Result<()> {
                     pads::ControllerLayout::Four => 4,
                 }
             );
-            println!(
-                "encoder: turn CC {}, press CC {}; pad lock CC {}",
-                config
-                    .encoder_relative_cc
-                    .map(|cc| cc.to_string())
-                    .unwrap_or_else(|| "off".into()),
-                config
-                    .encoder_press_cc
-                    .map(|cc| cc.to_string())
-                    .unwrap_or_else(|| "off".into()),
-                config
-                    .lock_cc
-                    .map(|cc| cc.to_string())
-                    .unwrap_or_else(|| "off".into())
+            let encoder_turn = config.encoder_relative_cc.map_or_else(
+                || "off".into(),
+                |cc| {
+                    format!(
+                        "CC {cc} ({})",
+                        if config.encoder_relative_reverse {
+                            "reversed"
+                        } else {
+                            "normal"
+                        }
+                    )
+                },
             );
+            let encoder_press = config
+                .encoder_press_cc
+                .map(|cc| format!("CC {cc}"))
+                .or_else(|| config.encoder_press_note.map(|note| format!("note {note}")))
+                .unwrap_or_else(|| "off".into());
+            let lock = config
+                .lock_cc
+                .map(|cc| format!("CC {cc}"))
+                .unwrap_or_else(|| "off".into());
+            println!("encoder: turn {encoder_turn}, press {encoder_press}; pad lock {lock}");
             let mut controls = config.controls.iter().collect::<Vec<_>>();
             controls.sort_by_key(|x| x.0);
             for (incoming, target) in controls {
@@ -496,10 +551,10 @@ fn pads_command(args: &[String], state: &Path) -> Result<()> {
             Ok(())
         }
         "set" => {
-            let n: u8 = args
-                .get(1)
-                .context("usage: shr pads set NOTE ACTION")?
-                .parse()?;
+            let n = pads::midi_number(
+                args.get(1).context("usage: shr pads set NOTE ACTION")?,
+                "pad note",
+            )?;
             let a = args
                 .get(2)
                 .context("usage: shr pads set NOTE ACTION")?
@@ -508,7 +563,10 @@ fn pads_command(args: &[String], state: &Path) -> Result<()> {
             config.save(&path)
         }
         "clear" => {
-            let n: u8 = args.get(1).context("usage: shr pads clear NOTE")?.parse()?;
+            let n = pads::midi_number(
+                args.get(1).context("usage: shr pads clear NOTE")?,
+                "pad note",
+            )?;
             config.pads.remove(&n);
             config.save(&path)
         }
@@ -527,10 +585,10 @@ fn pads_command(args: &[String], state: &Path) -> Result<()> {
             config.save(&path)
         }
         "cc" => {
-            let incoming: u8 = args
-                .get(1)
-                .context("usage: shr pads cc INCOMING TARGET")?
-                .parse()?;
+            let incoming = pads::midi_number(
+                args.get(1).context("usage: shr pads cc INCOMING TARGET")?,
+                "controller CC",
+            )?;
             let target: u8 = args
                 .get(2)
                 .context("usage: shr pads cc INCOMING TARGET")?
@@ -549,8 +607,7 @@ fn update_controller_profiles() -> Result<()> {
     let path = controller_profile::user_catalog_path();
     let parent = path.parent().context("controller profile directory")?;
     fs::create_dir_all(parent)?;
-    let temporary = path.with_extension("json.tmp");
-    let status = Command::new("curl")
+    let output = Command::new("curl")
         .args([
             "--proto",
             "=https",
@@ -559,21 +616,44 @@ fn update_controller_profiles() -> Result<()> {
             "--location",
             "--silent",
             "--show-error",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "30",
+            "--max-filesize",
+            "1048576",
             controller_profile::UPDATE_URL,
-            "--output",
         ])
-        .arg(&temporary)
-        .status()
+        .output()
         .context("run curl to update controller profiles")?;
-    if !status.success() {
-        let _ = fs::remove_file(&temporary);
+    if !output.status.success() {
         bail!("controller profile download failed");
     }
-    let count = controller_profile::validate_catalog(&temporary)?;
-    fs::rename(&temporary, &path)?;
+    let count = controller_profile::validate_catalog_bytes(&output.stdout)
+        .context("validate downloaded controller profiles")?;
+    fsutil::atomic_write(&path, &output.stdout)?;
     println!(
         "Installed {count} controller profiles at {}",
         path.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_keeps_the_original_index_selector_for_duplicate_names() {
+        let presets = vec![
+            preset::Preset::synthv1("Duplicate", PathBuf::from("first.synthv1")),
+            preset::Preset::synthv1("Duplicate", PathBuf::from("second.synthv1")),
+        ];
+        let selected = preset::resolve(&presets, "preset_2").unwrap();
+        assert_eq!(selected, &presets[1]);
+
+        let reconstructed = format!("{}:{}", selected.backend.label(), selected.name);
+        assert_eq!(preset::resolve(&presets, &reconstructed), Some(&presets[0]));
+        assert_eq!(daemon_args("preset_2"), ["daemon", "preset_2"]);
+    }
 }

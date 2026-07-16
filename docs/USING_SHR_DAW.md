@@ -25,8 +25,15 @@ controls.
   highlighted link to jump sections. When possible, it also shows a temporary
   LAN URL for the same help page.
 - **FT2** edits and plays patterns.
-- **Pages** adds four-lane pages and chooses each destination and channel.
-- **Files** manages songs, patterns, and the song order.
+- **Tools** opens page, file, arrangement, loop, and clipboard workflows.
+- **Pages/Tracks** adds four-lane pages, chooses one destination, and edits each
+  column's channel, bank, master program, and profile-provided instrument name.
+- **Files** manages Projects and compact pattern operations.
+- **Arrange** edits the ordered pattern steps separately from pattern data.
+- **Loop** imports, trims, aligns, and plays a private WAV with the tracker;
+  **Library** separately deletes only unreferenced regular WAV files.
+- **Files** names/renames Projects and confirms cleanup of zero-reference
+  Pattern records without changing the Arrangement.
 - **Audio Recorder** records the configured stereo JACK input.
 
 The display shows the current screen, menu page, and four available actions.
@@ -42,8 +49,11 @@ port or network is unavailable, the local Help screen keeps working.
 ## MIDI ideas
 
 Ideas capture free playing as MIDI. Each saved idea keeps its timing and
-instrument reference. When synthv1 is used, it also keeps the mapped control
-values. An idea can later be loaded and played through any active engine.
+instrument identity. A synthv1 idea includes its own private preset snapshot;
+other engines retain the external instrument reference. Mapped synthv1 control
+values are saved too. Loading an idea can replace the current managed engine,
+then TAKE plays through the restored idea instrument rather than an arbitrary
+active engine.
 
 ## Stereo audio
 
@@ -52,7 +62,12 @@ The screen shows recording time, sample rate, file size, dropped frames, and
 errors.
 
 If recording is interrupted, the temporary file remains with a `.wav.part`
-name. SHR-DAW tries to recover it when the next recording starts.
+name. On the next recording start, SHR-DAW recovers complete frames from a
+recognized capture header and reports unrecognized partial files without
+silently deleting them.
+
+At RIFF's 4 GiB size limit, recording stops and finalizes the last complete
+stereo frame instead of producing an invalid WAV file.
 
 External line input is intended to use the audio interface's direct-monitor
 feature. See [Physical connections](CONNECTIONS.md) for the audio path.
@@ -65,15 +80,24 @@ The main program also provides these commands:
 shr menu
 shr list
 shr status
+shr doctor
 shr start "synthv1:Velvet Tines"
 shr start "Yoshimi:Fat Bass"
 shr stop
 shr log 80
+shr ideas list
+shr ideas inspect "idea-name"
+shr ideas play "idea-name"
+shr ideas delete "idea-name" --yes
+shr pads list
+shr pads update
 shr casio diagnostic
 ```
 
 `shr casio diagnostic` keeps an old name from the first hardware test. It does
 not send MIDI. It lists output ports and shows the messages that would be used.
-The tracker itself is device-neutral.
+The tracker itself is device-neutral. Command-line idea playback restores the
+saved instrument and can be stopped with Ctrl+C; deletion always requires the
+explicit `--yes` argument.
 
 For pattern editing, continue with the [Tracker guide](TRACKER.md).

@@ -81,10 +81,11 @@ pre-existing `jack.service` remained failed because ALSA could not resolve
 start or restart JACK merely to validate the affinity profile.
 
 The product and Cargo package are named `shr-daw`. The regular installer
-provides `shr`, `shr-setup`, `shr-audio-tune`, and `shs`; the repository helpers
-above are intentionally development/local-checkout commands. The `shsynth`
-state, data, configuration, and shared-data paths remain unchanged for
-compatibility.
+provides `shr`, `shr-setup`, and `shr-audio-tune`; `shs` and `synth-player` are
+compatibility aliases to the same Rust `shr` binary and therefore share its
+engine ownership and shutdown behavior. The repository helpers above are
+intentionally development/local-checkout commands. The `shsynth` state, data,
+configuration, and shared-data paths remain unchanged for compatibility.
 
 The controller menu uses a four-page spatial contract on every screen and
 modal context: page 1 is `OPS`; on child screens and editors, `EXIT` is always
@@ -117,27 +118,40 @@ External MIDI sound names are data-driven. JSON profiles live in
 `midi-devices/` (installed below `share/shsynth/midi-devices/`), while private
 overrides can live below `${XDG_DATA_HOME}/shsynth/midi-devices/` or
 `SHSYNTH_DEVICE_PROFILE_DIR`. `roland-d-50` is the first bundled profile, not a
-hardcoded tracker mode. FT2 Program cell editing uses the page target/channel
-for named live audition; devices without a profile retain numeric 0–127 access.
+hardcoded tracker mode. Each FT2 page has one destination and four persisted
+column channel/bank/program setups. Song format 1 stores them explicitly;
+format 0 page-wide setups migrate into four identical columns, while unknown
+newer formats are refused. Compatible shared channels require identical master
+selections. FT2 Program cell editing uses the selected column for named live
+audition; devices without a profile retain numeric 0–127 access.
+
+Project display names are editable and saved renames publish without replacing
+collisions. Pattern cleanup deletes only zero-reference records and never
+rewrites Arrangement steps. Remove Loop remains detach-only; the separate
+private loop library refuses referenced files, symlinks, and unsafe paths and
+requires confirmation before physical deletion.
 
 USB input-controller setup is also data-driven. Reviewed JSON entries live in
 `controller-profiles/catalog.json`; installed and user-updated search paths
 mirror the external-device profile model. The generic `controller.conf` is
 empty so unknown hardware never inherits MiniLab commands. `shr-setup` runs
 `shr pads auto` for the selected ALSA input and offers the non-audible `shr
-pads learn` wizard when no profile matches. Learning supports absolute CCs,
-both relative-encoder directions, CC or note buttons, and note-based encoder
-presses while rejecting conflicts. The existing MiniLab 3 mapping moved to the
-reviewed catalog. `shr pads update` downloads only SHR's validated catalog;
+pads learn` wizard when no profile matches. Selecting an unknown controller
+clears the previous device mapping after making a backup. Learning supports
+absolute CCs, both relative-encoder directions, CC or note buttons, and
+note-based encoder presses while rejecting conflicts. The existing MiniLab 3
+mapping moved to the reviewed catalog. `shr pads update` downloads only SHR's
+validated catalog;
 Ardour, Mixxx, Zynthian, and Pencil Research data are documented research
 sources and are not redistributed.
 
 ## Preset provenance decision
 
-Only the 21 cleared synthv1 presets listed in `THIRD_PARTY.md` belong in the
-tracked `presets/synthv1/` directory or public installation. They are MIT with
-the project. `scripts/generate_cleared_presets.sh` records their authored
-recipes.
+Only the 21 cleared synthv1 presets listed in
+`presets/synthv1/cleared-presets.txt` and documented in `THIRD_PARTY.md` belong
+in the tracked directory or public installation. The manifest is the packaging
+allowlist and schema-test source of truth. They are MIT with the project.
+`scripts/generate_cleared_presets.sh` records their authored recipes.
 
 The private LinuxSynths archive is:
 

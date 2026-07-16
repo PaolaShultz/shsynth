@@ -3,9 +3,13 @@ use crate::control::{defaults, CONTROLS};
 use anyhow::{bail, Context, Result};
 use quick_xml::events::Event;
 use quick_xml::Reader;
+use quick_xml::XmlVersion;
+#[cfg(test)]
+use std::collections::BTreeSet;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -160,13 +164,7 @@ fn catalog(
 }
 
 fn command_exists(program: &str) -> bool {
-    let path = Path::new(program);
-    if path.components().count() > 1 {
-        return path.is_file();
-    }
-    std::env::var_os("PATH")
-        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
-        .unwrap_or(false)
+    crate::fsutil::command_exists(program)
 }
 
 pub fn discover_synthv1(dir: &Path) -> Result<Vec<Preset>> {
@@ -192,7 +190,11 @@ pub fn discover_yoshimi(
         let mut files = Vec::new();
         recursive_files(root, "xiz", &mut files)?;
         for path in files {
-            let searchable = path.to_string_lossy().to_ascii_lowercase();
+            let searchable = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .to_ascii_lowercase();
             let Some(category) = categories
                 .iter()
                 .find(|category| category_matches(category, &searchable))
@@ -248,12 +250,23 @@ fn category_matches(category: &str, text: &str) -> bool {
 
 pub fn discover_fluidsynth(soundfonts: &[PathBuf]) -> Result<Vec<Preset>> {
     let mut presets = Vec::new();
-    for (index, path) in soundfonts.iter().filter(|path| path.is_file()).enumerate() {
-        if index > u8::MAX as usize {
+    let mut valid_fonts = 0usize;
+    let mut failures = Vec::new();
+    for path in soundfonts.iter().filter(|path| path.is_file()) {
+        if valid_fonts > u8::MAX as usize {
             break;
         }
         let font_name = file_stem(path);
-        for program in soundfont_presets(path)? {
+        let programs = match soundfont_presets(path) {
+            Ok(programs) => programs,
+            Err(error) => {
+                failures.push(format!("{error:#}"));
+                continue;
+            }
+        };
+        let index = valid_fonts as u8;
+        valid_fonts += 1;
+        for program in programs {
             presets.push(Preset {
                 backend: BackendKind::FluidSynth,
                 name: program.name,
@@ -263,12 +276,15 @@ pub fn discover_fluidsynth(soundfonts: &[PathBuf]) -> Result<Vec<Preset>> {
                 )),
                 id: PresetId::FluidSynth {
                     soundfont: path.clone(),
-                    soundfont_index: index as u8,
+                    soundfont_index: index,
                     bank: program.bank,
                     program: program.program,
                 },
             });
         }
+    }
+    if valid_fonts == 0 && !failures.is_empty() {
+        bail!("no valid configured SoundFonts: {}", failures.join("; "));
     }
     presets.sort_by(|a, b| match (&a.id, &b.id) {
         (
@@ -298,34 +314,61 @@ struct SoundFontProgram {
 }
 
 fn soundfont_presets(path: &Path) -> Result<Vec<SoundFontProgram>> {
-    let bytes = fs::read(path).with_context(|| format!("read SoundFont {}", path.display()))?;
-    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"sfbk" {
+    const MAX_PRESET_TABLE_BYTES: u64 = 16 * 1024 * 1024;
+    let mut file =
+        File::open(path).with_context(|| format!("read SoundFont {}", path.display()))?;
+    let file_len = file.metadata()?.len();
+    let mut header = [0u8; 12];
+    file.read_exact(&mut header)
+        .with_context(|| format!("read SoundFont header {}", path.display()))?;
+    if &header[..4] != b"RIFF" || &header[8..12] != b"sfbk" {
         bail!("{} is not an SF2/SF3 SoundFont", path.display());
     }
-    let mut phdr = None;
-    let mut offset = 12usize;
-    while offset + 8 <= bytes.len() {
-        let id = &bytes[offset..offset + 4];
-        let size = le_u32(&bytes[offset + 4..offset + 8]) as usize;
+    let riff_end = u64::from(le_u32(&header[4..8]))
+        .checked_add(8)
+        .context("SoundFont RIFF length overflow")?;
+    if riff_end < 12 || riff_end > file_len {
+        bail!("{} has a truncated RIFF container", path.display());
+    }
+    let mut phdr = None::<Vec<u8>>;
+    let mut offset = 12u64;
+    while offset + 8 <= riff_end {
+        let (id, size) = read_chunk_header(&mut file, offset)?;
         let start = offset + 8;
-        let end = start.saturating_add(size).min(bytes.len());
-        if id == b"LIST" && start + 4 <= end {
+        let end = start
+            .checked_add(size)
+            .context("SoundFont chunk length overflow")?;
+        if end > riff_end {
+            bail!("{} has a truncated RIFF chunk", path.display());
+        }
+        if &id == b"LIST" && size >= 4 {
             let mut inner = start + 4;
             while inner + 8 <= end {
-                let inner_size = le_u32(&bytes[inner + 4..inner + 8]) as usize;
+                let (inner_id, inner_size) = read_chunk_header(&mut file, inner)?;
                 let data = inner + 8;
-                let data_end = data.saturating_add(inner_size).min(end);
-                if &bytes[inner..inner + 4] == b"phdr" {
-                    phdr = Some(&bytes[data..data_end]);
+                let data_end = data
+                    .checked_add(inner_size)
+                    .context("SoundFont subchunk length overflow")?;
+                if data_end > end {
+                    bail!("{} has a truncated RIFF subchunk", path.display());
+                }
+                if &inner_id == b"phdr" {
+                    if inner_size > MAX_PRESET_TABLE_BYTES {
+                        bail!("{} has an oversized preset table", path.display());
+                    }
+                    let mut table = vec![0; inner_size as usize];
+                    file.seek(SeekFrom::Start(data))?;
+                    file.read_exact(&mut table)?;
+                    phdr = Some(table);
                     break;
                 }
-                inner = data.saturating_add(inner_size + (inner_size & 1));
+                inner = padded_chunk_end(data_end, inner_size)?;
             }
         }
         if phdr.is_some() {
             break;
         }
-        offset = start.saturating_add(size + (size & 1));
+        offset = padded_chunk_end(end, size)?;
     }
     let phdr =
         phdr.with_context(|| format!("{} has no SoundFont preset headers", path.display()))?;
@@ -353,11 +396,10 @@ pub(crate) fn soundfont_offsets(soundfonts: &[PathBuf]) -> Result<Vec<(PathBuf, 
     let mut fonts = Vec::new();
     let mut next_offset = 0u32;
     for path in soundfonts.iter().filter(|path| path.is_file()) {
-        let max_bank = soundfont_presets(path)?
-            .iter()
-            .map(|preset| preset.bank)
-            .max()
-            .unwrap_or(0);
+        let Ok(programs) = soundfont_presets(path) else {
+            continue;
+        };
+        let max_bank = programs.iter().map(|preset| preset.bank).max().unwrap_or(0);
         if next_offset + u32::from(max_bank) > 16_383 {
             bail!("configured SoundFont banks exceed the 14-bit MIDI bank range");
         }
@@ -371,6 +413,21 @@ fn le_u32(bytes: &[u8]) -> u32 {
     u32::from_le_bytes(bytes[..4].try_into().unwrap())
 }
 
+fn read_chunk_header(file: &mut File, offset: u64) -> Result<([u8; 4], u64)> {
+    let mut header = [0u8; 8];
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(&mut header)?;
+    Ok((
+        header[..4].try_into().unwrap(),
+        u64::from(le_u32(&header[4..])),
+    ))
+}
+
+fn padded_chunk_end(end: u64, size: u64) -> Result<u64> {
+    end.checked_add(size & 1)
+        .context("SoundFont chunk padding overflow")
+}
+
 fn nul_string(bytes: &[u8]) -> String {
     let end = bytes
         .iter()
@@ -381,10 +438,14 @@ fn nul_string(bytes: &[u8]) -> String {
 
 fn recursive_files(root: &Path, extension: &str, files: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
-        let path = entry?.path();
-        if path.is_dir() {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let path = entry.path();
+        if file_type.is_dir() {
             recursive_files(&path, extension, files)?;
-        } else if extension_is(&path, extension) {
+        } else if (file_type.is_file() || (file_type.is_symlink() && path.is_file()))
+            && extension_is(&path, extension)
+        {
             files.push(path);
         }
     }
@@ -436,23 +497,43 @@ pub fn values(preset: &Preset) -> Result<HashMap<u8, f32>> {
     let mut out = defaults();
     let mut reader =
         Reader::from_file(path).with_context(|| format!("parse {}", path.display()))?;
-    reader.trim_text(true);
+    reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
     let mut wanted = None;
     loop {
         match reader.read_event_into(&mut buf)? {
             Event::Start(e) if e.name().as_ref() == b"param" => {
-                wanted = e
-                    .attributes()
-                    .flatten()
-                    .find(|a| a.key.as_ref() == b"name")
-                    .and_then(|a| std::str::from_utf8(&a.value).ok().map(str::to_owned))
+                let mut name = None;
+                for attribute in e.attributes() {
+                    let attribute = attribute?;
+                    if attribute.key.as_ref() == b"name" {
+                        name = Some(
+                            attribute
+                                .normalized_value(XmlVersion::Implicit1_0)?
+                                .into_owned(),
+                        );
+                    }
+                }
+                wanted = name
+                    .as_deref()
                     .and_then(|name| CONTROLS.iter().find(|c| c.xml_name == name).map(|c| c.cc));
             }
             Event::Text(e) if wanted.is_some() => {
-                if let Ok(value) = e.unescape()?.parse::<f32>() {
-                    out.insert(wanted.take().unwrap(), value);
+                let cc = wanted.take().context("mapped preset parameter missing")?;
+                let decoded = e.xml_content(XmlVersion::Implicit1_0)?;
+                let value = quick_xml::escape::unescape(&decoded)?
+                    .parse::<f32>()
+                    .with_context(|| format!("mapped preset CC {cc} is not numeric"))?;
+                let control = crate::control::by_cc(cc).context("unknown mapped preset CC")?;
+                if !value.is_finite() || !(control.min..=control.max).contains(&value) {
+                    bail!(
+                        "preset parameter {} must be {}..={}",
+                        control.xml_name,
+                        control.min,
+                        control.max
+                    );
                 }
+                out.insert(cc, value);
             }
             Event::End(e) if e.name().as_ref() == b"param" => wanted = None,
             Event::Eof => break,
@@ -502,6 +583,32 @@ mod tests {
     }
 
     #[test]
+    fn mapped_preset_values_must_be_finite_and_in_range() {
+        let path = std::env::temp_dir().join(format!(
+            "shsynth-invalid-value-{}.synthv1",
+            std::process::id()
+        ));
+        let preset = Preset::synthv1("Invalid fixture", path.clone());
+        for value in ["NaN", "1.5", "not-a-number"] {
+            fs::write(
+                &path,
+                format!(
+                    "<preset><params><param name=\"DCF1_CUTOFF\">{value}</param></params></preset>"
+                ),
+            )
+            .unwrap();
+            assert!(values(&preset).is_err(), "accepted {value}");
+        }
+        fs::write(
+            &path,
+            r#"<preset><params><param name="DCF1_CUTOFF" name="DEL1_WET">0.5</param></params></preset>"#,
+        )
+        .unwrap();
+        assert!(values(&preset).is_err(), "accepted duplicate attributes");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn engine_cycle_wraps_in_both_directions() {
         assert_eq!(BackendKind::Synthv1.next(-1), BackendKind::FluidSynth);
         assert_eq!(BackendKind::FluidSynth.next(1), BackendKind::Synthv1);
@@ -543,6 +650,34 @@ mod tests {
     }
 
     #[test]
+    fn yoshimi_category_ignores_parent_directory_names_and_symlink_loops() {
+        let base = std::env::temp_dir().join(format!("shsynth-bass-parent-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("bank")).unwrap();
+        fs::write(base.join("bank/0001-Bright_Lead.xiz"), "x").unwrap();
+        std::os::unix::fs::symlink(&base, base.join("bank/loop")).unwrap();
+
+        let presets =
+            discover_yoshimi(&[base.clone()], &["bass".into(), "lead".into()], 8).unwrap();
+        assert_eq!(presets.len(), 1);
+        assert_eq!(presets[0].category.as_deref(), Some("Lead"));
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn executable_discovery_checks_permission_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!("shsynth-command-{}", std::process::id()));
+        fs::write(&path, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!command_exists(path.to_str().unwrap()));
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(command_exists(path.to_str().unwrap()));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn parses_soundfont_bank_and_program_headers() {
         let path = std::env::temp_dir().join(format!("shsynth-{}.sf2", std::process::id()));
         let record = |name: &str, program: u16, bank: u16| {
@@ -577,34 +712,32 @@ mod tests {
 
     #[test]
     fn cleared_presets_use_complete_current_schema() {
-        let names = [
-            "Deep Sub",
-            "Liquid Acid",
-            "Rubber Circuit",
-            "Compact Bass",
-            "Mono Pulse Lead",
-            "PWM Horizon",
-            "Glass Saw Lead",
-            "Warm Cloud",
-            "Dark Canopy",
-            "Shimmer Veil",
-            "Copper Pluck",
-            "Reed Pluck",
-            "Silver Bell",
-            "Soft Chime",
-            "Drawbar Glow",
-            "Hollow Organ",
-            "Low Orbit Drone",
-            "Frozen Drone",
-            "Dust Delay",
-            "Restrained Sweep",
-        ];
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("presets/synthv1");
+        let manifest = fs::read_to_string(root.join("cleared-presets.txt")).unwrap();
+        let expected = manifest
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        let actual = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+            .filter_map(|entry| {
+                let name = entry.file_name().into_string().ok()?;
+                name.ends_with(".synthv1").then_some(name)
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected, "cleared preset manifest is stale");
+        assert_eq!(expected.len(), 21);
+
         let template = schema(&root.join("Velvet Tines.synthv1"));
         assert_eq!(template.len(), 145);
-        for name in names {
-            let path = root.join(format!("{name}.synthv1"));
-            assert_eq!(schema(&path), template, "schema mismatch in {name}");
+        for filename in expected {
+            let name = filename.trim_end_matches(".synthv1");
+            let path = root.join(&filename);
+            assert_eq!(schema(&path), template, "schema mismatch in {filename}");
             assert_eq!(values(&Preset::synthv1(name, path)).unwrap().len(), 12);
         }
     }

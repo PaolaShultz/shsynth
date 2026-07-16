@@ -16,9 +16,9 @@ implemented.
 | FT2 record | Record quantized notes into only the current page/current pattern; route live notes only to that page's hardware MIDI target; stop record, stop, exit, and panic remain available. |
 | FT2 edit | All cursor and transport operations; musical keyboard or incoming MIDI note/chord gesture entry; blank/skip; erase; note off; leave edit; lane mute; program and tempo adjustment. Command notes are consumed for editing and never doubled through the synth. |
 | FT2 N00B | Choose chromatic root plus major/natural minor; map live notes to the nearest scale tone with downward ties; preserve exact note ownership across releases and mode changes. |
-| FT2 loop | Select/import WAV; play here/from start/stop; source BPM and half/normal/double interpretation; start/length cuts in beat or bar units; align child screen for auto bar alignment and one-bar placement shifts. |
+| FT2 loop | Select/import WAV; confirmed Project detach without deleting the private WAV; play here/from start/stop; source BPM and half/normal/double interpretation; start/length cuts in beat or bar units; align child screen for auto bar alignment and one-bar placement shifts. |
 | FT2 cell edit | Transactional note, gate, velocity, per-note program, single command type/parameter, clear-field, confirm/cancel, step-entry handoff, stop, and panic actions. Four-button encoder page selection remains available. |
-| Tracker files | Select saved Project; load; preview/stop; save with overwrite confirmation; delete with repeat confirmation; new, clone, copy, paste-new, paste-over, clear, or resize FT2 patterns; back/cancel and panic. |
+| Tracker files | Select saved Project; load; preview/stop; save with overwrite confirmation; create a confirmed blank Project; save a numbered non-overwriting copy; delete with repeat confirmation; new, clone, copy, paste-new, paste-over, clear, or resize FT2 patterns; back/cancel and panic. |
 | FT2 arrange | Select arrangement step; append/insert current pattern; duplicate/remove step; move step earlier/later; jump to referenced pattern; play from selected step; back and panic. |
 | Pattern setup | Choose 3/4 or 4/4 and pattern size; confirm new/destructive resize, cancel, or clear while retaining the current size. |
 | Page/track manager | Select previous/next page; add four-lane page; edit target; edit channel; confirm all changes; cancel and restore the original song; open files; mute current page. |
@@ -50,7 +50,13 @@ inventory for controller reachability.
   no MIDI Exit; quitting the application remains keyboard-only.
 - Help is a child screen. It tries to show the same help at
   `http://<LAN-IP>/help` while open. The master encoder moves one help row at a
-  time, and encoder press follows a highlighted internal section link.
+  time. Encoder press follows a highlighted internal section link on eight-
+  and five-button layouts; four-button layouts use OPS `OPEN` because encoder
+  press is reserved for page selection. The compact help text uses a stable
+  38-column width so link targets and rendered rows remain identical.
+- Target/channel fields use encoder press to confirm on eight- and five-button
+  layouts. Four-button layouts use the visible OPS `CONFIRM` item; SYS `EXIT`
+  cancels the field on every layout.
 - Empty items and pages are not drawn, are silent when pressed, and are skipped
   by page cycling. The interface exposes working actions only.
 - The rendered controller strip is centered and capped at 40 columns. Labels
@@ -82,7 +88,7 @@ Blank physical positions and wholly empty pages are omitted.
 | FT2 | Sys | Panic | Stop | Tools | Exit |
 | FT2 tools | Ops | Pages/tracks | Files | Arrange | Mute lane |
 | FT2 tools | Clip | Copy lane | Paste lane | Copy page | Paste page |
-| FT2 tools | Loop | Loop | — | — | — |
+| FT2 tools | Loop | Loop | Remove | — | — |
 | FT2 tools | Sys | Panic | Stop | Help | Exit |
 | N00B setup | Ops | Root− | Root+ | Scale | Done |
 | N00B setup | Sys | Panic | Stop | Help | Exit |
@@ -90,6 +96,8 @@ Blank physical positions and wholly empty pages are omitted.
 | FT2 loop | BPM | BPM− | BPM+ | BPM x | Unit |
 | FT2 loop | Cut | Start− | Start+ | Length− | Length+ |
 | FT2 loop | Sys | Panic | Stop | Align | Exit |
+| Loop library | Ops | Delete WAV | Page up | Page down | — |
+| Loop library | Sys | Panic | Stop | Help | Exit |
 | FT2 loop align | Ops | Auto | Bar− | Bar+ | Done |
 | FT2 loop align | Sys | Panic | Stop | Help | Exit |
 | FT2 record | Ops | Rec end | — | — | — |
@@ -103,9 +111,9 @@ Blank physical positions and wholly empty pages are omitted.
 | FT2 cell edit | Adjust | Effect parameter | Value− | Value+ | — |
 | FT2 cell edit | Sys | Panic | Stop | — | Exit/cancel |
 | Files | Ops | Load | Save | Preview/stop | Delete |
-| Files | Pattern | New | Clone | Copy | Paste new |
-| Files | Edit | Paste over | Clear | Repeat | Remove |
-| Files | Sys | Panic | — | Help | Exit |
+| Files | Pattern | New | Clone | New Project | Save As |
+| Files | Edit | Paste over | Clear | Clean unused | Name/rename |
+| Files | Sys | Panic | Stop | Help | Exit |
 | Arrange | Ops | Play | Jump | Append | Insert |
 | Arrange | Step | Up | Down | Repeat | Remove |
 | Arrange | Sys | Panic | Stop | Help | Exit |
@@ -113,7 +121,8 @@ Blank physical positions and wholly empty pages are omitted.
 | Pattern setup | Apply | Confirm | Keep | — | — |
 | Pattern setup | Sys | Panic | — | Help | Exit/cancel |
 | Pages/tracks | Ops | Add four lanes | Target | Channel | Done |
-| Pages/tracks | Page | Page− | Page+ | Mute pg | Files |
+| Pages/tracks | Column | Column− | Column+ | Program− | Program+ |
+| Pages/tracks | Bank | MSB− | MSB+ | LSB− | LSB+ |
 | Pages/tracks | Sys | Panic | Stop | Help | Exit/cancel |
 | Target/channel editor | Ops | Confirm | — | — | — |
 | Target/channel editor | Sys | Panic | Stop | Help | Exit/cancel |

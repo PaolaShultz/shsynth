@@ -42,10 +42,10 @@ while (($#)); do
 done
 
 if [[ -z "$SHSYNTH_BIN" ]]; then
-  if command -v shr >/dev/null 2>&1; then
-    SHSYNTH_BIN="$(command -v shr)"
-  elif [[ -x "$ROOT/target/release/shr" ]]; then
+  if [[ -x "$ROOT/target/release/shr" ]]; then
     SHSYNTH_BIN="$ROOT/target/release/shr"
+  elif command -v shr >/dev/null 2>&1; then
+    SHSYNTH_BIN="$(command -v shr)"
   else
     printf 'Build or install SHR-DAW before running this wizard.\n' >&2
     exit 1
@@ -83,8 +83,8 @@ cp -p "$CONTROLLER_CONFIG" "$CONTROLLER_CONFIG.bak-$STAMP"
 
 validate_value() {
   local value=$1
-  [[ "$value" != *$'\n'* && "$value" != *'#'* ]] || {
-    printf 'Values cannot contain a newline or #.\n' >&2
+  [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || {
+    printf 'Values cannot contain a newline or carriage return.\n' >&2
     return 1
   }
 }
@@ -221,6 +221,10 @@ if ((${#cards[@]})) && ask_yes_no 'Select the ALSA card JACK should use on its n
   periods="${periods:-3}"
   [[ "$sample_rate" =~ ^[0-9]+$ && "$period_size" =~ ^[0-9]+$ && "$periods" =~ ^[0-9]+$ ]] || {
     printf 'JACK timing values must be positive integers.\n' >&2
+    exit 1
+  }
+  ((sample_rate > 0 && period_size > 0 && periods > 0)) || {
+    printf 'JACK timing values must be greater than zero.\n' >&2
     exit 1
   }
   if [[ -f "$HOME/.jackdrc" ]]; then

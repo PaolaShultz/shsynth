@@ -11,7 +11,7 @@ impl Default for HeldNotes {
 
 impl HeldNotes {
     pub fn observe(&mut self, message: &[u8]) {
-        if message.len() < 3 {
+        if message.len() != 3 || message[1] > 127 || message[2] > 127 {
             return;
         }
         let channel = 1u16 << (message[0] & 0x0f);
@@ -158,6 +158,15 @@ mod tests {
         assert!(held.description().is_none());
         held.observe(&[0x92, 60, 100]);
         held.observe(&[0xb2, 123, 0]);
+        assert!(held.description().is_none());
+    }
+
+    #[test]
+    fn malformed_data_bytes_are_ignored() {
+        let mut held = HeldNotes::default();
+        held.observe(&[0x90, 255, 100]);
+        held.observe(&[0x90, 60, 255]);
+        held.observe(&[0x90, 60, 100, 0]);
         assert!(held.description().is_none());
     }
 

@@ -86,17 +86,32 @@ impl DeviceProfile {
         {
             bail!("profile identity fields cannot be empty");
         }
-        if self.program_change.note.trim().is_empty() || self.sources.is_empty() {
+        if self.program_change.note.trim().is_empty()
+            || self.sources.is_empty()
+            || self.sources.iter().any(|source| source.trim().is_empty())
+        {
             bail!("profile {} needs MIDI-selection notes and sources", self.id);
         }
         let mut selections = BTreeSet::new();
+        let mut bank_ids = BTreeSet::new();
         for bank in &self.banks {
-            if bank.slots.is_empty() || bank.names.len() > bank.slots.len() {
+            if bank.id.trim().is_empty()
+                || bank.name.trim().is_empty()
+                || !bank_ids.insert(&bank.id)
+                || bank.slots.is_empty()
+                || bank.slots.iter().any(|slot| slot.trim().is_empty())
+                || bank.names.len() > bank.slots.len()
+            {
                 bail!(
-                    "profile {} bank {} has invalid slot/name lengths",
+                    "profile {} bank {} has invalid identity or slot/name data",
                     self.id,
                     bank.id
                 );
+            }
+            if bank.bank_msb.is_some_and(|value| value > 127)
+                || bank.bank_lsb.is_some_and(|value| value > 127)
+            {
+                bail!("profile {} bank {} exceeds MIDI bank 127", self.id, bank.id);
             }
             for index in 0..bank.slots.len() {
                 let program = usize::from(bank.program_offset) + index;
@@ -113,6 +128,18 @@ impl DeviceProfile {
                 }
             }
         }
+        for (index, left) in self.banks.iter().enumerate() {
+            for right in &self.banks[index + 1..] {
+                if bank_specificity(left) == bank_specificity(right) && banks_overlap(left, right) {
+                    bail!(
+                        "profile {} banks {} and {} contain ambiguous selections",
+                        self.id,
+                        left.id,
+                        right.id
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -121,7 +148,6 @@ impl DeviceProfile {
     }
 
     pub fn apply_midi_selection(&self, config: &mut ExternalMidiConfig) {
-        config.program_changes = true;
         config.bank_select = match self.program_change.bank_select {
             BankSelect::Off => BankSelectMode::Off,
             BankSelect::Cc0 => BankSelectMode::Cc0,
@@ -130,29 +156,51 @@ impl DeviceProfile {
     }
 
     pub fn program_label(&self, bank_msb: u8, bank_lsb: u8, program: u8) -> Option<String> {
-        self.banks.iter().find_map(|bank| {
-            if bank.bank_msb.is_some_and(|value| value != bank_msb)
-                || bank.bank_lsb.is_some_and(|value| value != bank_lsb)
-                || program < bank.program_offset
-            {
-                return None;
-            }
-            let index = usize::from(program - bank.program_offset);
-            let slot = bank.slots.get(index)?;
-            let name = bank.names.get(index).and_then(Option::as_deref);
-            Some(match name {
-                Some(name) => format!("{slot} {name}"),
-                None => format!("{slot} {}", bank.name),
+        self.banks
+            .iter()
+            .filter_map(|bank| {
+                if bank.bank_msb.is_some_and(|value| value != bank_msb)
+                    || bank.bank_lsb.is_some_and(|value| value != bank_lsb)
+                    || program < bank.program_offset
+                {
+                    return None;
+                }
+                let index = usize::from(program - bank.program_offset);
+                let slot = bank.slots.get(index)?;
+                let name = bank.names.get(index).and_then(Option::as_deref);
+                let label = match name {
+                    Some(name) => format!("{slot} {name}"),
+                    None => format!("{slot} {}", bank.name),
+                };
+                Some((bank_specificity(bank), label))
             })
-        })
+            .max_by_key(|(specificity, _)| *specificity)
+            .map(|(_, label)| label)
     }
 
-    fn matches_port(&self, port: &str) -> bool {
+    fn port_match_specificity(&self, port: &str) -> Option<usize> {
         let port = port.to_ascii_lowercase();
         self.port_matches
             .iter()
-            .any(|needle| !needle.is_empty() && port.contains(&needle.to_ascii_lowercase()))
+            .filter(|needle| !needle.is_empty() && port.contains(&needle.to_ascii_lowercase()))
+            .map(String::len)
+            .max()
     }
+}
+
+fn bank_specificity(bank: &ProgramBank) -> u8 {
+    u8::from(bank.bank_msb.is_some()) + u8::from(bank.bank_lsb.is_some())
+}
+
+fn banks_overlap(left: &ProgramBank, right: &ProgramBank) -> bool {
+    let compatible =
+        |left: Option<u8>, right: Option<u8>| left.is_none() || right.is_none() || left == right;
+    let left_end = usize::from(left.program_offset) + left.slots.len();
+    let right_end = usize::from(right.program_offset) + right.slots.len();
+    compatible(left.bank_msb, right.bank_msb)
+        && compatible(left.bank_lsb, right.bank_lsb)
+        && usize::from(left.program_offset) < right_end
+        && usize::from(right.program_offset) < left_end
 }
 
 #[derive(Clone, Debug, Default)]
@@ -194,9 +242,21 @@ impl Registry {
     }
 
     pub fn matching_port(&self, port: &str) -> Option<&DeviceProfile> {
-        self.profiles
+        let matches = self
+            .profiles
             .values()
-            .find(|profile| profile.matches_port(port))
+            .filter_map(|profile| {
+                profile
+                    .port_match_specificity(port)
+                    .map(|specificity| (specificity, profile))
+            })
+            .collect::<Vec<_>>();
+        let best = matches.iter().map(|(specificity, _)| *specificity).max()?;
+        let mut best_matches = matches
+            .into_iter()
+            .filter(|(specificity, _)| *specificity == best);
+        let (_, profile) = best_matches.next()?;
+        best_matches.next().is_none().then_some(profile)
     }
 }
 
@@ -205,9 +265,12 @@ fn profile_roots() -> Vec<PathBuf> {
     if let Some(value) = env::var_os("SHSYNTH_DEVICE_PROFILE_DIR") {
         roots.extend(env::split_paths(&value));
     }
-    if let Some(data) = env::var_os("XDG_DATA_HOME") {
-        roots.push(PathBuf::from(data).join("shsynth/midi-devices"));
-    }
+    let user_data = env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env::var_os("HOME").unwrap_or_else(|| ".".into())).join(".local/share")
+        });
+    roots.push(user_data.join("shsynth/midi-devices"));
     if let Ok(executable) = env::current_exe() {
         if let Some(parent) = executable.parent() {
             roots.push(parent.join("../share/shsynth/midi-devices"));
@@ -264,7 +327,32 @@ mod tests {
         config.program_changes = false;
         config.bank_select = BankSelectMode::Cc0Cc32;
         profile.apply_midi_selection(&mut config);
-        assert!(config.program_changes);
+        assert!(!config.program_changes);
         assert_eq!(config.bank_select, BankSelectMode::Off);
+    }
+
+    #[test]
+    fn invalid_and_ambiguous_midi_bank_metadata_is_rejected() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("midi-devices/roland-d-50.json");
+        let mut profile = DeviceProfile::load(&path).unwrap();
+        profile.banks[0].bank_msb = Some(128);
+        assert!(profile.validate().is_err());
+
+        let mut profile = DeviceProfile::load(&path).unwrap();
+        profile.banks[1].program_offset = 63;
+        assert!(profile.validate().is_err());
+    }
+
+    #[test]
+    fn equally_specific_port_profiles_require_explicit_selection() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("midi-devices/roland-d-50.json");
+        let first = DeviceProfile::load(&path).unwrap();
+        let mut second = first.clone();
+        second.id = "other-d50".into();
+        let mut registry = Registry::default();
+        registry.profiles.insert(first.id.clone(), first);
+        registry.profiles.insert(second.id.clone(), second);
+
+        assert!(registry.matching_port("USB Roland D-50 MIDI").is_none());
     }
 }

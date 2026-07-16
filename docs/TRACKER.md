@@ -26,15 +26,19 @@ of Arrangement Steps; each step references a pattern ID. Repeating a step reuses
 the same pattern until you explicitly clone or paste a new pattern.
 
 Each FT2 Pattern owns its own rows, meter, master tempo, pages, page targets,
-MIDI channels, programs, velocity defaults, mutes, percussion settings, lane
-settings, and cell data. A new Project starts with one pattern containing
+per-column MIDI channels/banks/programs, velocity defaults, mutes, percussion
+settings, lane settings, and cell data. A new Project starts with one pattern containing
 `MELODY` and `DRUMS`, and more pages can be added per pattern.
 
-Each page keeps its own MIDI target, channel, bank, program, velocity, mute,
-percussion settings, and lane settings. Pages play together, so one pattern can
-control several hardware instruments and the active SHR-DAW software instrument.
+Each page keeps one MIDI target plus four independent column channel, bank, and
+master-program setups. It also keeps velocity, mute, percussion, and lane
+settings. Columns may share a destination/channel only when their master bank
+and program match, because MIDI program selection is channel-wide. Pages play
+together, so one pattern can control several hardware instruments and the
+active SHR-DAW software instrument.
 
-Open **PAGES** to add or select a page and set its target and channel. **DONE**
+Open **PAGES** to add or select a page, choose a column, and set its target,
+channel, bank, and program. **DONE** validates shared-channel compatibility and
 keeps the changes. **CANCEL** restores the Project as it was before the page editor
 opened. A disconnected saved target is marked `OFFLINE`; its route and notes
 are not deleted.
@@ -77,15 +81,17 @@ in the draft and show an error.
 Choosing **PROGRAM** opens a full-height sound browser. A matching MIDI device
 profile adds the instrument's slot labels and sound names. Without a profile,
 all MIDI program numbers 0–127 remain available. Controller notes audition the
-draft sound on that page's exact target and channel. Confirm keeps the program;
-cancel restores the previous value and selection.
+draft sound on that page's exact target and selected-column channel. Confirm
+keeps the cell override without changing the column master; cancel restores
+the previous value and selection.
 
 ## Real-time recording
 
 **REC** loops the selected pattern and records only the visible page. Played
-notes are placed on its four lanes and quantized to pattern rows. During
+notes are placed on its four lanes and quantized to pattern rows. Each assigned
+lane auditions through that column's channel/instrument setup. During
 recording, those notes do not also pass to the loaded software synth. They are
-auditioned only through the page's hardware MIDI target and channel.
+auditioned only through the page's hardware MIDI target and column channels.
 
 Real-time recording is hardware-page-only. A page targeting the active SHR-DAW
 instrument cannot enter **REC**. Choose a configured or exact hardware MIDI
@@ -126,6 +132,15 @@ loading it. A bounded 5 ms fade is applied at cut/loop edges. The 40×20 screen
 shows text for filename, BPMs, region, state, elapsed/total time, rate, and
 channels.
 
+From **TOOLS** → **LOOP**, press **REMOVE** twice to detach the loop from the
+Project and unload its JACK client. The imported private WAV is kept on disk so
+another Project can still use it.
+
+**TOOLS** → **LIBRARY** is separate from Remove. It pages through imported
+private WAVs and marks the current loop, saved-Project references, and free
+files. Physical deletion requires confirmation and is refused for referenced,
+symlinked, or unsafe paths.
+
 ## Copy and Paste
 
 Pattern copy stores the complete current FT2 Pattern, including rows, pages,
@@ -153,16 +168,26 @@ Patterns can use 8, 16, 32, 64, or 128 rows in 4/4. The matching 3/4 sizes are
 6, 12, 24, 48, or 96 rows.
 
 The Files screen saves, loads, previews, and deletes the whole Project. It also
-keeps compact pattern operations for now: create, clone, copy, paste, resize,
-or clear a pattern. New patterns are distinct records. Clone copies the selected
+keeps compact pattern operations: create, clone, copy, paste, resize, or clear
+a pattern. New patterns are distinct records. Clone copies the selected
 pattern. Arrangement repeat/duplicate adds another step that references the
-same pattern.
+same pattern. **CLEAN** offers only Pattern records with zero Arrangement
+references, confirms deletion, preserves at least one Pattern, and never
+rewrites an Arrangement step.
+
+**NEW PRJ** requires a second press before replacing the in-memory Project and
+chooses the next free `project-001` style name. **SAVE AS** immediately writes
+the next free `<current-name>-copy-001` style copy and switches to it. These
+automatic names keep both actions usable from a four-button controller.
+**NAME** accepts a useful display name and derives a safe filename; collisions
+are refused and a saved rename keeps the loaded Project state.
 
 Projects are readable `.shsong` text files stored below
 `${XDG_DATA_HOME:-~/.local/share}/shsynth/songs/`. The current development
-format stores each pattern's own tempo, meter, pages, lanes, setup messages,
-and cells. Files with another version or unknown shape are not loaded or
-overwritten.
+format stores each pattern's own tempo, meter, pages, four column setups,
+lanes, setup messages, and cells. Version 0 page-wide setups load by copying
+the old channel/bank/program into all four columns. Unknown newer versions and
+unknown shapes are not loaded or overwritten.
 
 ## Detailed controls and routing
 

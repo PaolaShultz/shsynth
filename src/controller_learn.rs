@@ -5,6 +5,7 @@ use crate::pads::{ControllerLayout, PadAction, PadConfig};
 use anyhow::{anyhow, bail, Context, Result};
 use midir::{Ignore, MidiInput, MidiInputConnection};
 use std::collections::HashSet;
+use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
@@ -136,6 +137,12 @@ pub fn learn(config: &mut PadConfig, input_name: &str) -> Result<()> {
     if !matches!(layout, 0 | 4 | 5 | 8) {
         bail!("command-button count must be 0, 4, 5, or 8");
     }
+    if layout == 0 {
+        config.layout = ControllerLayout::Four;
+        config.pads.clear();
+        config.cc_buttons.clear();
+        config.lock_cc = None;
+    }
     if layout > 0 {
         config.layout = match layout {
             4 => ControllerLayout::Four,
@@ -208,9 +215,36 @@ pub fn backup(path: &Path) -> Result<Option<PathBuf>> {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let backup = path.with_extension(format!("conf.bak-{stamp}"));
-    std::fs::copy(path, &backup)?;
-    Ok(Some(backup))
+    for revision in 0..1000 {
+        let suffix = if revision == 0 {
+            format!("conf.bak-{stamp}")
+        } else {
+            format!("conf.bak-{stamp}-{revision}")
+        };
+        let backup = path.with_extension(suffix);
+        let mut destination = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let result = (|| -> Result<()> {
+            let mut source = std::fs::File::open(path)?;
+            io::copy(&mut source, &mut destination)?;
+            destination.sync_all()?;
+            std::fs::set_permissions(&backup, source.metadata()?.permissions())?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&backup);
+        }
+        result?;
+        return Ok(Some(backup));
+    }
+    bail!("could not allocate a unique controller backup name")
 }
 
 enum Button {
@@ -346,5 +380,22 @@ mod tests {
             stable_input_match("MiniLab3 MIDI:MiniLab3 MIDI 1 24:0"),
             "MiniLab3 MIDI:MiniLab3 MIDI 1"
         );
+    }
+
+    #[test]
+    fn repeated_backups_do_not_overwrite_each_other() {
+        let base =
+            std::env::temp_dir().join(format!("shsynth-controller-backup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let path = base.join("controller.conf");
+        std::fs::write(&path, "first").unwrap();
+        let first = backup(&path).unwrap().unwrap();
+        std::fs::write(&path, "second").unwrap();
+        let second = backup(&path).unwrap().unwrap();
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read_to_string(first).unwrap(), "first");
+        assert_eq!(std::fs::read_to_string(second).unwrap(), "second");
+        let _ = std::fs::remove_dir_all(base);
     }
 }

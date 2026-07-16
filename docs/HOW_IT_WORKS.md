@@ -33,6 +33,17 @@ replacement, and exit release only the notes affected by that action. If two
 lanes hold the same note on the same device and channel, the note is released
 after its last lane owner ends.
 
+A page owns one destination, while its four columns each own a channel, bank,
+and master program. Playback and live input retain lane/column ownership.
+Validation permits shared destination/channels only for identical master
+selections, since MIDI program changes are channel-wide. Version 0 Project
+files are migrated in memory by copying the old page setup into every column.
+
+Project rename publishes a fully encoded destination without replacement before
+removing the old name. Pattern cleanup checks Arrangement reference counts
+without rewriting steps. Private loop deletion rescans saved Projects at commit
+time and accepts only unreferenced regular files below the loop directory.
+
 All hardware names, ports, channels, commands, and paths belong in
 `shsynth.conf`, `controller.conf`, MIDI profile data, or a song. They are not
 compiled into the Rust program.
@@ -74,14 +85,20 @@ The main files are:
 - `controller.conf` for the controller input, encoder, buttons, and 12 mapped
   controls.
 
+Comments occupy a full line beginning with `#`; a `#` inside a value is literal
+so ALSA/JACK device names and paths are not truncated.
+
 User data is stored below `${XDG_DATA_HOME:-~/.local/share}/shsynth/`:
 
 - `ideas/` contains MIDI ideas;
 - `songs/` contains tracker songs;
+- `loops/` contains validated WAV files copied into private Project storage;
 - recordings use the configured `capture.directory`;
-- MIDI device profiles can be added under `midi-devices/`.
+- MIDI device profiles can be added under `midi-devices/`, and controller
+  profiles under `controller-profiles/`.
 
-The repository contains 21 cleared synthv1 presets. A private preset bank can
+The repository manifest `presets/synthv1/cleared-presets.txt` contains the 21
+cleared synthv1 presets allowed in public packaging. A private preset bank can
 be selected with `synthv1.presets` or `SHSYNTH_PRESET_DIR`. Yoshimi banks and
 SoundFonts are read where they are installed instead of being copied into the
 project.

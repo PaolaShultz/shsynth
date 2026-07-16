@@ -1,6 +1,6 @@
 use crate::audio_recorder::{AudioRecorder, RecorderStatus};
 use crate::chord::HeldNotes;
-use crate::config::{BankSelectMode, RuntimeConfig};
+use crate::config::{BankSelectMode, ExternalMidiConfig, RuntimeConfig};
 use crate::control::{parameter_color, CONTROLS};
 use crate::device_profile::{DeviceProfile, Registry as DeviceProfiles};
 use crate::engine::{self, Engine, MidiEvent};
@@ -41,6 +41,7 @@ use std::sync::{
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CPU_TEMPERATURE_REFRESH: Duration = Duration::from_secs(10);
+const HELP_TEXT_WIDTH: usize = 38;
 
 #[derive(Clone, Debug, Default)]
 struct Hits {
@@ -70,9 +71,17 @@ impl Hits {
 }
 
 struct Playback {
-    events: Vec<TimedEvent>,
-    index: usize,
-    started: Instant,
+    stop: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Playback {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum PageManagerMode {
@@ -206,6 +215,8 @@ struct App {
     cpu_temperature_read_at: Option<Instant>,
     pad_locked: bool,
     song: Song,
+    song_file_stem: Option<String>,
+    project_name_input: Option<String>,
     song_list: Vec<String>,
     song_selected: usize,
     tracker_order: usize,
@@ -220,7 +231,9 @@ struct App {
     noob_draft: Scale,
     tracker_gesture: GestureCapture,
     tracker_gesture_anchor: Option<(usize, usize, usize, usize)>,
-    confirm_song_save: bool,
+    confirm_song_save: Option<String>,
+    confirm_new_project: bool,
+    confirm_loop_remove: bool,
     confirm_song_delete: Option<String>,
     confirm_pattern_clear: bool,
     pattern_clear_beats: u8,
@@ -243,7 +256,12 @@ struct App {
     pattern_clipboard: Option<sequencer::Pattern>,
     lane_clipboard: Option<LaneClipboard>,
     page_clipboard: Option<PageClipboard>,
-    confirm_pattern_paste_over: bool,
+    confirm_pattern_paste_over: Option<u16>,
+    confirm_pattern_delete: Option<u16>,
+    loop_library_mode: bool,
+    loop_library: Vec<crate::loop_player::LibraryEntry>,
+    loop_library_selected: usize,
+    confirm_loop_delete: Option<String>,
     arrange_selected: usize,
     menu_page_by_screen: [usize; Screen::COUNT],
     page_select_mode: bool,
@@ -323,6 +341,8 @@ impl App {
             cpu_temperature_read_at: None,
             pad_locked: false,
             song,
+            song_file_stem: None,
+            project_name_input: None,
             song_list: sequencer::list(&sequencer::songs_dir()),
             song_selected: 0,
             tracker_order: 0,
@@ -337,7 +357,9 @@ impl App {
             noob_draft: Scale::default(),
             tracker_gesture: GestureCapture::default(),
             tracker_gesture_anchor: None,
-            confirm_song_save: false,
+            confirm_song_save: None,
+            confirm_new_project: false,
+            confirm_loop_remove: false,
             confirm_song_delete: None,
             confirm_pattern_clear: false,
             pattern_clear_beats: 4,
@@ -360,7 +382,12 @@ impl App {
             pattern_clipboard: None,
             lane_clipboard: None,
             page_clipboard: None,
-            confirm_pattern_paste_over: false,
+            confirm_pattern_paste_over: None,
+            confirm_pattern_delete: None,
+            loop_library_mode: false,
+            loop_library: Vec::new(),
+            loop_library_selected: 0,
+            confirm_loop_delete: None,
             arrange_selected: 0,
             menu_page_by_screen: [0; Screen::COUNT],
             page_select_mode: false,
@@ -377,6 +404,8 @@ impl App {
             MenuContext::TrackerEdit
         } else if self.screen == Screen::TrackerFiles && self.confirm_pattern_clear {
             MenuContext::PatternClear
+        } else if self.screen == Screen::TrackerLoop && self.loop_library_mode {
+            MenuContext::LoopLibrary
         } else if self.screen == Screen::TrackerPages {
             match self.page_manager_mode {
                 PageManagerMode::Target => MenuContext::PageTarget,
@@ -388,11 +417,55 @@ impl App {
         }
     }
 
+    fn set_screen(&mut self, screen: Screen) {
+        if self.screen != screen {
+            if self.screen == Screen::TrackerFiles && self.song_previewing {
+                self.stop_song_preview();
+            }
+            self.page_select_mode = false;
+            self.prepare_confirmation_action(Action::Noop);
+        }
+        self.screen = screen;
+    }
+
+    fn prepare_confirmation_action(&mut self, action: Action) {
+        let loading_selected_idea = action == Action::LoadIdea
+            || (action == Action::Activate && self.screen == Screen::Ideas);
+        if !loading_selected_idea {
+            self.confirm_load = None;
+        }
+        if action != Action::DeleteIdea {
+            self.confirm_delete = None;
+        }
+        if action != Action::SaveSong {
+            self.confirm_song_save = None;
+        }
+        if action != Action::DeleteSong {
+            self.confirm_song_delete = None;
+        }
+        if action != Action::PastePatternOver {
+            self.confirm_pattern_paste_over = None;
+        }
+        if action != Action::DeleteUnusedPattern {
+            self.confirm_pattern_delete = None;
+        }
+        if action != Action::NewProject {
+            self.confirm_new_project = false;
+        }
+        if action != Action::LoopRemove {
+            self.confirm_loop_remove = false;
+        }
+        if action != Action::DeleteLoopFile {
+            self.confirm_loop_delete = None;
+        }
+    }
+
     fn menu_page(&self) -> usize {
         self.menu_page_by_screen[self.screen.index()].min(3)
     }
 
     fn select_menu_page(&mut self, page: usize) {
+        self.prepare_confirmation_action(Action::Noop);
         let page = page.min(3);
         if navigation::pages(self.screen, self.menu_context())[page].available() {
             self.menu_page_by_screen[self.screen.index()] = page;
@@ -401,6 +474,7 @@ impl App {
     }
 
     fn cycle_menu_page(&mut self, direction: i8) {
+        self.prepare_confirmation_action(Action::Noop);
         let pages = navigation::pages(self.screen, self.menu_context());
         let mut next = self.menu_page();
         for _ in 0..4 {
@@ -472,7 +546,7 @@ impl App {
         }
     }
     fn stop_playback(&mut self) {
-        self.playback = None;
+        self.playback.take();
         if let Some(e) = &self.engine {
             e.panic();
         }
@@ -482,7 +556,9 @@ impl App {
         self.cancel_note_editor();
         self.cancel_tracker_gesture();
         self.stop_tracker_recording();
-        self.sequencer.stop();
+        if !self.stop_song_preview() {
+            self.sequencer.stop();
+        }
         self.loop_player.stop();
         let _ = self.audio_recorder.stop();
         self.stop_recording();
@@ -520,6 +596,14 @@ impl App {
     fn current_page_mut(&mut self) -> Option<&mut sequencer::Page> {
         let page = self.tracker_page;
         self.current_pattern_mut()?.pages.get_mut(page)
+    }
+    fn current_column(&self) -> Option<&sequencer::ColumnSetup> {
+        self.current_page()
+            .map(|page| page.column(self.tracker_track))
+    }
+    fn current_column_mut(&mut self) -> Option<&mut sequencer::ColumnSetup> {
+        let track = self.tracker_track;
+        self.current_page_mut().map(|page| page.column_mut(track))
     }
     fn current_tempo(&self) -> u16 {
         self.current_pattern()
@@ -585,7 +669,7 @@ impl App {
                 editor
                     .draft
                     .program
-                    .unwrap_or_else(|| self.current_page().map_or(0, |page| page.program)),
+                    .unwrap_or_else(|| self.current_column().map_or(0, |column| column.program)),
             )
         } else {
             None
@@ -613,13 +697,13 @@ impl App {
             let program = editor
                 .draft
                 .program
-                .unwrap_or_else(|| self.current_page().map_or(0, |page| page.program));
+                .unwrap_or_else(|| self.current_column().map_or(0, |column| column.program));
             self.preview_tracker_program(program);
         }
     }
     fn adjust_note_editor(&mut self, direction: i8) {
         let page_velocity = self.current_page().map_or(96, |page| page.velocity);
-        let page_program = self.current_page().map_or(0, |page| page.program);
+        let page_program = self.current_column().map_or(0, |column| column.program);
         let song_gate = self.song.gate_percent;
         let pattern_tempo = self.current_tempo();
         let changed_field = {
@@ -753,7 +837,7 @@ impl App {
         };
         if field == NoteEditorField::Program {
             self.sync_tracker_route();
-            self.preview_tracker_program(self.current_page().map_or(0, |page| page.program));
+            self.preview_tracker_program(self.current_column().map_or(0, |column| column.program));
         }
         self.status = format!("CELL EDIT · {} cleared only", field.label());
     }
@@ -803,7 +887,7 @@ impl App {
         let restore_program = editor
             .original
             .program
-            .unwrap_or_else(|| self.current_page().map_or(0, |page| page.program));
+            .unwrap_or_else(|| self.current_column().map_or(0, |column| column.program));
         if let Some(cell) = self
             .song
             .patterns
@@ -832,6 +916,9 @@ impl App {
         }
     }
     fn tracker_erase(&mut self) {
+        if self.tracker_mode != TrackerMode::Edit {
+            return;
+        }
         self.cancel_tracker_gesture();
         if let Some(cell) = self.tracker_cell_mut() {
             *cell = Cell::default();
@@ -843,7 +930,14 @@ impl App {
         self.tracker_gesture.cancel();
         self.tracker_gesture_anchor = None;
         if let Some(page) = self.current_page() {
-            self.tracker_live_input.cancel(&page.target, page.channel);
+            for channel in page
+                .columns
+                .iter()
+                .map(|column| column.channel)
+                .collect::<std::collections::BTreeSet<_>>()
+            {
+                self.tracker_live_input.cancel(&page.target, channel);
+            }
         }
     }
     fn tracker_single_note(&mut self, note: u8, velocity: u8) {
@@ -923,7 +1017,7 @@ impl App {
     fn open_noob_setup(&mut self) {
         self.tracker_stop();
         self.noob_draft = self.noob_scale;
-        self.screen = Screen::TrackerNoob;
+        self.set_screen(Screen::TrackerNoob);
         self.reset_context_page();
         self.status = "choose root and MAJOR/MINOR · DONE enables N00B".into();
     }
@@ -955,7 +1049,7 @@ impl App {
 
     fn confirm_noob(&mut self) {
         self.noob_scale = self.noob_draft;
-        self.screen = Screen::Tracker;
+        self.set_screen(Screen::Tracker);
         self.set_tracker_mode(TrackerMode::Noob);
         self.status = format!(
             "N00B {} {} · nearest note, ties down",
@@ -967,10 +1061,19 @@ impl App {
         let Some(page) = self.current_page() else {
             return;
         };
+        let column = *page.column(self.tracker_track);
+        let external = self.tracker_external_config();
         let program = self
             .note_editor
             .and_then(|editor| editor.draft.program)
-            .unwrap_or(page.program);
+            .unwrap_or(column.program);
+        let mut columns = page.columns.map(|setup| {
+            (
+                setup.channel,
+                (setup.program, setup.bank_msb, setup.bank_lsb),
+            )
+        });
+        columns[self.tracker_track].1 .0 = program;
         if let Ok(mut route) = self.tracker_route.lock() {
             route.configure(crate::engine::TrackerRouteConfig {
                 enabled: self.screen == Screen::Tracker
@@ -978,13 +1081,21 @@ impl App {
                         || self.note_editor.is_some()
                         || self.tracker_recording.is_some()),
                 target: page.target.clone(),
-                channel: page.channel,
+                columns,
+                start_column: self.tracker_track,
                 percussion: page.percussion,
                 scale: (self.tracker_mode == TrackerMode::Noob).then_some(self.noob_scale),
-                selection: (program, page.bank_msb, page.bank_lsb),
-                external: &self.config.external_midi,
+                external: &external,
             });
         }
+    }
+
+    fn tracker_external_config(&self) -> ExternalMidiConfig {
+        let mut external = self.config.external_midi.clone();
+        if let Some(profile) = self.tracker_device_profile() {
+            profile.apply_midi_selection(&mut external);
+        }
+        external
     }
 
     fn tracker_device_profile(&self) -> Option<&DeviceProfile> {
@@ -1002,8 +1113,9 @@ impl App {
         let Some(page) = self.current_page() else {
             return format!("MIDI program {program}");
         };
+        let column = page.column(self.tracker_track);
         self.tracker_device_profile()
-            .and_then(|profile| profile.program_label(page.bank_msb, page.bank_lsb, program))
+            .and_then(|profile| profile.program_label(column.bank_msb, column.bank_lsb, program))
             .unwrap_or_else(|| format!("MIDI program {program}"))
     }
 
@@ -1017,24 +1129,26 @@ impl App {
     }
 
     fn tracker_program_messages(&self, program: u8) -> Vec<Vec<u8>> {
-        if !self.config.external_midi.program_changes {
+        let external = self.tracker_external_config();
+        if !external.program_changes {
             return Vec::new();
         }
         let Some(page) = self.current_page() else {
             return Vec::new();
         };
+        let column = page.column(self.tracker_track);
         let mut messages = Vec::new();
-        match self.config.external_midi.bank_select {
+        match external.bank_select {
             BankSelectMode::Off => {}
             BankSelectMode::Cc0 => {
-                messages.push(vec![0xb0 | page.channel, 0, page.bank_msb]);
+                messages.push(vec![0xb0 | column.channel, 0, column.bank_msb]);
             }
             BankSelectMode::Cc0Cc32 => {
-                messages.push(vec![0xb0 | page.channel, 0, page.bank_msb]);
-                messages.push(vec![0xb0 | page.channel, 32, page.bank_lsb]);
+                messages.push(vec![0xb0 | column.channel, 0, column.bank_msb]);
+                messages.push(vec![0xb0 | column.channel, 32, column.bank_lsb]);
             }
         }
-        messages.push(vec![0xc0 | page.channel, program]);
+        messages.push(vec![0xc0 | column.channel, program]);
         messages
     }
     fn move_tracker_lane(&mut self, direction: i8) {
@@ -1115,9 +1229,9 @@ impl App {
         self.page_manager_original = Some(self.song.clone());
         self.page_manager_mode = PageManagerMode::Pages;
         self.refresh_page_targets();
-        self.screen = Screen::TrackerPages;
+        self.set_screen(Screen::TrackerPages);
         self.reset_context_page();
-        self.status = "select page · TARGET or CHANNEL · DONE saves changes".into();
+        self.status = "select page/column · TARGET, CHANNEL, PROGRAM · DONE saves changes".into();
     }
     fn cancel_page_manager(&mut self) {
         if let Some(song) = self.page_manager_original.take() {
@@ -1126,7 +1240,7 @@ impl App {
         self.clamp_tracker_cursor();
         self.tracker_track = self.tracker_track.min(LANES_PER_PAGE - 1);
         self.page_manager_mode = PageManagerMode::Pages;
-        self.screen = Screen::Tracker;
+        self.set_screen(Screen::Tracker);
         self.sync_tracker_route();
         self.status = "page changes cancelled".into();
     }
@@ -1135,8 +1249,12 @@ impl App {
             self.confirm_page_field();
             return;
         }
+        if let Err(error) = self.song.validate() {
+            self.status = format!("tracks conflict: {error}");
+            return;
+        }
         self.page_manager_original = None;
-        self.screen = Screen::Tracker;
+        self.set_screen(Screen::Tracker);
         self.sync_tracker_route();
         self.status = format!("{} pages ready", self.current_pages().len());
     }
@@ -1159,7 +1277,7 @@ impl App {
             .current_page()
             .map(|page| page.target.clone())
             .unwrap_or(PageTarget::ConfiguredExternal);
-        let channel = self.current_page().map_or(0, |page| page.channel);
+        let channel = self.current_column().map_or(0, |column| column.channel);
         match self
             .song
             .add_page_to_pattern(self.tracker_pattern_number(), target, channel)
@@ -1188,16 +1306,22 @@ impl App {
             .unwrap_or(0);
         self.page_manager_mode = PageManagerMode::Target;
         self.reset_context_page();
-        self.status = "turn encoder for target · press to confirm · STOP cancels field".into();
+        self.status = format!(
+            "turn encoder for target · {} · EXIT cancels field",
+            self.page_field_confirm_hint()
+        );
     }
     fn edit_page_channel(&mut self) {
         if self.page_manager_mode != PageManagerMode::Pages {
             return;
         }
-        self.page_channel_draft = self.current_page().map_or(0, |page| page.channel);
+        self.page_channel_draft = self.current_column().map_or(0, |column| column.channel);
         self.page_manager_mode = PageManagerMode::Channel;
         self.reset_context_page();
-        self.status = "turn encoder for channel 1–16 · press to confirm".into();
+        self.status = format!(
+            "turn encoder for channel 1–16 · {}",
+            self.page_field_confirm_hint()
+        );
     }
     fn confirm_page_field(&mut self) {
         let mode = self.page_manager_mode;
@@ -1206,6 +1330,7 @@ impl App {
             .get(self.page_target_selected)
             .cloned();
         let channel = self.page_channel_draft;
+        let track = self.tracker_track;
         if let Some(page) = self.current_page_mut() {
             match mode {
                 PageManagerMode::Target => {
@@ -1213,7 +1338,7 @@ impl App {
                         page.target = target;
                     }
                 }
-                PageManagerMode::Channel => page.channel = channel,
+                PageManagerMode::Channel => page.column_mut(track).channel = channel,
                 PageManagerMode::Pages => return,
             }
         }
@@ -1244,6 +1369,13 @@ impl App {
                     self.page_channel_draft.saturating_add(1).min(15)
                 };
             }
+        }
+    }
+    fn page_field_confirm_hint(&self) -> &'static str {
+        if self.controller_layout == ControllerLayout::Four {
+            "use CONFIRM button"
+        } else {
+            "press encoder to confirm"
         }
     }
     fn toggle_tracker_page_mute(&mut self) {
@@ -1293,9 +1425,10 @@ impl App {
         if self.stop_tracker_recording() {
             return;
         }
-        self.sequencer.stop();
-        self.song_previewing = false;
-        self.status = "tracker stopped · STOP again goes back".into();
+        if !self.stop_song_preview() {
+            self.sequencer.stop();
+        }
+        self.status = "tracker stopped".into();
     }
     fn tracker_play(&mut self, from_start: bool) {
         let status = self.sequencer.status();
@@ -1415,7 +1548,14 @@ impl App {
             .get(&pattern)
             .and_then(|pattern| pattern.pages.get(recording.page))
         {
-            self.tracker_live_input.cancel(&page.target, page.channel);
+            for channel in page
+                .columns
+                .iter()
+                .map(|column| column.channel)
+                .collect::<std::collections::BTreeSet<_>>()
+            {
+                self.tracker_live_input.cancel(&page.target, channel);
+            }
         }
         self.sequencer.stop();
         self.tracker_mode = TrackerMode::Play;
@@ -1492,7 +1632,12 @@ impl App {
     }
 
     fn load_current_loop(&mut self) -> bool {
-        let Some(settings) = self.song.audio_loop.clone() else {
+        self.load_loop_settings(self.song.audio_loop.clone())
+    }
+
+    fn load_loop_settings(&mut self, settings: Option<sequencer::LoopSettings>) -> bool {
+        self.unload_loop_player();
+        let Some(settings) = settings else {
             return false;
         };
         let path = crate::loop_player::loops_dir().join(&settings.file);
@@ -1508,6 +1653,102 @@ impl App {
                 false
             }
         }
+    }
+
+    fn unload_loop_player(&mut self) {
+        self.loop_player.unload();
+    }
+
+    fn remove_project_loop(&mut self) {
+        if self.song.audio_loop.is_none() {
+            self.confirm_loop_remove = false;
+            self.status = "project has no loop".into();
+            return;
+        }
+        if !self.confirm_loop_remove {
+            self.confirm_loop_remove = true;
+            self.status =
+                "REMOVE LOOP detaches it from the Project · press again · WAV is kept".into();
+            return;
+        }
+        self.tracker_stop();
+        self.song.audio_loop = None;
+        self.unload_loop_player();
+        self.confirm_loop_remove = false;
+        self.status = "loop removed from Project · private WAV kept".into();
+    }
+
+    fn open_loop_library(&mut self) {
+        self.tracker_stop();
+        self.loop_library_mode = true;
+        self.refresh_loop_library();
+        self.set_screen(Screen::TrackerLoop);
+        self.reset_context_page();
+        self.status = "private loop library · DELETE requires confirmation".into();
+    }
+
+    fn refresh_loop_library(&mut self) {
+        match crate::loop_player::library_entries(
+            &crate::loop_player::loops_dir(),
+            self.song.audio_loop.as_ref(),
+            &sequencer::songs_dir(),
+        ) {
+            Ok(entries) => {
+                self.loop_library = entries;
+                self.loop_library_selected = self
+                    .loop_library_selected
+                    .min(self.loop_library.len().saturating_sub(1));
+            }
+            Err(error) => {
+                self.loop_library.clear();
+                self.status = format!("loop library: {error}");
+            }
+        }
+    }
+
+    fn delete_selected_loop_file(&mut self) {
+        let Some(entry) = self.loop_library.get(self.loop_library_selected).cloned() else {
+            self.status = "private loop library is empty".into();
+            return;
+        };
+        if self.confirm_loop_delete.as_deref() != Some(&entry.file) {
+            self.confirm_loop_delete = Some(entry.file.clone());
+            self.status = if entry.current || entry.saved_references != 0 {
+                format!(
+                    "refusing {} · current {} · {} saved reference(s)",
+                    entry.file, entry.current, entry.saved_references
+                )
+            } else {
+                format!("DELETE {} physically · press again to confirm", entry.file)
+            };
+            return;
+        }
+        match crate::loop_player::delete_library_file(
+            &crate::loop_player::loops_dir(),
+            &entry.file,
+            self.song.audio_loop.as_ref(),
+            &sequencer::songs_dir(),
+        ) {
+            Ok(()) => {
+                self.confirm_loop_delete = None;
+                self.refresh_loop_library();
+                self.status = format!("deleted private WAV {}", entry.file);
+            }
+            Err(error) => {
+                self.confirm_loop_delete = None;
+                self.status = format!("loop delete: {error}");
+            }
+        }
+    }
+
+    fn stop_song_preview(&mut self) -> bool {
+        if !self.song_previewing {
+            return false;
+        }
+        self.sequencer.stop();
+        self.song_previewing = false;
+        self.load_current_loop();
+        true
     }
 
     fn import_selected_loop(&mut self) {
@@ -1684,10 +1925,16 @@ impl App {
         }
     }
     fn save_song(&mut self) {
-        match sequencer::save(&sequencer::songs_dir(), &self.song, self.confirm_song_save) {
+        let stem = sequencer::safe_name(&self.song.name);
+        let confirmed = self.confirm_song_save.as_deref() == Some(&stem);
+        match sequencer::save(&sequencer::songs_dir(), &self.song, confirmed) {
             Ok(path) => {
                 self.status = format!("saved {}", path.display());
-                self.confirm_song_save = false;
+                self.song_file_stem = path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_owned);
+                self.confirm_song_save = None;
                 self.song_list = sequencer::list(&sequencer::songs_dir());
                 self.song_selected = self
                     .song_list
@@ -1695,14 +1942,167 @@ impl App {
                     .position(|name| name == &sequencer::safe_name(&self.song.name))
                     .unwrap_or(0);
             }
-            Err(error) if !self.confirm_song_save && error.to_string().contains("confirm") => {
-                self.confirm_song_save = true;
+            Err(error) if !confirmed && error.to_string().contains("confirm") => {
+                self.confirm_song_save = Some(stem);
                 self.status = "song exists · SAVE again to overwrite".into();
             }
             Err(error) => {
                 self.status = format!("song save: {error}");
-                self.confirm_song_save = false;
+                self.confirm_song_save = None;
             }
+        }
+    }
+    fn new_project(&mut self) {
+        if !self.confirm_new_project {
+            self.confirm_new_project = true;
+            self.status =
+                "NEW PROJECT clears the current unsaved work · press again to confirm".into();
+            return;
+        }
+        let Some(name) = next_numbered_song_name(&self.song_list, "project") else {
+            self.confirm_new_project = false;
+            self.status = "new project: project numbers exhausted".into();
+            return;
+        };
+        self.cancel_note_editor();
+        self.cancel_tracker_gesture();
+        self.stop_tracker_recording();
+        self.sequencer.stop();
+        self.song_previewing = false;
+        self.unload_loop_player();
+        let mut song = Song::new(&self.config.external_midi);
+        song.name = name.clone();
+        self.song = song;
+        self.song_file_stem = None;
+        self.tracker_order = 0;
+        self.tracker_row = 0;
+        self.tracker_page = 0;
+        self.tracker_track = 0;
+        self.tracker_mode = TrackerMode::Play;
+        self.tracker_recording = None;
+        self.page_manager_original = None;
+        self.page_manager_mode = PageManagerMode::Pages;
+        self.arrange_selected = 0;
+        self.confirm_new_project = false;
+        self.confirm_song_save = None;
+        self.confirm_song_delete = None;
+        self.confirm_pattern_clear = false;
+        self.confirm_pattern_paste_over = None;
+        self.set_screen(Screen::Tracker);
+        self.refresh_page_targets();
+        self.sync_tracker_route();
+        self.project_name_input = Some(name.clone());
+        self.status = format!("new project {name} · type a name or confirm the quick default");
+    }
+
+    fn begin_project_rename(&mut self) {
+        self.project_name_input = Some(self.song.name.clone());
+        self.status = "PROJECT NAME · type, Enter confirms, Esc cancels".into();
+    }
+
+    fn commit_project_rename(&mut self) {
+        let Some(input) = self.project_name_input.clone() else {
+            return;
+        };
+        let display = input.trim();
+        if display.is_empty() {
+            self.status = "project name cannot be empty".into();
+            return;
+        }
+        if let Some(old_stem) = self.song_file_stem.clone() {
+            self.tracker_stop();
+            match sequencer::rename_project(&sequencer::songs_dir(), &old_stem, display) {
+                Ok((song, path)) => {
+                    self.song = song;
+                    self.song_file_stem = path
+                        .file_stem()
+                        .and_then(|name| name.to_str())
+                        .map(str::to_owned);
+                    self.song_list = sequencer::list(&sequencer::songs_dir());
+                    self.song_selected = self
+                        .song_file_stem
+                        .as_ref()
+                        .and_then(|stem| self.song_list.iter().position(|name| name == stem))
+                        .unwrap_or(0);
+                    self.project_name_input = None;
+                    self.status = format!("Project renamed · {}", self.song.name);
+                }
+                Err(error) => self.status = format!("rename: {error}"),
+            }
+        } else {
+            let mut candidate = self.song.clone();
+            candidate.name = display.to_owned();
+            match candidate.validate() {
+                Ok(()) => {
+                    self.song = candidate;
+                    self.project_name_input = None;
+                    self.status = format!("Project named {} · unsaved", self.song.name);
+                }
+                Err(error) => self.status = format!("name: {error}"),
+            }
+        }
+    }
+
+    fn delete_unused_pattern(&mut self) {
+        let candidate = self
+            .song
+            .patterns
+            .keys()
+            .copied()
+            .find(|number| self.song.pattern_reference_count(*number) == 0);
+        let Some(number) = candidate else {
+            self.confirm_pattern_delete = None;
+            let current = self.tracker_pattern_number();
+            let references = self.song.pattern_reference_count(current);
+            self.status = format!(
+                "no unused patterns · pattern {current} has {references} arrangement reference(s)"
+            );
+            return;
+        };
+        if self.confirm_pattern_delete != Some(number) {
+            self.confirm_pattern_delete = Some(number);
+            self.status = format!("DELETE unused pattern {number} · press again to confirm");
+            return;
+        }
+        match self.song.delete_unused_pattern(number) {
+            Ok(()) => {
+                self.confirm_pattern_delete = None;
+                self.clamp_tracker_cursor();
+                self.status = format!("deleted unused pattern {number} · arrangement unchanged");
+            }
+            Err(error) => {
+                self.confirm_pattern_delete = None;
+                self.status = format!("pattern delete: {error}");
+            }
+        }
+    }
+    fn save_song_as(&mut self) {
+        self.song_list = sequencer::list(&sequencer::songs_dir());
+        let stem = sequencer::safe_name(&self.song.name);
+        let prefix = format!("{}-copy", stem.chars().take(51).collect::<String>());
+        let Some(name) = next_numbered_song_name(&self.song_list, &prefix) else {
+            self.status = "save as: copy numbers exhausted".into();
+            return;
+        };
+        let mut copy = self.song.clone();
+        copy.name = name.clone();
+        match sequencer::save(&sequencer::songs_dir(), &copy, false) {
+            Ok(path) => {
+                self.song = copy;
+                self.song_file_stem = path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_owned);
+                self.confirm_song_save = None;
+                self.song_list = sequencer::list(&sequencer::songs_dir());
+                self.song_selected = self
+                    .song_list
+                    .iter()
+                    .position(|candidate| candidate == &name)
+                    .unwrap_or(0);
+                self.status = format!("saved as {}", path.display());
+            }
+            Err(error) => self.status = format!("save as: {error}"),
         }
     }
     fn load_song(&mut self) {
@@ -1711,20 +2111,18 @@ impl App {
             return;
         };
         self.tracker_stop();
-        self.song_previewing = false;
         match sequencer::load(&sequencer::songs_dir(), &name) {
             Ok(song) => {
                 self.song = song;
+                self.song_file_stem = Some(name.clone());
                 self.tracker_order = 0;
                 self.tracker_row = 0;
                 self.tracker_page = 0;
                 self.tracker_track = 0;
-                self.screen = Screen::Tracker;
+                self.set_screen(Screen::Tracker);
                 self.refresh_page_targets();
                 self.sync_tracker_route();
-                if self.song.audio_loop.is_some() {
-                    self.load_current_loop();
-                } else {
+                if !self.load_current_loop() && self.song.audio_loop.is_none() {
                     self.status = format!("loaded {name}");
                 }
             }
@@ -1733,16 +2131,15 @@ impl App {
     }
     fn preview_song(&mut self) {
         if self.song_previewing {
-            self.sequencer.stop();
-            self.song_previewing = false;
+            self.stop_song_preview();
             self.status = "song preview stopped".into();
             return;
         }
-        let Some(name) = self.song_list.get(self.song_selected) else {
+        let Some(name) = self.song_list.get(self.song_selected).cloned() else {
             self.status = "no saved song selected".into();
             return;
         };
-        match sequencer::load(&sequencer::songs_dir(), name) {
+        match sequencer::load(&sequencer::songs_dir(), &name) {
             Ok(song) => {
                 let notes =
                     sequencer::schedule(&song, &self.config.external_midi, 0, 0).map(|messages| {
@@ -1757,8 +2154,27 @@ impl App {
                             .count()
                     });
                 match notes {
-                    Ok(0) => self.status = format!("{name} has no notes to preview"),
+                    Ok(0) if song.audio_loop.is_none() => {
+                        self.status = format!("{name} has no notes or loop to preview")
+                    }
                     Ok(notes) => {
+                        self.sequencer.stop();
+                        if song.audio_loop.is_some()
+                            && !self.load_loop_settings(song.audio_loop.clone())
+                        {
+                            let preview_error = self.status.clone();
+                            if self.song.audio_loop.is_some() && !self.load_current_loop() {
+                                let restore_error = self.status.clone();
+                                self.status =
+                                    format!("{preview_error}; current Project {restore_error}");
+                            } else {
+                                self.status = preview_error;
+                            }
+                            return;
+                        }
+                        if song.audio_loop.is_none() {
+                            self.load_loop_settings(None);
+                        }
                         self.sequencer.play(&song, 0, 0);
                         self.song_previewing = true;
                         self.status = format!("previewing {name} · {notes} notes");
@@ -1780,8 +2196,7 @@ impl App {
             return;
         }
         if self.song_previewing {
-            self.sequencer.stop();
-            self.song_previewing = false;
+            self.stop_song_preview();
         }
         match sequencer::delete(&sequencer::songs_dir(), &name) {
             Ok(()) => {
@@ -1815,7 +2230,7 @@ impl App {
             nearest_pattern_rows(4, self.config.external_midi.default_pattern_rows);
         self.pattern_setup_new = true;
         self.confirm_pattern_clear = true;
-        self.screen = Screen::TrackerFiles;
+        self.set_screen(Screen::TrackerFiles);
         self.reset_context_page();
         self.pattern_setup_status();
     }
@@ -1867,10 +2282,13 @@ impl App {
         }
         let number = self.tracker_pattern_number();
         let rows = self.pattern_setup_rows;
-        if let Some(pattern) = self.song.patterns.get_mut(&number) {
+        if let Some(pattern) = self.song.patterns.get(&number) {
             let mut replacement = sequencer::Pattern::empty_like_setup(rows, pattern);
             replacement.meter = self.pattern_clear_beats;
-            *pattern = replacement;
+            if let Err(error) = self.song.replace_pattern(number, replacement) {
+                self.status = format!("clear pattern: {error}");
+                return;
+            }
         }
         self.tracker_row = 0;
         self.confirm_pattern_clear = false;
@@ -1885,20 +2303,24 @@ impl App {
 
     fn create_pattern(&mut self, rows: usize) {
         self.tracker_stop();
-        let number = self.song.patterns.keys().next_back().copied().unwrap_or(0) + 1;
         let pattern = sequencer::Pattern::from_config(
             &self.config.external_midi,
             rows,
             self.pattern_clear_beats,
         );
-        self.song.patterns.insert(number, pattern);
-        self.song.order.push(number);
+        let number = match self.song.append_pattern(pattern) {
+            Ok(number) => number,
+            Err(error) => {
+                self.status = format!("new pattern: {error}");
+                return;
+            }
+        };
         self.tracker_order = self.song.order.len() - 1;
         self.clamp_tracker_cursor();
         self.tracker_row = 0;
         self.confirm_pattern_clear = false;
         self.pattern_setup_new = false;
-        self.screen = Screen::Tracker;
+        self.set_screen(Screen::Tracker);
         self.status = format!(
             "new pattern {number} · {rows} rows · order {:02}/{:02}",
             self.tracker_order + 1,
@@ -1907,13 +2329,17 @@ impl App {
     }
     fn clone_pattern(&mut self) {
         let old = self.tracker_pattern_number();
-        let number = self.song.patterns.keys().next_back().copied().unwrap_or(0) + 1;
         let Some(pattern) = self.song.patterns.get(&old).cloned() else {
             self.status = "no pattern to clone".into();
             return;
         };
-        self.song.patterns.insert(number, pattern);
-        self.song.order.push(number);
+        let number = match self.song.append_pattern(pattern) {
+            Ok(number) => number,
+            Err(error) => {
+                self.status = format!("clone pattern: {error}");
+                return;
+            }
+        };
         self.tracker_order = self.song.order.len() - 1;
         self.tracker_row = 0;
         self.status = format!("cloned pattern {old} as {number}");
@@ -1925,7 +2351,7 @@ impl App {
             return;
         };
         self.pattern_clipboard = Some(pattern);
-        self.confirm_pattern_paste_over = false;
+        self.confirm_pattern_paste_over = None;
         self.status = format!("copied pattern {number}");
     }
     fn paste_pattern_new(&mut self) {
@@ -1934,9 +2360,13 @@ impl App {
             return;
         };
         self.tracker_stop();
-        let number = self.song.patterns.keys().next_back().copied().unwrap_or(0) + 1;
-        self.song.patterns.insert(number, pattern);
-        self.song.order.push(number);
+        let number = match self.song.append_pattern(pattern) {
+            Ok(number) => number,
+            Err(error) => {
+                self.status = format!("paste pattern: {error}");
+                return;
+            }
+        };
         self.tracker_order = self.song.order.len() - 1;
         self.tracker_row = 0;
         self.clamp_tracker_cursor();
@@ -1947,15 +2377,19 @@ impl App {
             self.status = "pattern clipboard empty".into();
             return;
         };
-        if !self.confirm_pattern_paste_over {
-            self.confirm_pattern_paste_over = true;
-            self.status = "confirm paste over current pattern".into();
+        let number = self.tracker_pattern_number();
+        if self.confirm_pattern_paste_over != Some(number) {
+            self.confirm_pattern_paste_over = Some(number);
+            self.status = format!("confirm paste over pattern {number}");
             return;
         }
         self.tracker_stop();
-        let number = self.tracker_pattern_number();
-        self.song.patterns.insert(number, pattern);
-        self.confirm_pattern_paste_over = false;
+        if let Err(error) = self.song.replace_pattern(number, pattern) {
+            self.confirm_pattern_paste_over = None;
+            self.status = format!("paste pattern: {error}");
+            return;
+        }
+        self.confirm_pattern_paste_over = None;
         self.clamp_tracker_cursor();
         self.status = format!("pasted over pattern {number}");
     }
@@ -2090,10 +2524,16 @@ impl App {
     }
     fn clear_pattern_now(&mut self) {
         let number = self.tracker_pattern_number();
-        if let Some(pattern) = self.song.patterns.get_mut(&number) {
-            *pattern = sequencer::Pattern::empty_like_setup(pattern.rows.len(), pattern);
-            self.tracker_row = 0;
-            self.status = format!("cleared pattern {number}");
+        let Some(pattern) = self.song.patterns.get(&number) else {
+            return;
+        };
+        let replacement = sequencer::Pattern::empty_like_setup(pattern.rows.len(), pattern);
+        match self.song.replace_pattern(number, replacement) {
+            Ok(()) => {
+                self.tracker_row = 0;
+                self.status = format!("cleared pattern {number}");
+            }
+            Err(error) => self.status = format!("clear pattern: {error}"),
         }
     }
     fn move_order(&mut self, direction: i8) {
@@ -2113,8 +2553,12 @@ impl App {
     }
     fn repeat_order(&mut self) {
         let number = self.tracker_pattern_number();
-        self.song.order.insert(self.tracker_order + 1, number);
-        self.tracker_order += 1;
+        let index = self.tracker_order + 1;
+        if let Err(error) = self.song.insert_arrangement_step(index, number) {
+            self.status = format!("repeat pattern: {error}");
+            return;
+        }
+        self.tracker_order = index;
         self.clamp_tracker_cursor();
         self.tracker_row = 0;
         self.status = format!("repeated pattern {number} in order");
@@ -2135,7 +2579,7 @@ impl App {
         self.arrange_selected = self
             .tracker_order
             .min(self.song.order.len().saturating_sub(1));
-        self.screen = Screen::TrackerArrange;
+        self.set_screen(Screen::TrackerArrange);
         self.reset_context_page();
         self.status = "FT2 arrangement · chain pattern steps".into();
     }
@@ -2153,23 +2597,40 @@ impl App {
     }
     fn arrangement_append_current(&mut self) {
         let number = self.tracker_pattern_number();
-        self.song.order.push(number);
-        self.arrange_selected = self.song.order.len() - 1;
+        let index = self.song.order.len();
+        match self.song.insert_arrangement_step(index, number) {
+            Ok(index) => self.arrange_selected = index,
+            Err(error) => {
+                self.status = format!("append pattern: {error}");
+                return;
+            }
+        }
         self.status = format!("appended pattern {number}");
     }
     fn arrangement_insert_current(&mut self) {
         let number = self.tracker_pattern_number();
         let index = self.arrange_selected.min(self.song.order.len());
-        self.song.order.insert(index, number);
-        self.arrange_selected = index;
+        match self.song.insert_arrangement_step(index, number) {
+            Ok(index) => self.arrange_selected = index,
+            Err(error) => {
+                self.status = format!("insert pattern: {error}");
+                return;
+            }
+        }
         self.status = format!("inserted pattern {number}");
     }
     fn arrangement_duplicate_step(&mut self) {
         let Some(number) = self.song.order.get(self.arrange_selected).copied() else {
             return;
         };
-        self.song.order.insert(self.arrange_selected + 1, number);
-        self.arrange_selected += 1;
+        let index = self.arrange_selected + 1;
+        match self.song.insert_arrangement_step(index, number) {
+            Ok(index) => self.arrange_selected = index,
+            Err(error) => {
+                self.status = format!("duplicate step: {error}");
+                return;
+            }
+        }
         self.status = format!("duplicated step for pattern {number}");
     }
     fn arrangement_remove_step(&mut self) {
@@ -2204,7 +2665,7 @@ impl App {
             .min(self.song.order.len().saturating_sub(1));
         self.tracker_row = 0;
         self.clamp_tracker_cursor();
-        self.screen = Screen::Tracker;
+        self.set_screen(Screen::Tracker);
         self.status = format!("editing pattern {}", self.tracker_pattern_number());
     }
     fn arrangement_play_from_step(&mut self) {
@@ -2215,6 +2676,9 @@ impl App {
         self.tracker_play(false);
     }
     fn tracker_note_off(&mut self) {
+        if self.tracker_mode != TrackerMode::Edit {
+            return;
+        }
         self.cancel_tracker_gesture();
         if let Some(cell) = self.tracker_cell_mut() {
             cell.note = Note::Off;
@@ -2229,13 +2693,34 @@ impl App {
         }
     }
     fn change_program(&mut self, direction: i8) {
+        let track = self.tracker_track;
         if let Some(page) = self.current_page_mut() {
-            page.program = if direction < 0 {
-                page.program.saturating_sub(1)
+            let name = page.name.clone();
+            let column = page.column_mut(track);
+            column.program = if direction < 0 {
+                column.program.saturating_sub(1)
             } else {
-                page.program.saturating_add(1).min(127)
+                column.program.saturating_add(1).min(127)
             };
-            self.status = format!("{} program {}", page.name, page.program);
+            self.status = format!("{name} column {} program {}", track + 1, column.program);
+            self.sync_tracker_route();
+        }
+    }
+    fn change_bank(&mut self, msb: bool, direction: i8) {
+        let track = self.tracker_track;
+        if let Some(column) = self.current_column_mut() {
+            let value = if msb {
+                &mut column.bank_msb
+            } else {
+                &mut column.bank_lsb
+            };
+            *value = if direction < 0 {
+                value.saturating_sub(1)
+            } else {
+                value.saturating_add(1).min(127)
+            };
+            let (bank_msb, bank_lsb) = (column.bank_msb, column.bank_lsb);
+            self.status = format!("column {} bank {bank_msb}/{bank_lsb}", track + 1);
             self.sync_tracker_route();
         }
     }
@@ -2256,6 +2741,18 @@ impl App {
             Err(e) => format!("audio recorder: {e}"),
         };
     }
+    fn commit_loaded_preset(
+        &mut self,
+        preset: Preset,
+        original_values: HashMap<u8, f32>,
+        values: HashMap<u8, f32>,
+    ) {
+        self.playing = Some(preset);
+        self.original_values = original_values;
+        self.values = values;
+        self.arm_pickup();
+        self.set_screen(Screen::Playback);
+    }
     fn load(&mut self, state: &Path, _tx: std::sync::mpsc::Sender<MidiEvent>) {
         if let Some(reason) = self
             .catalogs
@@ -2268,21 +2765,22 @@ impl App {
         if self.presets.is_empty() {
             return;
         }
+        let p = self.presets[self.selected].clone();
+        let original_values = match engine::initial_values(&p) {
+            Ok(values) => values,
+            Err(error) => {
+                self.status = format!("INVALID PRESET: {error:#}");
+                return;
+            }
+        };
         self.stop_recording();
         self.stop_playback();
-        let p = self.presets[self.selected].clone();
-        self.original_values = engine::initial_values(&p).unwrap_or_default();
-        self.values = self.original_values.clone();
-        self.arm_pickup();
         if let Some(engine) = self.engine.as_mut() {
             match engine.load_in_place(&p) {
                 Ok(true) => {
-                    self.playing = Some(p);
-                    self.screen = Screen::Playback;
-                    self.status = format!(
-                        "{} sound loaded in place · MIDI ready",
-                        engine.backend().label()
-                    );
+                    let backend = engine.backend();
+                    self.commit_loaded_preset(p, original_values.clone(), original_values);
+                    self.status = format!("{} sound loaded in place · MIDI ready", backend.label());
                     return;
                 }
                 Ok(false) => {}
@@ -2292,17 +2790,21 @@ impl App {
                 }
             }
         }
-        self.engine.take();
-        if let Ok(mut backend) = self.midi_backend.lock() {
-            *backend = p.backend;
+        if let Err(error) = engine::validate_start(&p, state, &self.config) {
+            self.status = format!("START PRECHECK FAILED: {error:#}");
+            return;
         }
+        self.engine.take();
+        self.playing = None;
         self.status = format!("starting JACK/{}…", p.backend.label());
         let backend_label = p.backend.label();
         match Engine::start(&p, state, Arc::clone(&self.midi_output), &self.config) {
             Ok(e) => {
                 self.engine = Some(e);
-                self.playing = Some(p);
-                self.screen = Screen::Playback;
+                if let Ok(mut backend) = self.midi_backend.lock() {
+                    *backend = p.backend;
+                }
+                self.commit_loaded_preset(p, original_values.clone(), original_values);
                 self.status = format!("{backend_label} running · MIDI ready");
             }
             Err(e) => {
@@ -2346,13 +2848,31 @@ impl App {
     fn toggle_playback(&mut self) {
         if self.playback.is_some() {
             self.stop_playback();
+        } else if self.engine.is_none() {
+            self.status = "load the idea preset before playing its recording".into();
         } else if self.last.is_empty() {
             self.status = "no recording yet".into();
         } else {
+            let events = self.last.clone();
+            let output = Arc::clone(&self.midi_output);
+            let stop = Arc::new(AtomicBool::new(false));
+            let worker_stop = Arc::clone(&stop);
+            let worker = std::thread::spawn(move || {
+                recording::play_events(
+                    &events,
+                    |message| {
+                        if let Ok(mut output) = output.lock() {
+                            if let Some(output) = output.as_mut() {
+                                let _ = output.send(message);
+                            }
+                        }
+                    },
+                    &worker_stop,
+                );
+            });
             self.playback = Some(Playback {
-                events: self.last.clone(),
-                index: 0,
-                started: Instant::now(),
+                stop,
+                worker: Some(worker),
             });
             self.status = "▶ playing recording".into();
         }
@@ -2364,14 +2884,15 @@ impl App {
         self.ideas = recording::list(&recording::ideas_dir()).unwrap_or_default();
         self.idea_selected = self.idea_selected.min(self.ideas.len().saturating_sub(1));
         self.confirm_delete = None;
-        self.screen = Screen::Ideas;
+        self.set_screen(Screen::Ideas);
         self.status = "ideas · select an action".into();
     }
     fn open_help(&mut self) {
+        self.stop_tracker_recording();
         if self.screen != Screen::Help {
             self.help_previous = self.screen;
         }
-        self.screen = Screen::Help;
+        self.set_screen(Screen::Help);
         self.start_web_help();
         self.sync_tracker_route();
         self.reset_context_page();
@@ -2380,7 +2901,7 @@ impl App {
     fn close_help(&mut self) {
         self.web_help = None;
         self.web_help_status.clear();
-        self.screen = self.help_previous;
+        self.set_screen(self.help_previous);
         self.sync_tracker_route();
         self.status = format!("returned to {}", self.screen.label());
     }
@@ -2403,7 +2924,7 @@ impl App {
         }
     }
     fn move_help(&mut self, delta: isize) {
-        let last = help::lines(38).len().saturating_sub(1);
+        let last = help::lines(HELP_TEXT_WIDTH).len().saturating_sub(1);
         self.help_selected = if delta < 0 {
             self.help_selected.saturating_sub(delta.unsigned_abs())
         } else {
@@ -2411,7 +2932,7 @@ impl App {
         };
     }
     fn activate_help(&mut self) {
-        let lines = help::lines(38);
+        let lines = help::lines(HELP_TEXT_WIDTH);
         let Some(line) = lines.get(self.help_selected) else {
             return;
         };
@@ -2514,20 +3035,31 @@ impl App {
             self.status = format!("CONFIRM REPLACE current preset with {name}: choose Load again");
             return;
         }
-        match recording::load(&recording::ideas_dir(), &name) {
-            Ok((preset, events)) => {
+        match recording::load_with_parameters(&recording::ideas_dir(), &name) {
+            Ok((preset, saved_values, events)) => {
+                let original_values = match engine::initial_values(&preset) {
+                    Ok(values) => values,
+                    Err(error) => {
+                        self.status = format!("idea preset is invalid: {error:#}");
+                        return;
+                    }
+                };
                 self.stop_recording();
                 self.stop_playback();
-                self.original_values = engine::initial_values(&preset).unwrap_or_default();
-                self.values = self.original_values.clone();
-                self.arm_pickup();
                 if let Some(engine) = self.engine.as_mut() {
                     match engine.load_in_place(&preset) {
                         Ok(true) => {
-                            self.playing = Some(preset);
-                            self.last = events;
-                            self.screen = Screen::Playback;
-                            self.status = format!("loaded idea {name} in place · recording ready");
+                            if let Ok(mut backend) = self.midi_backend.lock() {
+                                *backend = preset.backend;
+                            }
+                            self.finish_idea_load(
+                                preset,
+                                original_values,
+                                saved_values,
+                                events,
+                                &name,
+                                true,
+                            );
                             self.confirm_load = None;
                             return;
                         }
@@ -2538,17 +3070,26 @@ impl App {
                         }
                     }
                 }
-                self.engine.take();
-                if let Ok(mut backend) = self.midi_backend.lock() {
-                    *backend = preset.backend;
+                if let Err(error) = engine::validate_start(&preset, state, &self.config) {
+                    self.status = format!("idea sound precheck failed: {error:#}");
+                    return;
                 }
+                self.engine.take();
+                self.playing = None;
                 match Engine::start(&preset, state, Arc::clone(&self.midi_output), &self.config) {
                     Ok(engine) => {
                         self.engine = Some(engine);
-                        self.playing = Some(preset);
-                        self.last = events;
-                        self.screen = Screen::Playback;
-                        self.status = format!("loaded idea {name} · recording ready");
+                        if let Ok(mut backend) = self.midi_backend.lock() {
+                            *backend = preset.backend;
+                        }
+                        self.finish_idea_load(
+                            preset,
+                            original_values,
+                            saved_values,
+                            events,
+                            &name,
+                            false,
+                        );
                         self.confirm_load = None;
                     }
                     Err(e) => {
@@ -2557,6 +3098,41 @@ impl App {
                 }
             }
             Err(e) => self.status = format!("idea read failed: {e:#}"),
+        }
+    }
+    fn finish_idea_load(
+        &mut self,
+        preset: Preset,
+        original_values: HashMap<u8, f32>,
+        saved_values: HashMap<u8, f32>,
+        events: Vec<TimedEvent>,
+        name: &str,
+        in_place: bool,
+    ) {
+        let mut values = original_values.clone();
+        values.extend(saved_values.iter().map(|(&cc, &value)| (cc, value)));
+        let restore_error = if saved_values.is_empty() {
+            None
+        } else {
+            self.engine
+                .as_ref()
+                .and_then(|engine| engine.set_mapped_parameters(&values).err())
+        };
+        self.last = events;
+        if let Some(error) = restore_error {
+            if let Some(engine) = self.engine.as_ref() {
+                let _ = engine.set_mapped_parameters(&original_values);
+            }
+            self.commit_loaded_preset(preset, original_values.clone(), original_values);
+            self.status = format!(
+                "loaded idea {name}, but parameter restore failed: {error:#} · preset defaults active"
+            );
+        } else {
+            self.commit_loaded_preset(preset, original_values, values);
+            self.status = format!(
+                "loaded idea {name}{} · recording ready",
+                if in_place { " in place" } else { "" }
+            );
         }
     }
     fn tick(&mut self) {
@@ -2588,23 +3164,17 @@ impl App {
             }
         }
         if self.engine.as_mut().is_some_and(|engine| !engine.alive()) {
+            self.playback.take();
             self.engine.take();
             self.playing = None;
-            self.playback = None;
             self.status = "ENGINE EXITED · select a sound to restart it".into();
         }
-        let mut done = false;
-        if let Some(pb) = &mut self.playback {
-            while pb.index < pb.events.len()
-                && Duration::from_micros(pb.events[pb.index].micros) <= pb.started.elapsed()
-            {
-                if let Some(e) = &self.engine {
-                    let _ = e.send(&pb.events[pb.index].bytes);
-                }
-                pb.index += 1;
-            }
-            done = pb.index >= pb.events.len();
-        }
+        let done = self.playback.as_ref().is_some_and(|playback| {
+            playback
+                .worker
+                .as_ref()
+                .is_none_or(std::thread::JoinHandle::is_finished)
+        });
         if done {
             self.stop_playback();
             self.status = "recording playback complete · all notes off".into();
@@ -2752,10 +3322,9 @@ fn drain(
             MidiEvent::Value(cc, v) => {
                 app.values.insert(cc, v);
             }
-            MidiEvent::Raw(bytes) => {
-                let now = Instant::now();
+            MidiEvent::Raw { received, bytes } => {
                 app.held_notes.observe(&bytes);
-                app.recorder.capture(now, &bytes);
+                app.recorder.capture(received, &bytes);
                 let tracker_preview = app.screen == Screen::Tracker
                     && (matches!(app.tracker_mode, TrackerMode::Edit | TrackerMode::Noob)
                         || app.note_editor.is_some()
@@ -2782,7 +3351,7 @@ fn drain(
                             app.tracker_track,
                         ));
                     }
-                    app.tracker_gesture.observe(now, &bytes);
+                    app.tracker_gesture.observe(received, &bytes);
                 }
             }
             MidiEvent::Pad(pad, pressed) => {
@@ -2805,16 +3374,10 @@ fn drain(
                 }
             }
             MidiEvent::Encoder(action) => {
-                if app.screen == Screen::Help {
-                    let action = match action {
-                        crate::pads::EncoderAction::Up => Action::Up,
-                        crate::pads::EncoderAction::Down => Action::Down,
-                        crate::pads::EncoderAction::Select => Action::Activate,
-                    };
-                    perform(action, app, state, Some(tx));
-                } else if app.controller_layout == ControllerLayout::Four {
+                if app.controller_layout == ControllerLayout::Four {
                     match action {
                         crate::pads::EncoderAction::Select => {
+                            app.prepare_confirmation_action(Action::Noop);
                             app.page_select_mode = !app.page_select_mode;
                             app.status = if app.page_select_mode {
                                 "PAGE SELECT · turn encoder · press to return".into()
@@ -2862,6 +3425,7 @@ fn perform(
     state: &Path,
     tx: Option<&std::sync::mpsc::Sender<MidiEvent>>,
 ) -> bool {
+    a.prepare_confirmation_action(action);
     // EXIT is the same physical page/item on every normal and contextual
     // menu, so it must not be swallowed by an active editor or confirmation.
     if action == Action::Quit {
@@ -2871,6 +3435,17 @@ fn perform(
     // modal confirmation owns the rest of the input dispatch.
     if action == Action::StopAll {
         a.stop_all(state);
+        return false;
+    }
+    if a.project_name_input.is_some() {
+        match action {
+            Action::Activate => a.commit_project_rename(),
+            Action::Back => {
+                a.project_name_input = None;
+                a.status = "project naming cancelled".into();
+            }
+            _ => {}
+        }
         return false;
     }
     if action == Action::OpenHelp && a.screen != Screen::Help {
@@ -2884,7 +3459,7 @@ fn perform(
             Action::PageUp => a.move_help(-10),
             Action::PageDown => a.move_help(10),
             Action::Home => a.help_selected = 0,
-            Action::End => a.help_selected = help::lines(38).len().saturating_sub(1),
+            Action::End => a.help_selected = help::lines(HELP_TEXT_WIDTH).len().saturating_sub(1),
             Action::Activate => a.activate_help(),
             Action::Back => a.close_help(),
             Action::OpenHelp => {}
@@ -2916,7 +3491,6 @@ fn perform(
                 a.status = "step edit on".into();
             }
             Action::TrackerStop => {
-                a.cancel_note_editor();
                 a.tracker_stop();
             }
             Action::StopAll => unreachable!("panic is handled before contextual dispatch"),
@@ -2932,6 +3506,7 @@ fn perform(
             }
             Action::Back => {
                 a.stop_tracker_recording();
+                return false;
             }
             Action::StopAll => unreachable!("panic is handled before contextual dispatch"),
             _ => return false,
@@ -2977,7 +3552,11 @@ fn perform(
             } else if a.screen == Screen::TrackerPages {
                 a.turn_page_manager(-1);
             } else if a.screen == Screen::TrackerLoop {
-                a.loop_selected = a.loop_selected.saturating_sub(1);
+                if a.loop_library_mode {
+                    a.loop_library_selected = a.loop_library_selected.saturating_sub(1);
+                } else {
+                    a.loop_selected = a.loop_selected.saturating_sub(1);
+                }
             } else if a.screen == Screen::Presets {
                 a.selected = a.selected.saturating_sub(1);
             }
@@ -2996,7 +3575,13 @@ fn perform(
             } else if a.screen == Screen::TrackerPages {
                 a.turn_page_manager(1);
             } else if a.screen == Screen::TrackerLoop {
-                a.loop_selected = (a.loop_selected + 1).min(a.loop_imports.len().saturating_sub(1));
+                if a.loop_library_mode {
+                    a.loop_library_selected =
+                        (a.loop_library_selected + 1).min(a.loop_library.len().saturating_sub(1));
+                } else {
+                    a.loop_selected =
+                        (a.loop_selected + 1).min(a.loop_imports.len().saturating_sub(1));
+                }
             } else if a.screen == Screen::Presets {
                 a.selected = (a.selected + 1).min(a.presets.len().saturating_sub(1));
             }
@@ -3004,11 +3589,16 @@ fn perform(
         Action::PageUp => {
             if a.screen == Screen::Presets {
                 a.selected = a.selected.saturating_sub(10);
+            } else if a.screen == Screen::TrackerLoop && a.loop_library_mode {
+                a.loop_library_selected = a.loop_library_selected.saturating_sub(10);
             }
         }
         Action::PageDown => {
             if a.screen == Screen::Presets {
                 a.selected = (a.selected + 10).min(a.presets.len().saturating_sub(1));
+            } else if a.screen == Screen::TrackerLoop && a.loop_library_mode {
+                a.loop_library_selected =
+                    (a.loop_library_selected + 10).min(a.loop_library.len().saturating_sub(1));
             }
         }
         Action::Home => {
@@ -3064,12 +3654,12 @@ fn perform(
         Action::StopAll => unreachable!("panic is handled before contextual dispatch"),
         Action::OpenPresets => {
             a.set_tracker_edit(false);
-            a.screen = Screen::Presets;
+            a.set_screen(Screen::Presets);
         }
         Action::OpenIdeas => a.open_ideas(),
         Action::OpenHelp => a.open_help(),
         Action::OpenTracker => {
-            a.screen = Screen::Tracker;
+            a.set_screen(Screen::Tracker);
             a.refresh_page_targets();
             a.sync_tracker_route();
             let page_online = a
@@ -3090,34 +3680,42 @@ fn perform(
             a.song_selected = a.song_selected.min(a.song_list.len().saturating_sub(1));
             a.confirm_song_delete = None;
             a.confirm_pattern_clear = false;
-            a.song_previewing = false;
-            a.screen = Screen::TrackerFiles;
+            a.stop_song_preview();
+            a.set_screen(Screen::TrackerFiles);
             a.status = "song files · select an action".into();
         }
         Action::OpenTrackerArrange => a.open_arrange(),
         Action::OpenTrackerPages => a.open_page_manager(),
         Action::OpenTrackerTools => {
-            a.screen = Screen::TrackerTools;
+            a.set_screen(Screen::TrackerTools);
             a.reset_context_page();
             a.status = "FT2 tools · pages, files, loop, mute".into();
         }
         Action::OpenTrackerLoop => {
-            a.screen = Screen::TrackerLoop;
+            a.loop_library_mode = false;
+            a.set_screen(Screen::TrackerLoop);
             a.refresh_loop_imports();
             a.reset_context_page();
             a.status = format!("loop inbox · {} WAV file(s)", a.loop_imports.len());
         }
         Action::OpenTrackerLoopAlign => {
-            a.screen = Screen::TrackerLoopAlign;
+            a.set_screen(Screen::TrackerLoopAlign);
             a.reset_context_page();
             a.status = "loop align · AUTO or move by one bar".into();
         }
         Action::OpenAudioRecorder => {
             a.set_tracker_edit(false);
-            a.screen = Screen::AudioRecorder;
+            a.set_screen(Screen::AudioRecorder);
             a.status = "stereo audio recorder".into();
         }
         Action::Back => {
+            if a.screen == Screen::TrackerLoop && a.loop_library_mode {
+                a.loop_library_mode = false;
+                a.confirm_loop_delete = None;
+                a.reset_context_page();
+                a.status = "loop editor".into();
+                return false;
+            }
             if a.screen == Screen::TrackerPages {
                 if a.page_manager_mode == PageManagerMode::Pages {
                     a.cancel_page_manager();
@@ -3127,14 +3725,14 @@ fn perform(
                 return false;
             }
             if a.screen == Screen::TrackerFiles && a.song_previewing {
-                a.sequencer.stop();
-                a.song_previewing = false;
+                a.stop_song_preview();
             }
             a.confirm_delete = None;
             a.confirm_load = None;
             a.set_tracker_edit(false);
-            a.screen = if matches!(
-                a.screen,
+            let current_screen = a.screen;
+            let next_screen = if matches!(
+                current_screen,
                 Screen::TrackerFiles
                     | Screen::TrackerTools
                     | Screen::TrackerArrange
@@ -3142,7 +3740,7 @@ fn perform(
                     | Screen::TrackerLoop
                     | Screen::TrackerLoopAlign
             ) {
-                if a.screen == Screen::TrackerLoopAlign {
+                if current_screen == Screen::TrackerLoopAlign {
                     Screen::TrackerLoop
                 } else {
                     Screen::Tracker
@@ -3157,6 +3755,7 @@ fn perform(
             } else {
                 Screen::Presets
             };
+            a.set_screen(next_screen);
         }
         Action::TapTempo => {
             if let Some(b) = a.tap.tap(Instant::now()) {
@@ -3204,6 +3803,7 @@ fn perform(
         Action::NoobScale => a.toggle_noob_scale(),
         Action::ConfirmNoob => a.confirm_noob(),
         Action::LoopImport => a.import_selected_loop(),
+        Action::LoopRemove => a.remove_project_loop(),
         Action::LoopSourceDown => a.adjust_loop_source_bpm(-1),
         Action::LoopSourceUp => a.adjust_loop_source_bpm(1),
         Action::LoopBpmMode => a.cycle_loop_bpm_mode(),
@@ -3222,9 +3822,11 @@ fn perform(
         Action::LoopOffsetDown => a.adjust_loop_offset_bars(-1),
         Action::LoopOffsetUp => a.adjust_loop_offset_bars(1),
         Action::LoopAlignDone => {
-            a.screen = Screen::TrackerLoop;
+            a.set_screen(Screen::TrackerLoop);
             a.status = "loop alignment set".into();
         }
+        Action::OpenLoopLibrary => a.open_loop_library(),
+        Action::DeleteLoopFile => a.delete_selected_loop_file(),
         Action::TrackerStop => {
             a.tracker_stop();
         }
@@ -3246,6 +3848,7 @@ fn perform(
         Action::NextTrackerPage => a.switch_tracker_page(),
         Action::PreviewSong => a.preview_song(),
         Action::DeleteSong => a.delete_song(),
+        Action::RenameProject => a.begin_project_rename(),
         Action::NewPattern => a.new_pattern(),
         Action::ClearPattern => a.choose_pattern_clear(),
         Action::ClearPatternNow => {
@@ -3253,9 +3856,8 @@ fn perform(
             a.clear_pattern_now();
         }
         Action::ClonePattern => a.clone_pattern(),
-        Action::CopyPattern => a.copy_pattern(),
-        Action::PastePatternNew => a.paste_pattern_new(),
         Action::PastePatternOver => a.paste_pattern_over(),
+        Action::DeleteUnusedPattern => a.delete_unused_pattern(),
         Action::CopyLane => a.copy_lane(),
         Action::PasteLane => a.paste_lane(),
         Action::CopyPage => a.copy_page_block(),
@@ -3270,8 +3872,6 @@ fn perform(
         Action::ArrangementPlayFromStep => a.arrangement_play_from_step(),
         Action::PreviousOrder => a.move_order(-1),
         Action::NextOrder => a.move_order(1),
-        Action::RepeatOrder => a.repeat_order(),
-        Action::DeleteOrder => a.delete_order(),
         Action::TrackerEdit => {
             let enabled = a.tracker_mode != TrackerMode::Edit;
             a.set_tracker_edit(enabled);
@@ -3296,20 +3896,24 @@ fn perform(
         | Action::NoteEditorCancel => {}
         Action::PreviousTrack => {
             if a.screen == Screen::TrackerPages {
-                a.move_page_selection(-1);
+                a.tracker_track = a.tracker_track.saturating_sub(1);
             } else {
                 a.move_tracker_lane(-1);
             }
         }
         Action::NextTrack => {
             if a.screen == Screen::TrackerPages {
-                a.move_page_selection(1);
+                a.tracker_track = (a.tracker_track + 1).min(LANES_PER_PAGE - 1);
             } else {
                 a.move_tracker_lane(1);
             }
         }
         Action::PreviousProgram => a.change_program(-1),
         Action::NextProgram => a.change_program(1),
+        Action::BankMsbDown => a.change_bank(true, -1),
+        Action::BankMsbUp => a.change_bank(true, 1),
+        Action::BankLsbDown => a.change_bank(false, -1),
+        Action::BankLsbUp => a.change_bank(false, 1),
         Action::TempoDown => a.set_tracker_tempo(a.current_tempo().saturating_sub(1)),
         Action::TempoUp => a.set_tracker_tempo(a.current_tempo().saturating_add(1)),
         Action::AddPage => a.add_tracker_page(),
@@ -3317,7 +3921,9 @@ fn perform(
         Action::EditPageChannel => a.edit_page_channel(),
         Action::ConfirmPageManager => a.confirm_page_manager(),
         Action::SaveSong => a.save_song(),
+        Action::SaveSongAs => a.save_song_as(),
         Action::LoadSong => a.load_song(),
+        Action::NewProject => a.new_project(),
         Action::SelectThreeFour => {
             a.select_pattern_meter(3);
         }
@@ -3336,6 +3942,66 @@ fn perform(
     false
 }
 fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<MidiEvent>) -> bool {
+    if a.project_name_input.is_some() {
+        match code {
+            KeyCode::Enter => a.commit_project_rename(),
+            KeyCode::Esc => {
+                a.project_name_input = None;
+                a.status = "project naming cancelled".into();
+            }
+            KeyCode::Backspace => {
+                if let Some(input) = a.project_name_input.as_mut() {
+                    input.pop();
+                }
+            }
+            KeyCode::Char(character)
+                if !character.is_control()
+                    && a.project_name_input
+                        .as_ref()
+                        .is_some_and(|input| input.chars().count() < 64) =>
+            {
+                if let Some(input) = a.project_name_input.as_mut() {
+                    input.push(character);
+                }
+            }
+            _ => {}
+        }
+        return false;
+    }
+    if a.screen == Screen::TrackerLoop && a.loop_library_mode {
+        let action = match code {
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::Up),
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::Down),
+            KeyCode::PageUp => Some(Action::PageUp),
+            KeyCode::PageDown => Some(Action::PageDown),
+            KeyCode::Delete | KeyCode::Char('d') | KeyCode::Char('D') => {
+                Some(Action::DeleteLoopFile)
+            }
+            KeyCode::Esc | KeyCode::Char('b') => Some(Action::Back),
+            _ => None,
+        };
+        if let Some(action) = action {
+            return perform(action, a, state, Some(tx));
+        }
+        return false;
+    }
+    let confirmation_action = match (a.screen, &code) {
+        (Screen::Ideas, KeyCode::Char('d')) => Action::DeleteIdea,
+        (Screen::Tracker, KeyCode::Char('v'))
+            if a.tracker_mode != TrackerMode::Edit
+                && a.tracker_recording.is_none()
+                && a.note_editor.is_none() =>
+        {
+            Action::SaveSong
+        }
+        (Screen::Tracker, KeyCode::Char('W'))
+            if a.tracker_recording.is_none() && a.note_editor.is_none() =>
+        {
+            Action::PastePatternOver
+        }
+        _ => Action::Noop,
+    };
+    a.prepare_confirmation_action(confirmation_action);
     if matches!(code, KeyCode::F(1) | KeyCode::Char('?')) && a.screen != Screen::Help {
         perform(Action::OpenHelp, a, state, Some(tx));
         return false;
@@ -3358,12 +4024,27 @@ fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<Mi
         }
         return false;
     }
-    if a.screen == Screen::TrackerLoop || a.screen == Screen::TrackerLoopAlign {
+    if a.screen == Screen::TrackerLoopAlign {
+        let action = match code {
+            KeyCode::Left | KeyCode::Char('-') => Some(Action::LoopOffsetDown),
+            KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('=') => Some(Action::LoopOffsetUp),
+            KeyCode::Char('a') | KeyCode::Char('A') => Some(Action::LoopAutoAlign),
+            KeyCode::Enter => Some(Action::LoopAlignDone),
+            KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Char(' ') => {
+                Some(Action::TrackerStop)
+            }
+            KeyCode::Esc | KeyCode::Char('b') => Some(Action::Back),
+            _ => None,
+        };
+        if let Some(action) = action {
+            perform(action, a, state, Some(tx));
+        }
+        return false;
+    }
+    if a.screen == Screen::TrackerLoop {
         let action = match code {
             KeyCode::Up => Some(Action::Up),
             KeyCode::Down => Some(Action::Down),
-            KeyCode::Left => Some(Action::LoopOffsetDown),
-            KeyCode::Right => Some(Action::LoopOffsetUp),
             KeyCode::Enter | KeyCode::Char('i') | KeyCode::Char('I') => Some(Action::LoopImport),
             KeyCode::Char('p') => Some(Action::TrackerPlayCursor),
             KeyCode::Char('P') => Some(Action::TrackerPlayStart),
@@ -3492,15 +4173,7 @@ fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<Mi
                 return false;
             }
             KeyCode::Char('-') => {
-                if let Some(c) = a.tracker_cell_mut() {
-                    c.note = Note::Off;
-                    c.velocity = None;
-                    c.program = None;
-                    c.gate = None;
-                    if matches!(c.command, Command::Retrigger(_)) {
-                        c.command = Command::None;
-                    }
-                }
+                a.tracker_note_off();
                 return false;
             }
             KeyCode::Delete => {
@@ -3548,15 +4221,17 @@ fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<Mi
                 return false;
             }
             KeyCode::Char('+') | KeyCode::Char('=') => {
-                if let Some(page) = a.current_page_mut() {
-                    page.program = (page.program + 1).min(127);
+                if let Some(column) = a.current_column_mut() {
+                    column.program = (column.program + 1).min(127);
                 }
+                a.sync_tracker_route();
                 return false;
             }
             KeyCode::Char('_') => {
-                if let Some(page) = a.current_page_mut() {
-                    page.program = page.program.saturating_sub(1);
+                if let Some(column) = a.current_column_mut() {
+                    column.program = column.program.saturating_sub(1);
                 }
+                a.sync_tracker_route();
                 return false;
             }
             KeyCode::Char('<') => {
@@ -3596,22 +4271,16 @@ fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<Mi
                 return false;
             }
             KeyCode::Char('X') => {
-                let n = a.tracker_pattern_number();
-                if let Some(p) = a.song.patterns.get_mut(&n) {
-                    *p = crate::sequencer::Pattern::empty_like_setup(p.rows.len(), p);
-                }
+                perform(Action::OpenTrackerFiles, a, state, Some(tx));
+                perform(Action::ClearPattern, a, state, Some(tx));
                 return false;
             }
             KeyCode::Char('O') => {
-                let n = a.tracker_pattern_number();
-                a.song.order.insert(a.tracker_order + 1, n);
-                a.tracker_order += 1;
+                a.repeat_order();
                 return false;
             }
             KeyCode::Backspace if a.song.order.len() > 1 => {
-                a.song.order.remove(a.tracker_order);
-                a.tracker_order = a.tracker_order.min(a.song.order.len() - 1);
-                a.tracker_row = 0;
+                a.delete_order();
                 return false;
             }
             _ => {}
@@ -3633,31 +4302,39 @@ fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<Mi
         KeyCode::Up | KeyCode::Char('k') => {
             if a.screen == Screen::Ideas {
                 a.idea_selected = a.idea_selected.saturating_sub(1)
-            } else if a.screen == Screen::TrackerFiles {
-                perform(Action::Up, a, state, Some(tx));
-            } else {
+            } else if a.screen == Screen::Presets {
                 a.selected = a.selected.saturating_sub(1)
+            } else {
+                perform(Action::Up, a, state, Some(tx));
             }
         }
         KeyCode::Down | KeyCode::Char('j') => {
             if a.screen == Screen::Ideas {
                 a.idea_selected = (a.idea_selected + 1).min(a.ideas.len().saturating_sub(1))
-            } else if a.screen == Screen::TrackerFiles {
-                perform(Action::Down, a, state, Some(tx));
-            } else {
+            } else if a.screen == Screen::Presets {
                 a.selected = (a.selected + 1).min(a.presets.len().saturating_sub(1))
+            } else {
+                perform(Action::Down, a, state, Some(tx));
             }
         }
-        KeyCode::PageUp => a.selected = a.selected.saturating_sub(10),
-        KeyCode::PageDown => a.selected = (a.selected + 10).min(a.presets.len().saturating_sub(1)),
-        KeyCode::Home => a.selected = 0,
-        KeyCode::End => a.selected = a.presets.len().saturating_sub(1),
+        KeyCode::PageUp => {
+            perform(Action::PageUp, a, state, Some(tx));
+        }
+        KeyCode::PageDown => {
+            perform(Action::PageDown, a, state, Some(tx));
+        }
+        KeyCode::Home => {
+            perform(Action::Home, a, state, Some(tx));
+        }
+        KeyCode::End => {
+            perform(Action::End, a, state, Some(tx));
+        }
         KeyCode::Char('[') if a.screen == Screen::Presets => a.cycle_engine(-1),
         KeyCode::Char(']') if a.screen == Screen::Presets => a.cycle_engine(1),
         KeyCode::Enter => {
             if a.screen == Screen::Presets {
                 a.load(state, tx.clone())
-            } else if a.screen == Screen::TrackerFiles {
+            } else if matches!(a.screen, Screen::TrackerFiles | Screen::TrackerPages) {
                 perform(Action::Activate, a, state, Some(tx));
             } else {
                 perform(
@@ -3686,7 +4363,7 @@ fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<Mi
         KeyCode::Char('p') => a.toggle_playback(),
         KeyCode::Char('w') => a.open_ideas(),
         KeyCode::Char('t') => {
-            a.screen = Screen::Tracker;
+            a.set_screen(Screen::Tracker);
             a.sync_tracker_route();
             a.status = a.sequencer.unavailable_label();
         }
@@ -3694,7 +4371,7 @@ fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<Mi
             if a.screen == Screen::Tracker {
                 a.set_tracker_edit(false);
             }
-            a.screen = Screen::AudioRecorder;
+            a.set_screen(Screen::AudioRecorder);
             a.status = "stereo audio recorder".into();
         }
         KeyCode::Char('d') if a.screen == Screen::Ideas => a.delete_idea(),
@@ -3720,6 +4397,20 @@ fn tracker_key_note(code: KeyCode) -> Option<u8> {
         KeyCode::Char('m') => Some(11),
         _ => None,
     }
+}
+
+fn next_numbered_song_name(existing: &[String], prefix: &str) -> Option<String> {
+    let prefix = sequencer::safe_name(prefix);
+    (1..=9999).find_map(|number| {
+        let suffix = format!("-{number:03}");
+        let max_prefix = 64usize.saturating_sub(suffix.len());
+        let name = format!(
+            "{}{}",
+            prefix.chars().take(max_prefix).collect::<String>(),
+            suffix
+        );
+        (!existing.iter().any(|candidate| candidate == &name)).then_some(name)
+    })
 }
 
 const fn pattern_sizes(beats: u8) -> [usize; 5] {
@@ -3753,25 +4444,32 @@ fn mouse(
     }
     match m.kind {
         MouseEventKind::ScrollUp => {
+            a.prepare_confirmation_action(Action::Noop);
             if a.screen == Screen::Ideas {
                 a.idea_selected = a.idea_selected.saturating_sub(1)
             } else if a.screen == Screen::Help {
                 a.move_help(-3);
-            } else {
+            } else if a.screen == Screen::Presets {
                 a.selected = a.selected.saturating_sub(3)
+            } else {
+                perform(Action::Up, a, state, Some(tx));
             }
         }
         MouseEventKind::ScrollDown => {
+            a.prepare_confirmation_action(Action::Noop);
             if a.screen == Screen::Ideas {
                 a.idea_selected = (a.idea_selected + 1).min(a.ideas.len().saturating_sub(1))
             } else if a.screen == Screen::Help {
                 a.move_help(3);
-            } else {
+            } else if a.screen == Screen::Presets {
                 a.selected = (a.selected + 3).min(a.presets.len().saturating_sub(1))
+            } else {
+                perform(Action::Down, a, state, Some(tx));
             }
         }
         MouseEventKind::Down(MouseButton::Left) => {
             if a.screen == Screen::Presets && contains(a.hits.list, m.column, m.row) {
+                a.prepare_confirmation_action(Action::Noop);
                 let i = visible_index(a.hits.list, a.offset, m.column, m.row).unwrap();
                 if i < a.presets.len() {
                     if i == a.selected {
@@ -3781,16 +4479,17 @@ fn mouse(
                     }
                 }
             } else if a.screen == Screen::Ideas && contains(a.hits.list, m.column, m.row) {
+                a.prepare_confirmation_action(Action::Noop);
                 let i = visible_index(a.hits.list, a.idea_offset, m.column, m.row).unwrap();
                 if i < a.ideas.len() {
                     if i == a.idea_selected {
                         a.inspect_idea()
                     } else {
                         a.idea_selected = i;
-                        a.confirm_delete = None;
                     }
                 }
             } else if a.screen == Screen::Help && contains(a.hits.list, m.column, m.row) {
+                a.prepare_confirmation_action(Action::Noop);
                 let i = visible_index(a.hits.list, a.help_offset, m.column, m.row).unwrap();
                 if i < help::lines(a.hits.list.width as usize).len() {
                     if i == a.help_selected {
@@ -3800,13 +4499,23 @@ fn mouse(
                     }
                 }
             } else if a.screen == Screen::TrackerFiles && contains(a.hits.list, m.column, m.row) {
+                a.prepare_confirmation_action(Action::Noop);
                 let offset = a
                     .song_selected
                     .saturating_sub(a.hits.list.height.saturating_sub(1) as usize);
                 let i = visible_index(a.hits.list, offset, m.column, m.row).unwrap();
                 if i < a.song_list.len() {
                     a.song_selected = i;
-                    a.confirm_song_delete = None;
+                }
+            } else if a.screen == Screen::TrackerLoop
+                && a.loop_library_mode
+                && contains(a.hits.list, m.column, m.row)
+            {
+                let rows = usize::from(a.hits.list.height.saturating_sub(2));
+                let start = a.loop_library_selected.saturating_sub(rows / 2);
+                let i = visible_index(a.hits.list, start, m.column, m.row).unwrap_or(0);
+                if i < a.loop_library.len() {
+                    a.loop_library_selected = i;
                 }
             } else if let Some((_, page)) = a
                 .hits
@@ -3866,13 +4575,32 @@ fn draw<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     if a.screen != Screen::Playback {
         draw_status_bar(f, a);
     }
+    if let Some(input) = a.project_name_input.as_deref() {
+        let z = f.size();
+        let area = rect(z.x + 2, z.y + 4, z.width.saturating_sub(4), 5);
+        f.render_widget(Clear, area);
+        f.render_widget(
+            Paragraph::new(format!(
+                "PROJECT NAME\n{input}_\nEnter confirm · Esc cancel"
+            ))
+            .style(Style::default().fg(Color::Yellow))
+            .block(Block::default().borders(Borders::ALL)),
+            area,
+        );
+    }
 }
 fn draw_help<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     let z = f.size();
     let header = rect(z.x, z.y, z.width, 1);
-    let body = rect(z.x, z.y + 1, z.width, z.height.saturating_sub(4));
+    let help_width = z.width.min(HELP_TEXT_WIDTH as u16);
+    let body = rect(
+        z.x + z.width.saturating_sub(help_width) / 2,
+        z.y + 1,
+        help_width,
+        z.height.saturating_sub(4),
+    );
     let rows = body.height as usize;
-    let lines = help::lines(body.width as usize);
+    let lines = help::lines(HELP_TEXT_WIDTH);
     a.help_selected = a.help_selected.min(lines.len().saturating_sub(1));
     if a.help_selected < a.help_offset {
         a.help_offset = a.help_selected;
@@ -3953,8 +4681,60 @@ fn draw_noob_setup<B: Backend>(f: &mut Frame<B>, a: &App) {
     );
 }
 
-fn draw_tracker_loop<B: Backend>(f: &mut Frame<B>, a: &App) {
+fn draw_tracker_loop<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     let z = f.size();
+    if a.loop_library_mode {
+        let body = rect(z.x, z.y, z.width, z.height.saturating_sub(4));
+        a.hits.list = body;
+        let rows = usize::from(body.height.saturating_sub(2));
+        let start = a.loop_library_selected.saturating_sub(rows / 2);
+        let lines = a
+            .loop_library
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(rows)
+            .map(|(index, entry)| {
+                let marker = if entry.current {
+                    "CURRENT"
+                } else if entry.saved_references != 0 {
+                    "SAVED"
+                } else {
+                    "FREE"
+                };
+                Spans::from(Span::styled(
+                    truncate(
+                        &format!(
+                            "{} {:<24} {marker}",
+                            if index == a.loop_library_selected {
+                                "▶"
+                            } else {
+                                " "
+                            },
+                            entry.file
+                        ),
+                        usize::from(z.width.saturating_sub(2)),
+                    ),
+                    if index == a.loop_library_selected {
+                        Style::default().fg(Color::Black).bg(Color::Yellow)
+                    } else if marker == "FREE" {
+                        Style::default()
+                    } else {
+                        Style::default().fg(Color::Green)
+                    },
+                ))
+            })
+            .collect::<Vec<_>>();
+        f.render_widget(
+            Paragraph::new(lines).block(
+                Block::default()
+                    .title(format!(" PRIVATE LOOPS · {} ", a.loop_library.len()))
+                    .borders(Borders::ALL),
+            ),
+            body,
+        );
+        return;
+    }
     let player = a.loop_player.status();
     let selected = a
         .loop_imports
@@ -4539,10 +5319,24 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         let rows = grid.height.saturating_sub(1) as usize;
         let start = a.tracker_row.saturating_sub(rows / 2);
         let mut header = String::from("ROW");
-        for lane in &page.lanes {
+        for (index, lane) in page.lanes.iter().enumerate() {
+            let setup = page.column(index);
+            let compact = format!(
+                "{}:{:02}/{:03}",
+                index + 1,
+                setup.channel + 1,
+                setup.program
+            );
             header.push_str(&format!(
                 "{:^w$}",
-                truncate(&lane.name, usize::from(column_width)),
+                truncate(
+                    if column_width >= 8 {
+                        &compact
+                    } else {
+                        &lane.name
+                    },
+                    usize::from(column_width)
+                ),
                 w = usize::from(column_width)
             ));
         }
@@ -4615,6 +5409,7 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         }
     }
     let lane = &page.lanes[a.tracker_track];
+    let column = page.column(a.tracker_track);
     let footer = if let Some(editor) = a.note_editor {
         let command = match editor.draft.command {
             Command::None => "none".into(),
@@ -4648,7 +5443,7 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
             pattern.pages.len(),
             page.name,
             a.tracker_track + 1,
-            page.channel + 1,
+            column.channel + 1,
             truncate(page.target.label(), 10),
             if !page.enabled {
                 "PAGE MUTE"
@@ -4675,7 +5470,7 @@ fn draw_tracker_program_browser<B: Backend>(f: &mut Frame<B>, a: &App, area: Rec
     let selected = a
         .note_editor
         .and_then(|editor| editor.draft.program)
-        .unwrap_or(page.program);
+        .unwrap_or(page.column(a.tracker_track).program);
     let title = a
         .tracker_device_profile()
         .map(DeviceProfile::label)
@@ -4714,8 +5509,25 @@ fn draw_tracker_program_browser<B: Backend>(f: &mut Frame<B>, a: &App, area: Rec
 fn draw_tracker_pages<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     let z = f.size();
     a.clamp_tracker_cursor();
+    let setup_label = a
+        .current_column()
+        .map(|column| {
+            format!(
+                "C{} ch{} b{}/{} {}",
+                a.tracker_track + 1,
+                column.channel + 1,
+                column.bank_msb,
+                column.bank_lsb,
+                a.tracker_program_label(column.program)
+            )
+        })
+        .unwrap_or_else(|| "no column".into());
     f.render_widget(
-        Paragraph::new("FT2 PATTERN PAGES · 4 LANES").style(
+        Paragraph::new(truncate(
+            &format!("FT2 TRACKS · {setup_label}"),
+            usize::from(z.width),
+        ))
+        .style(
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
@@ -4736,13 +5548,15 @@ fn draw_tracker_pages<B: Backend>(f: &mut Frame<B>, a: &mut App) {
                 .map(|(index, page)| {
                     let online = a.target_online(&page.target);
                     let text = format!(
-                        "{}{:02} {:<8} ch{:02} {} {}",
+                        "{}{:02} {} {:<6} C{} ch{:02} p{:03} {}",
                         if index == a.tracker_page { "▶" } else { " " },
                         index + 1,
-                        truncate(&page.name, 8),
-                        page.channel + 1,
-                        truncate(page.target.label(), 12),
-                        if online { "" } else { "OFFLINE" }
+                        if online { "ON" } else { "OFFLINE" },
+                        truncate(&page.name, 6),
+                        a.tracker_track + 1,
+                        page.column(a.tracker_track).channel + 1,
+                        page.column(a.tracker_track).program,
+                        truncate(page.target.label(), 7),
                     );
                     Spans::from(Span::styled(
                         truncate(&text, usize::from(z.width)),
@@ -4792,7 +5606,7 @@ fn draw_tracker_pages<B: Backend>(f: &mut Frame<B>, a: &mut App) {
                     } else {
                         "OFFLINE · data is kept"
                     }),
-                    Spans::from("turn encoder · press to confirm"),
+                    Spans::from(format!("turn encoder · {}", a.page_field_confirm_hint())),
                 ])
                 .block(Block::default().borders(Borders::ALL)),
                 rect(z.x, z.y + 1, z.width, body_height),
@@ -4808,7 +5622,7 @@ fn draw_tracker_pages<B: Backend>(f: &mut Frame<B>, a: &mut App) {
                         Style::default().fg(Color::Black).bg(Color::Yellow),
                     )),
                     Spans::from("turn encoder 1–16"),
-                    Spans::from("press to confirm"),
+                    Spans::from(a.page_field_confirm_hint()),
                 ])
                 .block(Block::default().borders(Borders::ALL)),
                 rect(z.x, z.y + 1, z.width, body_height),
@@ -5558,6 +6372,114 @@ mod tests {
     }
 
     #[test]
+    fn four_button_help_can_select_sys_and_exit() {
+        let p = presets();
+        let mut a = app(&p);
+        a.controller_layout = ControllerLayout::Four;
+        a.set_screen(Screen::Tracker);
+        a.open_help();
+        let (tx, rx) = mpsc::channel();
+
+        tx.send(MidiEvent::Encoder(crate::pads::EncoderAction::Select))
+            .unwrap();
+        tx.send(MidiEvent::Encoder(crate::pads::EncoderAction::Down))
+            .unwrap();
+        tx.send(MidiEvent::Encoder(crate::pads::EncoderAction::Select))
+            .unwrap();
+        tx.send(MidiEvent::Pad(crate::pads::PadAction::Item4, true))
+            .unwrap();
+        drain(&rx, &mut a, Path::new("/none"), &tx);
+
+        assert_eq!(a.screen, Screen::Tracker);
+        assert_eq!(a.menu_page_by_screen[Screen::Help.index()], 3);
+        assert!(!a.page_select_mode);
+    }
+
+    #[test]
+    fn changing_screens_clears_four_button_page_selection_mode() {
+        let p = presets();
+        let mut a = app(&p);
+        a.controller_layout = ControllerLayout::Four;
+        a.set_screen(Screen::Playback);
+        a.page_select_mode = true;
+
+        perform(Action::OpenIdeas, &mut a, Path::new("/none"), None);
+
+        assert_eq!(a.screen, Screen::Ideas);
+        assert!(!a.page_select_mode);
+    }
+
+    #[test]
+    fn help_render_uses_the_same_width_as_link_navigation() {
+        let p = presets();
+        let mut a = app(&p);
+        a.set_screen(Screen::Help);
+        let lines = help::lines(HELP_TEXT_WIDTH);
+        a.help_selected = lines
+            .iter()
+            .position(|line| line.target.as_deref() == Some("ft2-tracker"))
+            .unwrap();
+        a.activate_help();
+        let expected = help::lines(HELP_TEXT_WIDTH)[a.help_selected].text.clone();
+        let backend = TestBackend::new(40, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut a)).unwrap();
+        let row = a.hits.list.y + (a.help_selected - a.help_offset) as u16;
+        let rendered = (a.hits.list.x..a.hits.list.right())
+            .map(|x| terminal.backend().buffer().get(x, row).symbol.as_str())
+            .collect::<String>();
+
+        assert_eq!(a.hits.list.width, HELP_TEXT_WIDTH as u16);
+        assert_eq!(rendered.trim_end(), expected);
+    }
+
+    #[test]
+    fn tracker_record_exit_stops_capture_without_leaving_tracker() {
+        let p = presets();
+        let mut a = app(&p);
+        a.set_screen(Screen::Tracker);
+        a.current_page_mut().unwrap().target = PageTarget::ConfiguredExternal;
+        a.begin_tracker_recording();
+        assert!(a.tracker_recording.is_some());
+
+        perform(Action::Back, &mut a, Path::new("/none"), None);
+
+        assert_eq!(a.screen, Screen::Tracker);
+        assert!(a.tracker_recording.is_none());
+        assert_eq!(a.tracker_mode, TrackerMode::Play);
+    }
+
+    #[test]
+    fn opening_help_stops_tracker_recording_before_disabling_its_route() {
+        let p = presets();
+        let mut a = app(&p);
+        a.set_screen(Screen::Tracker);
+        a.current_page_mut().unwrap().target = PageTarget::ConfiguredExternal;
+        a.begin_tracker_recording();
+
+        a.open_help();
+
+        assert_eq!(a.screen, Screen::Help);
+        assert!(a.tracker_recording.is_none());
+        assert_eq!(a.tracker_mode, TrackerMode::Play);
+    }
+
+    #[test]
+    fn cell_editor_stop_preserves_the_draft() {
+        let p = presets();
+        let mut a = app(&p);
+        a.set_screen(Screen::Tracker);
+        a.open_note_editor();
+        a.adjust_note_editor(1);
+        let draft = a.note_editor.unwrap().draft;
+
+        perform(Action::TrackerStop, &mut a, Path::new("/none"), None);
+
+        assert_eq!(a.note_editor.unwrap().draft, draft);
+        assert_eq!(a.screen, Screen::Tracker);
+    }
+
+    #[test]
     fn empty_controller_items_are_silent() {
         let p = presets();
         let mut a = app(&p);
@@ -5634,12 +6556,18 @@ mod tests {
         perform(Action::EditPageChannel, &mut a, Path::new("/none"), None);
         perform(Action::Down, &mut a, Path::new("/none"), None);
         perform(Action::Activate, &mut a, Path::new("/none"), None);
-        assert_eq!(a.current_pages()[2].channel, 1);
+        assert_eq!(a.current_pages()[2].column(0).channel, 1);
 
         perform(Action::PreviousTrack, &mut a, Path::new("/none"), None);
-        assert_eq!(a.tracker_page, 1);
+        assert_eq!(a.tracker_page, 2);
+        assert_eq!(a.tracker_track, 0);
         perform(Action::NextTrack, &mut a, Path::new("/none"), None);
         assert_eq!(a.tracker_page, 2);
+        assert_eq!(a.tracker_track, 1);
+        perform(Action::ConfirmPageManager, &mut a, Path::new("/none"), None);
+        assert_eq!(a.screen, Screen::TrackerPages);
+        assert!(a.status.contains("conflict"));
+        a.current_page_mut().unwrap().column_mut(0).program = 9;
         perform(Action::ConfirmPageManager, &mut a, Path::new("/none"), None);
         assert_eq!(a.screen, Screen::Tracker);
         assert!(a.page_manager_original.is_none());
@@ -6009,6 +6937,203 @@ mod tests {
     }
 
     #[test]
+    fn tracker_play_mode_keyboard_cannot_edit_or_clear_pattern_data() {
+        let p = presets();
+        let mut a = app(&p);
+        a.set_screen(Screen::Tracker);
+        a.song.patterns.get_mut(&0).unwrap().rows[0][0].note = Note::On(60);
+        let (tx, _) = mpsc::channel();
+
+        key(KeyCode::Delete, &mut a, Path::new("/none"), &tx);
+        key(KeyCode::Char('-'), &mut a, Path::new("/none"), &tx);
+        assert_eq!(a.song.patterns[&0].rows[0][0].note, Note::On(60));
+        assert_eq!(a.tracker_row, 0);
+
+        key(KeyCode::Char('X'), &mut a, Path::new("/none"), &tx);
+        assert_eq!(a.screen, Screen::TrackerFiles);
+        assert!(a.confirm_pattern_clear);
+        assert_eq!(a.song.patterns[&0].rows[0][0].note, Note::On(60));
+    }
+
+    #[test]
+    fn loop_align_enter_finishes_instead_of_importing() {
+        let p = presets();
+        let mut a = app(&p);
+        a.set_screen(Screen::TrackerLoopAlign);
+        let (tx, _) = mpsc::channel();
+
+        key(KeyCode::Enter, &mut a, Path::new("/none"), &tx);
+
+        assert_eq!(a.screen, Screen::TrackerLoop);
+        assert_eq!(a.status, "loop alignment set");
+    }
+
+    #[test]
+    fn callback_timestamps_survive_delayed_ui_drain() {
+        let p = presets();
+        let mut a = app(&p);
+        let started = Instant::now();
+        a.recorder.start(started);
+        let (tx, rx) = mpsc::channel();
+        tx.send(MidiEvent::Raw {
+            received: started + Duration::from_millis(17),
+            bytes: vec![0x90, 60, 100],
+        })
+        .unwrap();
+        tx.send(MidiEvent::Raw {
+            received: started + Duration::from_millis(93),
+            bytes: vec![0x80, 60, 0],
+        })
+        .unwrap();
+
+        drain(&rx, &mut a, Path::new("/none"), &tx);
+
+        assert_eq!(
+            a.recorder
+                .events
+                .iter()
+                .map(|event| event.micros)
+                .collect::<Vec<_>>(),
+            vec![17_000, 93_000]
+        );
+    }
+
+    #[test]
+    fn take_playback_worker_cancels_without_waiting_for_the_last_event() {
+        let p = presets();
+        let mut a = app(&p);
+        let events = vec![TimedEvent {
+            micros: 5_000_000,
+            bytes: vec![0x90, 60, 100],
+        }];
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = std::thread::spawn(move || {
+            recording::play_events(&events, |_| {}, &worker_stop);
+        });
+        a.playback = Some(Playback {
+            stop,
+            worker: Some(worker),
+        });
+        let started = Instant::now();
+
+        a.stop_playback();
+
+        assert!(a.playback.is_none());
+        assert!(started.elapsed() < Duration::from_millis(250));
+    }
+
+    #[test]
+    fn take_playback_requires_the_loaded_idea_engine() {
+        let p = presets();
+        let mut a = app(&p);
+        a.last = vec![TimedEvent {
+            micros: 0,
+            bytes: vec![0x90, 60, 100],
+        }];
+
+        a.toggle_playback();
+
+        assert!(a.playback.is_none());
+        assert_eq!(
+            a.status,
+            "load the idea preset before playing its recording"
+        );
+    }
+
+    #[test]
+    fn files_wheel_moves_the_song_cursor_without_touching_presets() {
+        let p = presets();
+        let mut a = app(&p);
+        a.set_screen(Screen::TrackerFiles);
+        a.song_list = vec!["one".into(), "two".into()];
+        a.song_selected = 0;
+        a.selected = 7;
+        let (tx, _) = mpsc::channel();
+
+        mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 0,
+                row: 0,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            },
+            &mut a,
+            Path::new("/none"),
+            &tx,
+        );
+
+        assert_eq!(a.song_selected, 1);
+        assert_eq!(a.selected, 7);
+    }
+
+    #[test]
+    fn new_project_is_confirmed_numbered_and_unloads_the_previous_loop() {
+        let p = presets();
+        let mut a = app(&p);
+        a.set_screen(Screen::TrackerFiles);
+        a.song_list = vec!["project-001".into()];
+        a.song.patterns.get_mut(&0).unwrap().rows[0][0].note = Note::On(60);
+        a.tracker_row = 12;
+        a.loop_player
+            .set_preview_status(crate::loop_player::LoopStatus {
+                loaded: true,
+                file: Some("old.wav".into()),
+                ..crate::loop_player::LoopStatus::default()
+            });
+
+        perform(Action::NewProject, &mut a, Path::new("/none"), None);
+        assert!(a.confirm_new_project);
+        assert_eq!(a.song.patterns[&0].rows[0][0].note, Note::On(60));
+        perform(Action::NewProject, &mut a, Path::new("/none"), None);
+
+        assert_eq!(a.song.name, "project-002");
+        assert_eq!(a.song.patterns[&0].rows[0][0].note, Note::Empty);
+        assert_eq!((a.tracker_order, a.tracker_row, a.tracker_page), (0, 0, 0));
+        assert_eq!(a.screen, Screen::Tracker);
+        assert!(!a.loop_player.status().loaded);
+    }
+
+    #[test]
+    fn loop_removal_is_confirmed_and_only_clears_the_project_reference() {
+        let p = presets();
+        let mut a = app(&p);
+        a.song.audio_loop = Some(sequencer::LoopSettings {
+            file: "private.wav".into(),
+            source_bpm_x100: 12_000,
+            interpretation: sequencer::BpmInterpretation::Normal,
+            start_beat: 0,
+            length_beats: 4,
+            offset_beats: 0,
+        });
+
+        perform(Action::LoopRemove, &mut a, Path::new("/none"), None);
+        assert!(a.confirm_loop_remove);
+        assert!(a.song.audio_loop.is_some());
+        perform(Action::Up, &mut a, Path::new("/none"), None);
+        assert!(!a.confirm_loop_remove);
+        assert!(a.song.audio_loop.is_some());
+
+        perform(Action::LoopRemove, &mut a, Path::new("/none"), None);
+        perform(Action::LoopRemove, &mut a, Path::new("/none"), None);
+        assert!(a.song.audio_loop.is_none());
+        assert_eq!(a.status, "loop removed from Project · private WAV kept");
+    }
+
+    #[test]
+    fn numbered_project_and_copy_names_skip_existing_files() {
+        assert_eq!(
+            next_numbered_song_name(&["project-001".into(), "project-002".into()], "project")
+                .as_deref(),
+            Some("project-003")
+        );
+        assert_eq!(
+            next_numbered_song_name(&["demo-copy-001".into()], "demo-copy").as_deref(),
+            Some("demo-copy-002")
+        );
+    }
+
+    #[test]
     fn note_editor_confirm_commits_and_cancel_restores_every_field() {
         let p = presets();
         let mut a = app(&p);
@@ -6089,15 +7214,20 @@ mod tests {
         assert_eq!(a.tracker_program_messages(1), vec![vec![0xc0, 1]]);
 
         a.config.external_midi.bank_select = BankSelectMode::Cc0Cc32;
-        a.current_page_mut().unwrap().bank_msb = 5;
-        a.current_page_mut().unwrap().bank_lsb = 9;
+        a.current_page_mut().unwrap().column_mut(0).bank_msb = 5;
+        a.current_page_mut().unwrap().column_mut(0).bank_lsb = 9;
+        a.current_page_mut().unwrap().target = PageTarget::Midi("Roland D-50".into());
+        assert_eq!(a.tracker_program_messages(7), vec![vec![0xc0, 7]]);
+
+        a.current_page_mut().unwrap().target = PageTarget::ActiveInstrument;
         assert_eq!(
             a.tracker_program_messages(7),
             vec![vec![0xb0, 0, 5], vec![0xb0, 32, 9], vec![0xc0, 7]]
         );
         a.config.external_midi.bank_select = BankSelectMode::Off;
-        a.current_page_mut().unwrap().bank_msb = 0;
-        a.current_page_mut().unwrap().bank_lsb = 0;
+        a.current_page_mut().unwrap().column_mut(0).bank_msb = 0;
+        a.current_page_mut().unwrap().column_mut(0).bank_lsb = 0;
+        a.current_page_mut().unwrap().target = PageTarget::ConfiguredExternal;
 
         let backend = TestBackend::new(40, 20);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -6124,8 +7254,16 @@ mod tests {
         a.open_note_editor();
         let original = a.song.patterns[&0].rows[0][0];
         let (tx, rx) = mpsc::channel();
-        tx.send(MidiEvent::Raw(vec![0x90, 60, 100])).unwrap();
-        tx.send(MidiEvent::Raw(vec![0x80, 60, 0])).unwrap();
+        tx.send(MidiEvent::Raw {
+            received: Instant::now(),
+            bytes: vec![0x90, 60, 100],
+        })
+        .unwrap();
+        tx.send(MidiEvent::Raw {
+            received: Instant::now(),
+            bytes: vec![0x80, 60, 0],
+        })
+        .unwrap();
         drain(&rx, &mut a, Path::new("/none"), &tx);
         a.tick();
         assert!(!a.tracker_gesture.is_active());
@@ -6402,10 +7540,63 @@ mod tests {
         assert_eq!(a.song.patterns[&1].rows[0][0].note, Note::On(60));
         a.song.patterns.get_mut(&1).unwrap().rows[0][0].note = Note::On(61);
         a.paste_pattern_over();
-        assert!(a.confirm_pattern_paste_over);
+        assert!(a.confirm_pattern_paste_over.is_some());
         assert_eq!(a.song.patterns[&1].rows[0][0].note, Note::On(61));
         a.paste_pattern_over();
         assert_eq!(a.song.patterns[&1].rows[0][0].note, Note::On(60));
+    }
+
+    #[test]
+    fn unrelated_actions_expire_pending_confirmations() {
+        let p = presets();
+        let mut a = app(&p);
+        a.confirm_load = Some("idea".into());
+        a.confirm_delete = Some("idea".into());
+        a.confirm_song_save = Some("song".into());
+        a.confirm_song_delete = Some("song".into());
+        a.confirm_pattern_paste_over = Some(0);
+        a.confirm_new_project = true;
+        a.confirm_loop_remove = true;
+
+        perform(Action::Up, &mut a, Path::new("/none"), None);
+
+        assert!(a.confirm_load.is_none());
+        assert!(a.confirm_delete.is_none());
+        assert!(a.confirm_song_save.is_none());
+        assert!(a.confirm_song_delete.is_none());
+        assert!(a.confirm_pattern_paste_over.is_none());
+        assert!(!a.confirm_new_project);
+        assert!(!a.confirm_loop_remove);
+
+        a.confirm_load = Some("idea".into());
+        a.confirm_delete = Some("idea".into());
+        a.confirm_song_save = Some("song".into());
+        a.confirm_song_delete = Some("song".into());
+        a.confirm_pattern_paste_over = Some(0);
+        a.confirm_new_project = true;
+        a.confirm_loop_remove = true;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        key(KeyCode::Up, &mut a, Path::new("/none"), &tx);
+        assert!(a.confirm_load.is_none());
+        assert!(a.confirm_delete.is_none());
+        assert!(a.confirm_song_save.is_none());
+        assert!(a.confirm_song_delete.is_none());
+        assert!(a.confirm_pattern_paste_over.is_none());
+        assert!(!a.confirm_new_project);
+        assert!(!a.confirm_loop_remove);
+    }
+
+    #[test]
+    fn leaving_project_files_stops_hidden_song_preview() {
+        let p = presets();
+        let mut a = app(&p);
+        a.screen = Screen::TrackerFiles;
+        a.song_previewing = true;
+
+        a.set_screen(Screen::Tracker);
+
+        assert_eq!(a.screen, Screen::Tracker);
+        assert!(!a.song_previewing);
     }
 
     #[test]

@@ -6,7 +6,9 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 
 pub const UPDATE_URL: &str =
     "https://raw.githubusercontent.com/PaolaShultz/shr-daw/main/controller-profiles/catalog.json";
@@ -52,7 +54,8 @@ impl ControllerProfile {
         if !matches!(self.layout, 4 | 5 | 8) {
             bail!("controller profile {} layout must be 4, 5, or 8", self.id);
         }
-        for &target in self.controls.values() {
+        for (&incoming, &target) in &self.controls {
+            crate::pads::ensure_midi_number(incoming, "controller profile CC")?;
             if crate::control::by_cc(target).is_none() {
                 bail!(
                     "controller profile {} has unknown target CC {target}",
@@ -64,6 +67,25 @@ impl ControllerProfile {
             action.parse::<PadAction>().with_context(|| {
                 format!("controller profile {} has invalid action {action}", self.id)
             })?;
+        }
+        for &note in self.note_buttons.keys() {
+            crate::pads::ensure_midi_number(note, "controller profile button note")?;
+        }
+        for &cc in self.cc_buttons.keys() {
+            crate::pads::ensure_midi_number(cc, "controller profile button CC")?;
+        }
+        for (number, description) in [
+            (self.encoder_relative_cc, "controller profile encoder CC"),
+            (self.encoder_press_cc, "controller profile encoder press CC"),
+            (
+                self.encoder_press_note,
+                "controller profile encoder press note",
+            ),
+            (self.lock_cc, "controller profile lock CC"),
+        ] {
+            if let Some(number) = number {
+                crate::pads::ensure_midi_number(number, description)?;
+            }
         }
         let mut used_cc = self.controls.keys().copied().collect::<HashSet<_>>();
         for cc in self.cc_buttons.keys().copied().chain(
@@ -78,6 +100,21 @@ impl ControllerProfile {
             if !used_cc.insert(cc) {
                 bail!("controller profile {} reuses CC {cc}", self.id);
             }
+        }
+        if self.encoder_press_cc.is_some() && self.encoder_press_note.is_some() {
+            bail!(
+                "controller profile {} encoder press must use either a CC or a note",
+                self.id
+            );
+        }
+        if self
+            .encoder_press_note
+            .is_some_and(|note| self.note_buttons.contains_key(&note))
+        {
+            bail!(
+                "controller profile {} reuses encoder press note as a button",
+                self.id
+            );
         }
         Ok(())
     }
@@ -115,7 +152,7 @@ impl ControllerProfile {
             .iter()
             .map(|(&number, action)| Ok((number, action.parse()?)))
             .collect::<Result<_>>()?;
-        Ok(())
+        config.validate()
     }
 }
 
@@ -147,19 +184,28 @@ impl Catalog {
 
     pub fn matching(&self, port_name: &str) -> Option<&ControllerProfile> {
         let normalized_port = normalize(port_name);
-        self.profiles
+        let matches = self
+            .profiles
             .iter()
             .filter(|profile| profile.matches(port_name))
-            .max_by_key(|profile| {
-                profile
+            .map(|profile| {
+                let specificity = profile
                     .match_names
                     .iter()
                     .map(|name| normalize(name))
                     .filter(|name| normalized_port.contains(name))
                     .map(|name| name.len())
                     .max()
-                    .unwrap_or(0)
+                    .unwrap_or(0);
+                (specificity, profile)
             })
+            .collect::<Vec<_>>();
+        let best = matches.iter().map(|(specificity, _)| *specificity).max()?;
+        let mut best_matches = matches
+            .into_iter()
+            .filter(|(specificity, _)| *specificity == best);
+        let (_, profile) = best_matches.next()?;
+        best_matches.next().is_none().then_some(profile)
     }
 
     pub fn profiles(&self) -> &[ControllerProfile] {
@@ -167,10 +213,14 @@ impl Catalog {
     }
 }
 
+#[cfg(test)]
 pub fn validate_catalog(path: &Path) -> Result<usize> {
-    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let profiles: Vec<ControllerProfile> =
-        serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
+    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    validate_catalog_bytes(&bytes).with_context(|| format!("parse {}", path.display()))
+}
+
+pub fn validate_catalog_bytes(bytes: &[u8]) -> Result<usize> {
+    let profiles: Vec<ControllerProfile> = serde_json::from_slice(bytes)?;
     let mut ids = HashSet::new();
     for profile in &profiles {
         profile.validate()?;
@@ -230,5 +280,72 @@ mod tests {
         profile.apply(&mut config, "MiniLab3 MIDI").unwrap();
         assert_eq!(config.controls.len(), 12);
         assert_eq!(config.pads.len(), 8);
+    }
+
+    fn minimal_profile() -> ControllerProfile {
+        ControllerProfile {
+            id: "test-controller".into(),
+            name: "Test Controller".into(),
+            match_names: vec!["test controller".into()],
+            layout: 4,
+            controls: HashMap::new(),
+            encoder_relative_cc: None,
+            encoder_relative_reverse: false,
+            encoder_press_cc: None,
+            encoder_press_note: None,
+            lock_cc: None,
+            note_buttons: HashMap::new(),
+            cc_buttons: HashMap::new(),
+            source: "hardware verification".into(),
+        }
+    }
+
+    #[test]
+    fn catalog_rejects_out_of_range_and_conflicting_physical_messages() {
+        let mut profile = minimal_profile();
+        profile.controls.insert(128, 74);
+        assert!(profile.validate().is_err());
+
+        profile = minimal_profile();
+        profile.encoder_press_note = Some(36);
+        profile.note_buttons.insert(36, "item-1".into());
+        assert!(profile.validate().is_err());
+
+        profile = minimal_profile();
+        profile.encoder_press_cc = Some(118);
+        profile.encoder_press_note = Some(36);
+        assert!(profile.validate().is_err());
+    }
+
+    #[test]
+    fn downloaded_catalog_bytes_are_fully_validated() {
+        let profile = r#"{
+            "id":"test-controller",
+            "name":"Test Controller",
+            "match_names":["test controller"],
+            "layout":4
+        }"#;
+        let valid = format!("[{profile}]");
+        assert_eq!(validate_catalog_bytes(valid.as_bytes()).unwrap(), 1);
+
+        let duplicate = format!("[{profile},{profile}]");
+        assert!(validate_catalog_bytes(duplicate.as_bytes())
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate controller profile id"));
+        assert!(validate_catalog_bytes(b"not json").is_err());
+    }
+
+    #[test]
+    fn equally_specific_controller_profiles_do_not_auto_select() {
+        let mut first = minimal_profile();
+        first.id = "first".into();
+        let mut second = minimal_profile();
+        second.id = "second".into();
+        let catalog = Catalog {
+            profiles: vec![first, second],
+        };
+
+        assert!(catalog.matching("Test Controller MIDI").is_none());
     }
 }

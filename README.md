@@ -32,13 +32,15 @@ Play, record, review, and save MIDI ideas.
 
 <img src="docs/images/shr-daw-ft2-pattern.png" alt="FT2 Pattern editor with four lanes of note data" width="100%">
 
-Edit notes, velocity, programs, gates, and commands.
+Edit notes, velocity, programs, gates, and commands. Every visible column has
+its own MIDI channel, bank, and master instrument.
 
 ### Pattern Pages
 
 <img src="docs/images/shr-daw-ft2-pages.png" alt="FT2 Pattern page routing screen with MIDI channels and targets" width="100%">
 
-Keep routes, channels, lanes, mutes, and targets inside each Pattern.
+Keep one destination per page with four independent column channel/instrument
+setups, plus lanes and mutes, inside each Pattern.
 
 ### FT2 Arrangement
 
@@ -50,7 +52,8 @@ Chain Pattern IDs into the Project timeline.
 
 <img src="docs/images/shr-daw-project-files.png" alt="Project Files screen listing saved Projects" width="100%">
 
-Save, load, preview, and delete whole Projects.
+Name, rename, save, load, preview, and delete whole Projects; clean up only
+unreferenced Pattern records.
 
 ### FT2 WAV Loop
 
@@ -104,8 +107,10 @@ shr doctor
 shr
 ```
 
-JACK must be running before SHR-DAW starts. The setup wizard helps choose the
-MIDI and audio ports, but it does not start or restart JACK.
+The preset browser and external-MIDI tracker can open without JACK. JACK must
+be running before loading a software instrument, playing a WAV loop, or
+recording audio. The setup wizard helps choose MIDI and audio ports, but it
+does not start or restart JACK.
 
 Read [Installation](docs/INSTALLATION.md) for supported systems and installer
 options. Then follow [First run](docs/FIRST_RUN.md) to configure and test your

@@ -1,15 +1,17 @@
 # Licensing and redistribution
 
 SHR-DAW source code, `Velvet Tines.synthv1`, and the 20 newly authored presets
-listed below are released under the MIT license in `LICENSE`. MIT permits commercial and non-commercial use,
-modification, and redistribution, but the copyright and license notice must be
-kept. No MIT/Apache/GPL license is literally obligation-free.
+listed below are released under the MIT license in `LICENSE`. MIT permits
+commercial and non-commercial use, modification, and redistribution, but the
+copyright and license notice must be kept. No MIT/Apache/GPL license is
+literally obligation-free.
 
 ## Rust dependencies
 
 The direct Rust crates are permissive:
 
-- anyhow, libc, signal-hook: MIT or Apache-2.0;
+- anyhow, libc, serde, serde_json, signal-hook: MIT or Apache-2.0;
+- hound: Apache-2.0;
 - crossterm, midir, quick-xml, ratatui: MIT.
 
 Their transitive dependencies reported by `cargo metadata --locked` are also
@@ -52,20 +54,25 @@ into this repository. Pencil Research's CC BY-SA 4.0 MIDI dataset documents
 external instruments rather than USB controller surfaces and is likewise not
 included.
 
-## Preset bank
+## Preset bank boundary
 
-The origin and redistribution terms of the legacy presets in
-`presets/synthv1/` are not recorded in the files and could not be verified.
-They must not be included in a public release until their authors/licenses are
-identified or they are replaced with newly authored presets. Do not infer
-clearance merely because a legacy file is present in a local checkout.
+The tracked `presets/synthv1/` directory and public installation contain only
+the 21 MIT-cleared presets identified by
+`presets/synthv1/cleared-presets.txt` and described in this file. That manifest
+is the single packaging and schema-test allowlist. Legacy or downloaded
+presets without verified authorship and redistribution terms belong only in the
+ignored private `user/presets/synthv1/` tree. They must not be committed,
+packaged, mirrored, or relabelled as MIT merely because a copy exists locally.
 
 The `392 Synthv1 Presets` archive published by LinuxSynths was inspected on
 2026-07-13. It contains 392 `.synthv1` files but no README, license, author
-notice, or redistribution grant. Twenty-eight filenames overlap this local
-legacy bank, although the local files are modified rather than byte-identical,
-so the collection is a likely source for part of the bank. The archive was not
-imported. Source: <https://linuxsynths.com/Synthv1PatchesDemos/synthv1.html>.
+notice, or redistribution grant. Twenty-eight filenames overlapped the legacy
+local bank, although those local files were modified rather than byte-identical,
+so the collection is a likely source for part of that private bank. A private
+extraction described in `docs/WORKSPACE_HANDOFF.md` remains below the ignored
+`user/` tree; none of it was imported into the tracked or installed public
+collection. Source:
+<https://linuxsynths.com/Synthv1PatchesDemos/synthv1.html>.
 
 ## Newly authored cleared synthv1 presets
 
@@ -82,6 +89,8 @@ content and are released under this repository's MIT license:
 - drones/effects: Low Orbit Drone, Frozen Drone, Dust Delay, Restrained Sweep.
 
 `scripts/generate_cleared_presets.sh` records the exact authored parameter
-choices. Static tests verify all 145 indices and names against the current
-schema. Sound quality still requires authorized listening tests; none were run
-while adding this set.
+choices. Add a newly cleared file to `presets/synthv1/cleared-presets.txt` only
+after its provenance is recorded here. Static tests verify the manifest, all
+145 indices and names, and mapped values against the current schema. Sound
+quality still requires authorized listening tests; none were run while adding
+this set.

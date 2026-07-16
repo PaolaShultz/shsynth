@@ -142,6 +142,7 @@ pub enum Action {
     NoobScale,
     ConfirmNoob,
     LoopImport,
+    LoopRemove,
     LoopSourceDown,
     LoopSourceUp,
     LoopBpmMode,
@@ -154,6 +155,8 @@ pub enum Action {
     LoopOffsetDown,
     LoopOffsetUp,
     LoopAlignDone,
+    OpenLoopLibrary,
+    DeleteLoopFile,
     TrackerStop,
     TrackerMute,
     TrackerPageMute,
@@ -162,19 +165,25 @@ pub enum Action {
     NextTrack,
     PreviousProgram,
     NextProgram,
+    BankMsbDown,
+    BankMsbUp,
+    BankLsbDown,
+    BankLsbUp,
     TempoDown,
     TempoUp,
     SaveSong,
+    SaveSongAs,
     LoadSong,
     PreviewSong,
     DeleteSong,
+    RenameProject,
+    NewProject,
     NewPattern,
     ClonePattern,
-    CopyPattern,
-    PastePatternNew,
     PastePatternOver,
     ClearPattern,
     ClearPatternNow,
+    DeleteUnusedPattern,
     CopyLane,
     PasteLane,
     CopyPage,
@@ -189,8 +198,6 @@ pub enum Action {
     ArrangementPlayFromStep,
     PreviousOrder,
     NextOrder,
-    RepeatOrder,
-    DeleteOrder,
     AddPage,
     EditPageTarget,
     EditPageChannel,
@@ -271,6 +278,7 @@ pub enum MenuContext {
     PageTarget,
     PageChannel,
     PatternClear,
+    LoopLibrary,
 }
 
 const PRESETS: [MenuPage; 4] = [
@@ -440,17 +448,17 @@ const TRACKER_TOOLS: [MenuPage; 4] = [
         [
             on("COPY L", Action::CopyLane),
             on("PASTE L", Action::PasteLane),
-            on("COPY P", Action::CopyPage),
-            on("PASTE P", Action::PastePage),
+            on("COPY PG", Action::CopyPage),
+            on("PSTE PG", Action::PastePage),
         ],
     ),
     page(
         "LOOP",
         [
             on("LOOP", Action::OpenTrackerLoop),
-            off(""),
-            off(""),
-            off(""),
+            on("REMOVE", Action::LoopRemove),
+            on("LIBRARY", Action::OpenLoopLibrary),
+            on("MUTE PG", Action::TrackerPageMute),
         ],
     ),
     page(
@@ -549,6 +557,28 @@ const TRACKER_LOOP: [MenuPage; 4] = [
             on("PANIC", Action::StopAll),
             on("STOP", Action::TrackerStop),
             on("ALIGN", Action::OpenTrackerLoopAlign),
+            on("EXIT", Action::Back),
+        ],
+    ),
+];
+const LOOP_LIBRARY: [MenuPage; 4] = [
+    page(
+        "OPS",
+        [
+            on("DELETE", Action::DeleteLoopFile),
+            on("PG UP", Action::PageUp),
+            on("PG DOWN", Action::PageDown),
+            off(""),
+        ],
+    ),
+    page("", [off(""), off(""), off(""), off("")]),
+    page("", [off(""), off(""), off(""), off("")]),
+    page(
+        "SYS",
+        [
+            on("PANIC", Action::StopAll),
+            on("STOP", Action::TrackerStop),
+            on("HELP", Action::OpenHelp),
             on("EXIT", Action::Back),
         ],
     ),
@@ -688,8 +718,8 @@ const FILES: [MenuPage; 4] = [
         [
             on("NEW", Action::NewPattern),
             on("CLONE", Action::ClonePattern),
-            on("COPY", Action::CopyPattern),
-            on("PASTE+", Action::PastePatternNew),
+            on("NEW PRJ", Action::NewProject),
+            on("SAVE AS", Action::SaveSongAs),
         ],
     ),
     page(
@@ -697,15 +727,15 @@ const FILES: [MenuPage; 4] = [
         [
             on("OVER", Action::PastePatternOver),
             on("CLEAR", Action::ClearPattern),
-            on("REPEAT", Action::RepeatOrder),
-            on("REMOVE", Action::DeleteOrder),
+            on("CLEAN", Action::DeleteUnusedPattern),
+            on("NAME", Action::RenameProject),
         ],
     ),
     page(
         "SYS",
         [
             on("PANIC", Action::StopAll),
-            off(""),
+            on("STOP", Action::TrackerStop),
             on("HELP", Action::OpenHelp),
             on("EXIT", Action::Back),
         ],
@@ -722,15 +752,23 @@ const PAGES: [MenuPage; 4] = [
         ],
     ),
     page(
-        "PAGE",
+        "COLUMN",
         [
-            on("PAGE-", Action::PreviousTrack),
-            on("PAGE+", Action::NextTrack),
-            on("MUTE PG", Action::TrackerPageMute),
-            on("FILES", Action::OpenTrackerFiles),
+            on("COL-", Action::PreviousTrack),
+            on("COL+", Action::NextTrack),
+            on("PROG-", Action::PreviousProgram),
+            on("PROG+", Action::NextProgram),
         ],
     ),
-    page("", [off(""), off(""), off(""), off("")]),
+    page(
+        "BANK",
+        [
+            on("MSB-", Action::BankMsbDown),
+            on("MSB+", Action::BankMsbUp),
+            on("LSB-", Action::BankLsbDown),
+            on("LSB+", Action::BankLsbUp),
+        ],
+    ),
     page(
         "SYS",
         [
@@ -859,6 +897,7 @@ pub fn pages(screen: Screen, context: MenuContext) -> &'static [MenuPage; 4] {
         (Screen::TrackerPages, _) => &PAGES,
         (Screen::TrackerTools, _) => &TRACKER_TOOLS,
         (Screen::TrackerNoob, _) => &TRACKER_NOOB,
+        (Screen::TrackerLoop, MenuContext::LoopLibrary) => &LOOP_LIBRARY,
         (Screen::TrackerLoop, _) => &TRACKER_LOOP,
         (Screen::TrackerLoopAlign, _) => &TRACKER_LOOP_ALIGN,
         (Screen::AudioRecorder, _) => &AUDIO,
@@ -885,6 +924,7 @@ mod tests {
                 MenuContext::PageTarget,
                 MenuContext::PageChannel,
                 MenuContext::PatternClear,
+                MenuContext::LoopLibrary,
             ] {
                 let menu = pages(screen, context);
                 assert_eq!(menu.len(), 4);
@@ -900,7 +940,7 @@ mod tests {
     #[test]
     fn empty_slots_and_pages_do_not_dispatch() {
         let empty_slot = slot(Screen::Playback, MenuContext::Normal, 1, 3).unwrap();
-        let empty_page = pages(Screen::TrackerPages, MenuContext::Normal)[2];
+        let empty_page = pages(Screen::AudioRecorder, MenuContext::Normal)[1];
         assert_eq!((empty_slot.label, empty_slot.dispatch()), ("", None));
         assert!(!empty_page.available());
     }
@@ -954,6 +994,7 @@ mod tests {
             (Screen::TrackerTools, MenuContext::Normal),
             (Screen::TrackerNoob, MenuContext::Normal),
             (Screen::TrackerLoop, MenuContext::Normal),
+            (Screen::TrackerLoop, MenuContext::LoopLibrary),
             (Screen::TrackerLoopAlign, MenuContext::Normal),
             (Screen::AudioRecorder, MenuContext::Normal),
         ];
@@ -1075,6 +1116,7 @@ mod tests {
             (Screen::TrackerTools, MenuContext::Normal),
             (Screen::TrackerNoob, MenuContext::Normal),
             (Screen::TrackerLoop, MenuContext::Normal),
+            (Screen::TrackerLoop, MenuContext::LoopLibrary),
             (Screen::TrackerLoopAlign, MenuContext::Normal),
             (Screen::AudioRecorder, MenuContext::Normal),
         ];
@@ -1148,20 +1190,26 @@ mod tests {
             Action::NextTrack,
             Action::PreviousProgram,
             Action::NextProgram,
+            Action::BankMsbDown,
+            Action::BankMsbUp,
+            Action::BankLsbDown,
+            Action::BankLsbUp,
             Action::TempoDown,
             Action::TempoUp,
             Action::SaveSong,
+            Action::SaveSongAs,
             Action::LoadSong,
             Action::PreviewSong,
             Action::DeleteSong,
+            Action::RenameProject,
+            Action::NewProject,
             Action::NewPattern,
             Action::ClonePattern,
             Action::ClearPattern,
             Action::ClearPatternNow,
+            Action::DeleteUnusedPattern,
             Action::PreviousOrder,
             Action::NextOrder,
-            Action::RepeatOrder,
-            Action::DeleteOrder,
             Action::AddPage,
             Action::EditPageTarget,
             Action::EditPageChannel,
@@ -1172,6 +1220,7 @@ mod tests {
             Action::PatternSizeUp,
             Action::ConfirmPatternClear,
             Action::LoopImport,
+            Action::LoopRemove,
             Action::LoopSourceDown,
             Action::LoopSourceUp,
             Action::LoopBpmMode,
@@ -1184,6 +1233,8 @@ mod tests {
             Action::LoopOffsetDown,
             Action::LoopOffsetUp,
             Action::LoopAlignDone,
+            Action::OpenLoopLibrary,
+            Action::DeleteLoopFile,
             Action::AudioRecord,
             Action::AudioStop,
         ];

@@ -196,8 +196,8 @@ impl RuntimeConfig {
         let mut saw_capture_inputs = false;
         let mut saw_loop_outputs = false;
         for (line_no, line) in text.lines().enumerate() {
-            let line = line.split('#').next().unwrap_or("").trim();
-            if line.is_empty() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
                 continue;
             }
             let (key, value) = line.split_once('=').with_context(|| {
@@ -486,8 +486,14 @@ impl RuntimeConfig {
         for root in &self.yoshimi.backend.preset_roots {
             text.push_str(&format!("yoshimi.preset_root={}\n", root.display()));
         }
+        if self.yoshimi.backend.preset_roots.is_empty() {
+            text.push_str("yoshimi.preset_root=\n");
+        }
         for category in &self.yoshimi.categories {
             text.push_str(&format!("yoshimi.category={category}\n"));
+        }
+        if self.yoshimi.categories.is_empty() {
+            text.push_str("yoshimi.category=\n");
         }
         text.push_str(&format!(
             "yoshimi.presets_per_category={}\nfluidsynth.command={}\nfluidsynth.client={}\nfluidsynth.midi_output={}\nfluidsynth.gain={}\n",
@@ -500,13 +506,22 @@ impl RuntimeConfig {
         for font in &self.fluidsynth.soundfonts {
             text.push_str(&format!("fluidsynth.soundfont={}\n", font.display()));
         }
+        if self.fluidsynth.soundfonts.is_empty() {
+            text.push_str("fluidsynth.soundfont=\n");
+        }
         text.push_str(&format!("midi.autoconnect={}\n", self.midi_autoconnect));
         for input in &self.midi_input_matches {
             text.push_str(&format!("midi.input={input}\n"));
         }
+        if self.midi_input_matches.is_empty() {
+            text.push_str("midi.input=\n");
+        }
         text.push_str(&format!("audio.autoconnect={}\n", self.audio_autoconnect));
         for output in &self.audio_outputs {
             text.push_str(&format!("audio.output={output}\n"));
+        }
+        if self.audio_outputs.is_empty() {
+            text.push_str("audio.output=\n");
         }
         text.push_str(&format!(
             "audio.engine_cpu={}\n",
@@ -524,6 +539,9 @@ impl RuntimeConfig {
         for channel in &self.external_midi.channels {
             text.push_str(&format!("external_midi.channel={}\n", channel + 1));
         }
+        if self.external_midi.channels.is_empty() {
+            text.push_str("external_midi.channel=\n");
+        }
         text.push_str(&format!(
             "external_midi.melody_channel={}\nexternal_midi.percussion_channel={}\nexternal_midi.percussion_program={}\nexternal_midi.percussion_input_base={}\n",
             self.external_midi.melody_channel + 1,
@@ -540,6 +558,9 @@ impl RuntimeConfig {
         for note in &self.external_midi.percussion_notes {
             text.push_str(&format!("external_midi.percussion_note={note}\n"));
         }
+        if self.external_midi.percussion_notes.is_empty() {
+            text.push_str("external_midi.percussion_note=\n");
+        }
         text.push_str(&format!(
             "external_midi.bank_select={}\nexternal_midi.program_changes={}\nexternal_midi.send_transport={}\nexternal_midi.default_tempo={}\nexternal_midi.pattern_rows={}\nexternal_midi.steps_per_beat={}\nexternal_midi.live_thru={}\nexternal_midi.profile={}\nexternal_midi.gate_percent={}\nexternal_midi.gesture_settle_ms={}\ncapture.client={}\ncapture.directory={}\ncapture.ring_frames={}\n",
             match self.external_midi.bank_select { BankSelectMode::Off => "off", BankSelectMode::Cc0 => "cc0", BankSelectMode::Cc0Cc32 => "cc0+cc32" },
@@ -555,6 +576,9 @@ impl RuntimeConfig {
                 input.name, input.left_port, input.right_port
             ));
         }
+        if self.capture.inputs.is_empty() {
+            text.push_str("capture.input=\n");
+        }
         text.push_str(&format!(
             "loop.client={}\nloop.import_directory={}\n",
             self.loop_player.client_name,
@@ -563,10 +587,17 @@ impl RuntimeConfig {
         for output in &self.loop_player.outputs {
             text.push_str(&format!("loop.output={output}\n"));
         }
+        if self.loop_player.outputs.is_empty() {
+            text.push_str("loop.output=\n");
+        }
         text.push_str(&format!(
             "status.cpu_temperature_path={}\n",
             display_path(self.cpu_temperature_path.as_ref())
         ));
+        let mut validated = Self::default();
+        validated
+            .merge(&text, path)
+            .context("refusing to save invalid runtime configuration")?;
         atomic_write(path, &text)
     }
 }
@@ -618,10 +649,7 @@ fn expand_home(value: &str) -> PathBuf {
 }
 
 fn atomic_write(path: &Path, text: &str) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, text)?;
-    fs::rename(tmp, path)?;
-    Ok(())
+    crate::fsutil::atomic_write(path, text.as_bytes())
 }
 
 #[cfg(test)]
@@ -747,6 +775,61 @@ mod tests {
         );
         fs::write(&path, "audio.engine_cpu=\n").unwrap();
         assert_eq!(RuntimeConfig::load(&path).unwrap().audio_engine_cpu, None);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn explicitly_empty_optional_lists_survive_save_and_reload() {
+        let path =
+            std::env::temp_dir().join(format!("shsynth-empty-lists-{}.conf", std::process::id()));
+        let mut config = RuntimeConfig::default();
+        config.midi_autoconnect = false;
+        config.audio_autoconnect = false;
+        config.yoshimi.backend.preset_roots.clear();
+        config.yoshimi.categories.clear();
+        config.fluidsynth.soundfonts.clear();
+        config.midi_input_matches.clear();
+        config.audio_outputs.clear();
+        config.external_midi.percussion_notes.clear();
+        config.capture.inputs.clear();
+        config.loop_player.outputs.clear();
+        config.save(&path).unwrap();
+
+        let loaded = RuntimeConfig::load(&path).unwrap();
+        assert!(loaded.yoshimi.backend.preset_roots.is_empty());
+        assert!(loaded.yoshimi.categories.is_empty());
+        assert!(loaded.fluidsynth.soundfonts.is_empty());
+        assert!(loaded.midi_input_matches.is_empty());
+        assert!(loaded.audio_outputs.is_empty());
+        assert!(loaded.external_midi.percussion_notes.is_empty());
+        assert!(loaded.capture.inputs.is_empty());
+        assert!(loaded.loop_player.outputs.is_empty());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn save_refuses_invalid_in_memory_configuration() {
+        let path =
+            std::env::temp_dir().join(format!("shsynth-invalid-save-{}.conf", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let mut config = RuntimeConfig::default();
+        config.external_midi.channels.clear();
+        assert!(config.save(&path).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn hash_characters_are_preserved_inside_values() {
+        let path =
+            std::env::temp_dir().join(format!("shsynth-hash-value-{}.conf", std::process::id()));
+        fs::write(
+            &path,
+            "# full-line comment\nsynth.client=synth #1\nmidi.input=Controller #1\n",
+        )
+        .unwrap();
+        let config = RuntimeConfig::load(&path).unwrap();
+        assert_eq!(config.client_name, "synth #1");
+        assert_eq!(config.midi_input_matches, ["Controller #1"]);
         let _ = fs::remove_file(path);
     }
 }

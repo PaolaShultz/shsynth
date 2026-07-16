@@ -58,7 +58,10 @@ chords for clipping, and confirm the in-place parameter reset plus all 12 pickup
 controls afterward.
 
 For imported patches, record their origin and license in this document or a
-nearby note. Do not assume a preset found online is redistributable.
+nearby note. Do not assume a preset found online is redistributable. Once a
+patch is cleared for public packaging, add its exact filename to
+`presets/synthv1/cleared-presets.txt`; unlisted files are deliberately not
+installed and make the repository schema test fail.
 
 ## Cleared SHR-DAW collection
 

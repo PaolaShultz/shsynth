@@ -1,0 +1,21 @@
+Compact Bass.synthv1
+Copper Pluck.synthv1
+Dark Canopy.synthv1
+Deep Sub.synthv1
+Drawbar Glow.synthv1
+Dust Delay.synthv1
+Frozen Drone.synthv1
+Glass Saw Lead.synthv1
+Hollow Organ.synthv1
+Liquid Acid.synthv1
+Low Orbit Drone.synthv1
+Mono Pulse Lead.synthv1
+PWM Horizon.synthv1
+Reed Pluck.synthv1
+Restrained Sweep.synthv1
+Rubber Circuit.synthv1
+Shimmer Veil.synthv1
+Silver Bell.synthv1
+Soft Chime.synthv1
+Velvet Tines.synthv1
+Warm Cloud.synthv1

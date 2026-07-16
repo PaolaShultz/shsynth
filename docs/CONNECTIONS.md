@@ -50,7 +50,8 @@ Each engine has a configured MIDI input and JACK audio output. See
 
 ## External MIDI instruments
 
-Each tracker page can use its own MIDI output and channel. Several pages can
+Each tracker page can use its own MIDI output, with four independent column
+channels/banks/programs. Several pages can
 play several hardware instruments at the same time. A page can also target the
 currently active SHR-DAW software instrument.
 

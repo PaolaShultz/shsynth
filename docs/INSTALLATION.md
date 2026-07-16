@@ -36,14 +36,16 @@ Use `--no-deps` to keep the installer from installing system packages. Use
 - `shr` opens SHR-DAW and provides its command-line tools.
 - `shr-setup` opens the routing wizard.
 - `shr-audio-tune` manages optional Raspberry Pi audio CPU tuning.
-- `shs` opens the older synthv1-only shell program.
+- `shs` and `synth-player` are compatibility names for `shr`. They use the same
+  Rust engine ownership, routing, and shutdown path as the main command.
 
 The product and Cargo package are named `shr-daw`. The main command is `shr`.
 Existing `shsynth` configuration and data paths are kept for compatibility.
 
 ## JACK
 
-JACK must be running before SHR-DAW starts.
+JACK must be running before loading a software synth, playing WAV loops, or
+recording audio. The browser and external-MIDI tracker can start without JACK.
 
 The setup wizard can create a backed-up `~/.jackdrc` for a selected Raspberry
 Pi or USB audio device. It never starts or restarts JACK. This avoids changing

@@ -19,8 +19,10 @@ The setup wizard finds ALSA MIDI ports and JACK audio ports. You can enter an
 exact port name if automatic detection is not enough. Run `shr-setup` again
 after changing a controller, MIDI interface, sound card, or JACK port layout.
 
-`shr doctor` checks the current configuration and connections. JACK must
-already be running; SHR-DAW does not start or restart it.
+`shr doctor` checks the complete audio/MIDI setup, so it reports missing JACK
+as a problem. The preset browser and external-MIDI tracker can still open
+without JACK; loading a software instrument, playing a WAV loop, and recording
+audio require it. SHR-DAW does not start or restart JACK.
 
 ## Choose how to play
 

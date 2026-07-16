@@ -4,6 +4,10 @@ SHR-DAW is a Raspberry Pi mini DAW and MIDI routing hub. Hardware names belong
 in `shsynth.conf`, `controller.conf`, or a saved song. They are not compiled
 into the program.
 
+Both configuration files use one `KEY=VALUE` entry per line. A comment must
+start with `#` after optional leading whitespace; `#` inside a value is kept as
+part of a hardware name or path rather than treated as an inline comment.
+
 ## Audio CPU isolation
 
 `audio.engine_cpu` is an optional zero-based CPU number. When set, SHR-DAW pins
@@ -152,9 +156,18 @@ Exact MIDI port targets can also match a profile's `port_matches` entries.
 Projects are stored as `.shsong` text files below
 `${XDG_DATA_HOME:-~/.local/share}/shsynth/songs/`. The current development
 format stores each FT2 Pattern as a self-contained unit with its own tempo,
-meter, page targets, setup messages, four lanes per page, and every cell field.
-Files with another version or unknown shape are not loaded or overwritten; they
-can still be removed with confirmed Delete.
+meter, page targets, setup messages, four lanes per page, four column
+channel/bank/program setups, and every cell field. Version 0 Projects with one
+page-wide channel/bank/program migrate by copying that setup to all four
+columns. Unknown newer versions and unknown fields are refused.
+
+On **FILES**, **NEW PRJ** requires a second press and creates the next available
+`project-001` style unsaved name. **SAVE AS** writes a non-overwriting
+`<current-name>-copy-001` style copy and makes it current. Normal **SAVE** asks
+for a second press only when it would replace an existing Project. Arrangement
+repeat/remove operations live on the separate **ARRANGE** screen. **NAME**
+accepts a printable display name while deriving a safe filename; an existing
+Project is published under the new name without replacing a collision.
 
 ## FT2 WAV loop routing and storage
 
@@ -180,6 +193,13 @@ filename, source BPM, cut region, and bar placement offset. Disk I/O, decoding,
 allocation, import, and auto-alignment analysis happen outside the JACK
 callback.
 
+**TOOLS** → **LOOP** → **REMOVE** requires a second press, clears the Project's
+loop reference, and unloads the loop client. It never deletes the imported WAV
+from private storage. **TOOLS** → **LIBRARY** is the separate physical cleanup
+workflow. It lists only regular WAV files, marks current and saved-Project
+references, rejects symlinks/unsafe paths, and requires confirmation before
+deleting an unreferenced file.
+
 Loop playback is native-speed and native-pitch. Import and auto-align set the
 current Pattern tempo from the interpreted WAV BPM; they do not stretch the WAV
 to the previous Project tempo. The loop player also requires the JACK server
@@ -189,22 +209,23 @@ is safe.
 
 ## FT2 cell fields
 
-The contextual **CELL EDIT** menu is four pages of four items: **Fields**
-(Note, Gate, Velocity, Program), **Effect** (Effect, Parameter, Clear field,
-Step entry), **Adjust** (Field−, Field+, Value−, Value+), and **Finish**
-(Confirm, Cancel/back, Stop, Panic). Confirm writes the draft; cancel and
-safety/navigation exits discard it without leaving a preview note.
+The contextual **CELL EDIT** menu is four pages of four positions: **OPS**
+(Confirm, Step entry, Clear field, Effect type), **FIELDS** (Note, Gate,
+Velocity, Program), **ADJUST** (Effect parameter, Value−, Value+), and **SYS**
+(Panic, Stop, Exit/cancel). Empty positions are silent. Confirm writes the
+draft; Exit/cancel discards it without leaving a preview note. STOP only stops
+transport and deliberately preserves the draft.
 
 Gate is inherited or 1–100% of a row. Velocity and program are inherited or
 MIDI 0–127. The single command field supports cut `C` and delay `D` ticks
 0–15, retrigger `R` counts 1–8, and tempo `T` values 20–300 BPM. The letter is
 shown in the first spacer after velocity; blank means no command. Multiple
 commands in one cell are not supported. Per-cell program overrides use the
-page bank settings and exact page destination/channel, occur before that note,
-and do not mutate the inherited page program.
+selected column bank and exact page destination/column channel, occur before
+that note, and do not mutate the inherited column program.
 
 Choosing **Program** replaces the grid with a named program browser. Controller
-notes are routed to the selected page target/channel for live audition without
+notes are routed to the selected page target/column channel for live audition without
 being inserted into the pattern or duplicated through the generic live-thru
 route. Unknown devices still show every numeric MIDI program. The next played
 note receives the current draft bank/program selection, which is transmitted

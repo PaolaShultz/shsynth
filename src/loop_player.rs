@@ -7,7 +7,8 @@ use crate::sequencer::{LoopSettings, Song};
 use anyhow::{bail, Context, Result};
 use libc::{c_char, c_int, c_uint, c_ulong, c_void};
 use std::ffi::{CStr, CString};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -15,6 +16,7 @@ use std::time::Duration;
 
 const JACK_DEFAULT_AUDIO_TYPE: &[u8] = b"32 bit float mono audio\0";
 const JACK_PORT_IS_OUTPUT: c_ulong = 2;
+const JACK_NO_START_SERVER: c_uint = 1;
 const BEAT_UNITS: f64 = 1_000_000.0;
 const ANALYSIS_HOP: usize = 1024;
 
@@ -76,7 +78,13 @@ impl DecodedLoop {
         let raw = match spec.sample_format {
             hound::SampleFormat::Float => reader
                 .samples::<f32>()
-                .map(|sample| sample.context("malformed float WAV sample"))
+                .map(|sample| {
+                    let sample = sample.context("malformed float WAV sample")?;
+                    if !sample.is_finite() {
+                        bail!("WAV contains a non-finite float sample");
+                    }
+                    Ok(sample.clamp(-1.0, 1.0))
+                })
                 .collect::<Result<Vec<_>>>()?,
             hound::SampleFormat::Int => {
                 let bits = u32::from(spec.bits_per_sample);
@@ -130,6 +138,7 @@ pub fn list_wavs(directory: &Path) -> Vec<PathBuf> {
         .into_iter()
         .flatten()
         .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
         .map(|entry| entry.path())
         .filter(|path| {
             path.extension()
@@ -139,6 +148,72 @@ pub fn list_wavs(directory: &Path) -> Vec<PathBuf> {
         .collect::<Vec<_>>();
     files.sort();
     files
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LibraryEntry {
+    pub file: String,
+    pub current: bool,
+    pub saved_references: usize,
+}
+
+pub fn library_entries(
+    directory: &Path,
+    current: Option<&LoopSettings>,
+    projects: &Path,
+) -> Result<Vec<LibraryEntry>> {
+    let mut references = std::collections::BTreeMap::<String, usize>::new();
+    for name in crate::sequencer::list(projects) {
+        let song = crate::sequencer::load(projects, &name)
+            .with_context(|| format!("inspect saved Project {name}"))?;
+        if let Some(settings) = song.audio_loop {
+            *references.entry(settings.file).or_default() += 1;
+        }
+    }
+    Ok(list_wavs(directory)
+        .into_iter()
+        .filter_map(|path| path.file_name()?.to_str().map(str::to_owned))
+        .map(|file| LibraryEntry {
+            current: current.is_some_and(|settings| settings.file == file),
+            saved_references: references.get(&file).copied().unwrap_or(0),
+            file,
+        })
+        .collect())
+}
+
+pub fn delete_library_file(
+    directory: &Path,
+    file: &str,
+    current: Option<&LoopSettings>,
+    projects: &Path,
+) -> Result<()> {
+    if Path::new(file).file_name().and_then(|name| name.to_str()) != Some(file)
+        || !Path::new(file)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("wav"))
+    {
+        bail!("unsafe private loop path");
+    }
+    let entry = library_entries(directory, current, projects)?
+        .into_iter()
+        .find(|entry| entry.file == file)
+        .context("private loop is missing or is not a regular WAV file")?;
+    if entry.current || entry.saved_references != 0 {
+        bail!(
+            "loop is referenced by the current Project ({}) and {} saved Project(s)",
+            usize::from(entry.current),
+            entry.saved_references
+        );
+    }
+    let path = directory.join(file);
+    let metadata = fs::symlink_metadata(&path)?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        bail!("private loop is not a regular file");
+    }
+    fs::remove_file(path)?;
+    fs::File::open(directory)?.sync_all()?;
+    Ok(())
 }
 
 pub fn import(source: &Path, destination: &Path) -> Result<(PathBuf, DecodedLoop)> {
@@ -153,19 +228,38 @@ pub fn import(source: &Path, destination: &Path) -> Result<(PathBuf, DecodedLoop
         .and_then(|name| name.to_str())
         .unwrap_or("loop");
     let safe = crate::sequencer::safe_name(stem);
-    let mut target = destination.join(format!("{safe}.wav"));
-    for suffix in 2..=9999 {
-        if !target.exists() {
-            break;
+    for suffix in 1..=9999 {
+        let target = if suffix == 1 {
+            destination.join(format!("{safe}.wav"))
+        } else {
+            destination.join(format!("{safe}-{suffix}.wav"))
+        };
+        let mut output = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("create {}", target.display()))
+            }
+        };
+        let result = (|| -> Result<()> {
+            let mut input = File::open(source)?;
+            io::copy(&mut input, &mut output)?;
+            output.sync_all()?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            drop(output);
+            let _ = fs::remove_file(&target);
+            return Err(error)
+                .with_context(|| format!("copy private loop to {}", target.display()));
         }
-        target = destination.join(format!("{safe}-{suffix}.wav"));
+        return Ok((target, decoded));
     }
-    if target.exists() {
-        bail!("too many imported loops named {safe}");
-    }
-    fs::copy(source, &target)
-        .with_context(|| format!("copy private loop to {}", target.display()))?;
-    Ok((target, decoded))
+    bail!("too many imported loops named {safe}")
 }
 
 pub fn bpm_candidates(measured: f64) -> [f64; 3] {
@@ -347,57 +441,80 @@ impl LoopPlayer {
     }
 
     pub fn load(&mut self, decoded: DecodedLoop, settings: &LoopSettings) -> Result<()> {
+        if decoded.samples.is_empty()
+            || !(8_000..=384_000).contains(&decoded.sample_rate)
+            || !matches!(decoded.channels, 1 | 2)
+            || decoded
+                .samples
+                .iter()
+                .flatten()
+                .any(|sample| !sample.is_finite())
+        {
+            bail!("invalid decoded WAV loop");
+        }
+        if !(2_000..=30_000).contains(&settings.source_bpm_x100)
+            || settings.length_beats == 0
+            || !(-16_384..=16_384).contains(&settings.offset_beats)
+        {
+            bail!("invalid private loop settings");
+        }
         self.stop_backend();
-        let mut jack = JackClient::open(&self.config.client_name)?;
-        let jack_rate = jack.sample_rate();
-        require_native_rate(decoded.sample_rate, jack_rate)?;
-        let left = jack.register_output("output_l")?;
-        let right = jack.register_output("output_r")?;
-        let interpreted = settings.interpreted_bpm();
-        let start = beat_to_frame(
-            f64::from(settings.start_beat),
-            interpreted,
-            decoded.sample_rate,
-        )
-        .min(decoded.samples.len().saturating_sub(1));
-        let requested = beat_to_frame(
-            f64::from(settings.length_beats),
-            interpreted,
-            decoded.sample_rate,
-        );
-        let length = requested
-            .max(1)
-            .min(decoded.samples.len().saturating_sub(start));
-        let mut callback = Box::new(CallbackData {
-            left,
-            right,
-            port_get_buffer: jack.api.port_get_buffer,
-            samples: decoded.samples,
-            source_rate: decoded.sample_rate,
-            interpreted_bpm: interpreted,
-            region_start: start,
-            region_len: length,
-            offset_beats: settings.offset_beats,
-            fade: fade_frames(decoded.sample_rate, length),
-            phase: start as f64,
-            seen_generation: u64::MAX,
-            clock: Arc::clone(&self.clock),
-            position: Arc::clone(&self.position),
-        });
-        jack.set_callback((&mut *callback) as *mut CallbackData)?;
-        jack.activate_and_connect(&self.config.outputs, left, right)?;
+        self.position.store(0, Ordering::Release);
+        let source_rate = decoded.sample_rate;
+        let source_channels = decoded.channels;
         self.status = LoopStatus {
-            loaded: true,
-            playing: false,
             file: Some(settings.file.clone()),
-            source_rate: decoded.sample_rate,
-            source_channels: decoded.channels,
-            duration: Duration::from_secs_f64(length as f64 / f64::from(decoded.sample_rate)),
-            elapsed: Duration::ZERO,
-            error: None,
+            source_rate,
+            source_channels,
+            ..LoopStatus::default()
         };
-        self.active = Some(Active { jack, callback });
-        Ok(())
+        let result = (|| -> Result<(Active, usize)> {
+            let mut jack = JackClient::open(&self.config.client_name)?;
+            let jack_rate = jack.sample_rate();
+            require_native_rate(source_rate, jack_rate)?;
+            let left = jack.register_output("output_l")?;
+            let right = jack.register_output("output_r")?;
+            let interpreted = settings.interpreted_bpm();
+            let start = beat_to_frame(f64::from(settings.start_beat), interpreted, source_rate)
+                .min(decoded.samples.len().saturating_sub(1));
+            let requested =
+                beat_to_frame(f64::from(settings.length_beats), interpreted, source_rate);
+            let length = requested
+                .max(1)
+                .min(decoded.samples.len().saturating_sub(start));
+            let mut callback = Box::new(CallbackData {
+                left,
+                right,
+                port_get_buffer: jack.api.port_get_buffer,
+                samples: decoded.samples,
+                source_rate,
+                interpreted_bpm: interpreted,
+                region_start: start,
+                region_len: length,
+                offset_beats: settings.offset_beats,
+                fade: fade_frames(source_rate, length),
+                phase: start as f64,
+                seen_generation: u64::MAX,
+                clock: Arc::clone(&self.clock),
+                position: Arc::clone(&self.position),
+            });
+            jack.set_callback((&mut *callback) as *mut CallbackData)?;
+            jack.activate_and_connect(&self.config.outputs, left, right)?;
+            Ok((Active { jack, callback }, length))
+        })();
+        match result {
+            Ok((active, length)) => {
+                self.status.loaded = true;
+                self.status.duration =
+                    Duration::from_secs_f64(length as f64 / f64::from(source_rate));
+                self.active = Some(active);
+                Ok(())
+            }
+            Err(error) => {
+                self.status.error = Some(error.to_string());
+                Err(error)
+            }
+        }
     }
 
     pub fn status(&self) -> LoopStatus {
@@ -424,6 +541,12 @@ impl LoopPlayer {
 
     pub fn stop(&self) {
         self.clock.stop();
+    }
+
+    pub fn unload(&mut self) {
+        self.stop_backend();
+        self.position.store(0, Ordering::Release);
+        self.status = LoopStatus::default();
     }
 
     fn stop_backend(&mut self) {
@@ -514,24 +637,32 @@ impl JackClient {
             if handle.is_null() {
                 bail!("JACK library unavailable");
             }
-            let api = JackApi {
-                handle,
-                client_close: symbol(handle, b"jack_client_close\0")?,
-                port_register: symbol(handle, b"jack_port_register\0")?,
-                set_process: symbol(handle, b"jack_set_process_callback\0")?,
-                activate: symbol(handle, b"jack_activate\0")?,
-                deactivate: symbol(handle, b"jack_deactivate\0")?,
-                connect: symbol(handle, b"jack_connect\0")?,
-                port_name: symbol(handle, b"jack_port_name\0")?,
-                sample_rate: symbol(handle, b"jack_get_sample_rate\0")?,
-                port_get_buffer: symbol(handle, b"jack_port_get_buffer\0")?,
+            let loaded = (|| -> Result<(ClientOpen, JackApi)> {
+                Ok((
+                    symbol(handle, b"jack_client_open\0")?,
+                    JackApi {
+                        handle,
+                        client_close: symbol(handle, b"jack_client_close\0")?,
+                        port_register: symbol(handle, b"jack_port_register\0")?,
+                        set_process: symbol(handle, b"jack_set_process_callback\0")?,
+                        activate: symbol(handle, b"jack_activate\0")?,
+                        deactivate: symbol(handle, b"jack_deactivate\0")?,
+                        connect: symbol(handle, b"jack_connect\0")?,
+                        port_name: symbol(handle, b"jack_port_name\0")?,
+                        sample_rate: symbol(handle, b"jack_get_sample_rate\0")?,
+                        port_get_buffer: symbol(handle, b"jack_port_get_buffer\0")?,
+                    },
+                ))
+            })();
+            let (open, api) = match loaded {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    libc::dlclose(handle);
+                    return Err(error);
+                }
             };
             let mut status = 0;
-            let client = (symbol::<ClientOpen>(handle, b"jack_client_open\0")?)(
-                name.as_ptr(),
-                0,
-                &mut status,
-            );
+            let client = open(name.as_ptr(), JACK_NO_START_SERVER, &mut status);
             if client.is_null() {
                 libc::dlclose(handle);
                 bail!("JACK server unavailable (status {status})");
@@ -590,7 +721,12 @@ impl JackClient {
         }
         self.active = true;
         for (port, destination) in [(left, &destinations[0]), (right, &destinations[1])] {
-            let source = unsafe { CStr::from_ptr((self.api.port_name)(port)) };
+            let source = unsafe { (self.api.port_name)(port) };
+            if source.is_null() {
+                self.deactivate();
+                bail!("JACK loop player returned an unnamed port");
+            }
+            let source = unsafe { CStr::from_ptr(source) };
             if unsafe { (self.api.connect)(self.client, source.as_ptr(), destination.as_ptr()) }
                 != 0
             {
@@ -840,6 +976,43 @@ mod tests {
     }
 
     #[test]
+    fn listing_ignores_directories_and_symlinks_named_like_wavs() {
+        let base = temp_dir("list");
+        fs::create_dir_all(base.join("directory.wav")).unwrap();
+        fs::write(base.join("real.wav"), []).unwrap();
+        std::os::unix::fs::symlink(base.join("real.wav"), base.join("alias.wav")).unwrap();
+
+        assert_eq!(list_wavs(&base), [base.join("real.wav")]);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn invalid_decoded_loop_is_rejected_before_opening_jack() {
+        let config = crate::config::RuntimeConfig::default().loop_player;
+        let mut player = LoopPlayer::new(&config, Arc::new(TransportClock::default()));
+        let settings = LoopSettings {
+            file: "empty.wav".into(),
+            source_bpm_x100: 12_000,
+            interpretation: crate::sequencer::BpmInterpretation::Normal,
+            start_beat: 0,
+            length_beats: 4,
+            offset_beats: 0,
+        };
+
+        let error = player
+            .load(
+                DecodedLoop {
+                    samples: Vec::new(),
+                    sample_rate: 48_000,
+                    channels: 2,
+                },
+                &settings,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("invalid decoded WAV loop"));
+    }
+
+    #[test]
     fn transport_clock_tracks_play_restart_tempo_and_stop() {
         let clock = TransportClock::default();
         clock.play(3.5, 120);
@@ -872,5 +1045,46 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("restart JACK at 44100 Hz"));
+    }
+
+    #[test]
+    fn loop_library_deletes_only_unreferenced_regular_wavs() {
+        let base = temp_dir("library-delete");
+        let loops = base.join("loops");
+        let projects = base.join("projects");
+        fs::create_dir_all(&loops).unwrap();
+        fs::write(loops.join("free.wav"), b"private").unwrap();
+        fs::write(loops.join("used.wav"), b"private").unwrap();
+        std::os::unix::fs::symlink(loops.join("free.wav"), loops.join("alias.wav")).unwrap();
+
+        let mut song = Song::new(&crate::config::RuntimeConfig::default().external_midi);
+        song.name = "saved".into();
+        song.audio_loop = Some(LoopSettings {
+            file: "used.wav".into(),
+            source_bpm_x100: 12_000,
+            interpretation: crate::sequencer::BpmInterpretation::Normal,
+            start_beat: 0,
+            length_beats: 4,
+            offset_beats: 0,
+        });
+        crate::sequencer::save(&projects, &song, false).unwrap();
+
+        let entries = library_entries(&loops, None, &projects).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries
+                .iter()
+                .find(|entry| entry.file == "used.wav")
+                .unwrap()
+                .saved_references,
+            1
+        );
+        assert!(delete_library_file(&loops, "used.wav", None, &projects).is_err());
+        assert!(delete_library_file(&loops, "alias.wav", None, &projects).is_err());
+        assert!(delete_library_file(&loops, "../free.wav", None, &projects).is_err());
+        delete_library_file(&loops, "free.wav", None, &projects).unwrap();
+        assert!(!loops.join("free.wav").exists());
+        assert!(loops.join("used.wav").exists());
+        let _ = fs::remove_dir_all(base);
     }
 }

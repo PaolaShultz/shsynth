@@ -1,19 +1,24 @@
 //! Multi-destination FT2-style sequencing. Song editing/storage and event
 //! planning remain independent from the owned software-synth lifecycle.
 use crate::config::{BankSelectMode, ExternalMidiConfig};
+use crate::device_profile::Registry as DeviceProfiles;
 use anyhow::{anyhow, bail, Context, Result};
 use midir::{MidiOutput, MidiOutputConnection};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-pub const SONG_VERSION: u8 = 0;
+pub const SONG_VERSION: u8 = 1;
 pub const LANES_PER_PAGE: usize = 4;
+const MAX_PROJECT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PROJECT_PATTERNS: usize = 256;
+const MAX_ARRANGEMENT_STEPS: usize = 4096;
+const MAX_PROJECT_CELLS: usize = 1_048_576;
+const MAX_SETUP_MESSAGES_PER_PAGE: usize = 256;
 #[cfg(test)]
 const DEFAULT_GESTURE_SETTLE: Duration = Duration::from_millis(45);
 
@@ -80,10 +85,9 @@ impl LoopSettings {
 pub struct Page {
     pub name: String,
     pub enabled: bool,
-    pub channel: u8,
-    pub bank_msb: u8,
-    pub bank_lsb: u8,
-    pub program: u8,
+    /// MIDI channel and master instrument are independent for each of the
+    /// page's four visible tracker columns. The destination remains common.
+    pub columns: [ColumnSetup; LANES_PER_PAGE],
     pub velocity: u8,
     pub percussion: bool,
     pub target: PageTarget,
@@ -91,6 +95,14 @@ pub struct Page {
     /// and routed, but deliberately has no editor yet.
     pub setup: Vec<Vec<u8>>,
     pub lanes: Vec<Lane>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ColumnSetup {
+    pub channel: u8,
+    pub bank_msb: u8,
+    pub bank_lsb: u8,
+    pub program: u8,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -211,7 +223,7 @@ pub struct GestureCapture {
 
 impl GestureCapture {
     pub fn observe(&mut self, now: Instant, message: &[u8]) {
-        if message.len() < 3 {
+        if message.len() < 3 || message[1] > 127 || message[2] > 127 {
             return;
         }
         let kind = message[0] & 0xf0;
@@ -287,14 +299,18 @@ impl Song {
     }
 
     pub fn validate(&self) -> Result<()> {
+        validate_label(&self.name, "project name", 64)?;
         if !(1..=16).contains(&self.steps_per_beat) || !(1..=100).contains(&self.gate_percent) {
             bail!("project steps/gate out of range");
         }
-        if self.order.is_empty() {
-            bail!("project needs an FT2 arrangement");
+        if self.order.is_empty() || self.order.len() > MAX_ARRANGEMENT_STEPS {
+            bail!("project needs 1..={MAX_ARRANGEMENT_STEPS} arrangement steps");
+        }
+        if self.patterns.is_empty() || self.patterns.len() > MAX_PROJECT_PATTERNS {
+            bail!("project needs 1..={MAX_PROJECT_PATTERNS} patterns");
         }
         if let Some(audio_loop) = &self.audio_loop {
-            if audio_loop.file.is_empty()
+            if validate_label(&audio_loop.file, "private loop filename", 255).is_err()
                 || Path::new(&audio_loop.file)
                     .file_name()
                     .and_then(|name| name.to_str())
@@ -316,6 +332,119 @@ impl Song {
         for pattern in self.patterns.values() {
             pattern.validate()?;
         }
+        let total_cells = self.total_cell_count()?;
+        if total_cells > MAX_PROJECT_CELLS {
+            bail!("project exceeds {MAX_PROJECT_CELLS} cells");
+        }
+        Ok(())
+    }
+
+    fn total_cell_count(&self) -> Result<usize> {
+        self.patterns.values().try_fold(0usize, |total, pattern| {
+            let pattern_cells = pattern
+                .rows
+                .len()
+                .checked_mul(pattern.total_lanes())
+                .context("project cell count overflow")?;
+            total
+                .checked_add(pattern_cells)
+                .context("project cell count overflow")
+        })
+    }
+
+    pub fn append_pattern(&mut self, pattern: Pattern) -> Result<u16> {
+        if self.patterns.len() >= MAX_PROJECT_PATTERNS {
+            bail!("project already has {MAX_PROJECT_PATTERNS} patterns");
+        }
+        if self.order.len() >= MAX_ARRANGEMENT_STEPS {
+            bail!("arrangement already has {MAX_ARRANGEMENT_STEPS} steps");
+        }
+        pattern.validate()?;
+        let added_cells = pattern
+            .rows
+            .len()
+            .checked_mul(pattern.total_lanes())
+            .context("project cell count overflow")?;
+        let projected = self
+            .total_cell_count()?
+            .checked_add(added_cells)
+            .context("project cell count overflow")?;
+        if projected > MAX_PROJECT_CELLS {
+            bail!("project would exceed {MAX_PROJECT_CELLS} cells");
+        }
+        let number = self
+            .patterns
+            .keys()
+            .next_back()
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1)
+            .context("pattern number space is exhausted")?;
+        self.patterns.insert(number, pattern);
+        self.order.push(number);
+        Ok(number)
+    }
+
+    pub fn replace_pattern(&mut self, number: u16, pattern: Pattern) -> Result<()> {
+        pattern.validate()?;
+        let old = self.patterns.get(&number).context("pattern missing")?;
+        let old_cells = old
+            .rows
+            .len()
+            .checked_mul(old.total_lanes())
+            .context("project cell count overflow")?;
+        let new_cells = pattern
+            .rows
+            .len()
+            .checked_mul(pattern.total_lanes())
+            .context("project cell count overflow")?;
+        let projected = self
+            .total_cell_count()?
+            .checked_sub(old_cells)
+            .and_then(|total| total.checked_add(new_cells))
+            .context("project cell count overflow")?;
+        if projected > MAX_PROJECT_CELLS {
+            bail!("project would exceed {MAX_PROJECT_CELLS} cells");
+        }
+        self.patterns.insert(number, pattern);
+        Ok(())
+    }
+
+    pub fn insert_arrangement_step(&mut self, index: usize, pattern: u16) -> Result<usize> {
+        if self.order.len() >= MAX_ARRANGEMENT_STEPS {
+            bail!("arrangement already has {MAX_ARRANGEMENT_STEPS} steps");
+        }
+        if !self.patterns.contains_key(&pattern) {
+            bail!("arrangement pattern is missing");
+        }
+        if index > self.order.len() {
+            bail!("arrangement insertion is out of range");
+        }
+        self.order.insert(index, pattern);
+        Ok(index)
+    }
+
+    pub fn pattern_reference_count(&self, number: u16) -> usize {
+        self.order
+            .iter()
+            .filter(|candidate| **candidate == number)
+            .count()
+    }
+
+    /// Delete only an arrangement-orphaned pattern. No order step is ever
+    /// rewritten as a side effect, and errors leave the song untouched.
+    pub fn delete_unused_pattern(&mut self, number: u16) -> Result<()> {
+        let references = self.pattern_reference_count(number);
+        if references != 0 {
+            bail!("pattern {number} is referenced by {references} arrangement step(s)");
+        }
+        if self.patterns.len() <= 1 {
+            bail!("a Project must keep at least one pattern");
+        }
+        if !self.patterns.contains_key(&number) {
+            bail!("pattern {number} does not exist");
+        }
+        self.patterns.remove(&number);
         Ok(())
     }
 }
@@ -339,10 +468,12 @@ impl Page {
         Self {
             name: name.into(),
             enabled: true,
-            channel,
-            bank_msb: 0,
-            bank_lsb: 0,
-            program,
+            columns: [ColumnSetup {
+                channel,
+                bank_msb: 0,
+                bank_lsb: 0,
+                program,
+            }; LANES_PER_PAGE],
             velocity: 96,
             percussion,
             target: PageTarget::ConfiguredExternal,
@@ -354,6 +485,14 @@ impl Page {
                 })
                 .collect(),
         }
+    }
+
+    pub fn column(&self, lane: usize) -> &ColumnSetup {
+        &self.columns[lane.min(LANES_PER_PAGE - 1)]
+    }
+
+    pub fn column_mut(&mut self, lane: usize) -> &mut ColumnSetup {
+        &mut self.columns[lane.min(LANES_PER_PAGE - 1)]
     }
 }
 
@@ -375,6 +514,26 @@ impl Song {
         }
         let pattern = self
             .patterns
+            .get(&pattern_number)
+            .context("pattern missing")?;
+        if pattern.pages.len() >= 64 {
+            bail!("pattern already has 64 pages");
+        }
+        let projected = self
+            .total_cell_count()?
+            .checked_add(
+                pattern
+                    .rows
+                    .len()
+                    .checked_mul(LANES_PER_PAGE)
+                    .context("project cell count overflow")?,
+            )
+            .context("project cell count overflow")?;
+        if projected > MAX_PROJECT_CELLS {
+            bail!("project would exceed {MAX_PROJECT_CELLS} cells");
+        }
+        let pattern = self
+            .patterns
             .get_mut(&pattern_number)
             .context("pattern missing")?;
         let number = pattern.pages.len() + 1;
@@ -385,7 +544,6 @@ impl Song {
             row.extend(std::iter::repeat(Cell::default()).take(LANES_PER_PAGE));
         }
         let index = pattern.pages.len() - 1;
-        self.validate()?;
         Ok(index)
     }
 
@@ -443,6 +601,61 @@ impl Pattern {
         {
             bail!("each pattern page needs exactly four lanes");
         }
+        let mut channel_programs = BTreeMap::new();
+        for page in &self.pages {
+            validate_label(&page.name, "pattern page name", 64)?;
+            for lane in &page.lanes {
+                validate_label(&lane.name, "pattern lane name", 64)?;
+            }
+            if page.velocity > 127
+                || page.columns.iter().any(|column| {
+                    column.channel > 15
+                        || column.bank_msb > 127
+                        || column.bank_lsb > 127
+                        || column.program > 127
+                })
+            {
+                bail!("pattern page MIDI value out of range");
+            }
+            if page.enabled {
+                for (lane, column) in page.columns.iter().enumerate() {
+                    if !page.lanes[lane].enabled {
+                        continue;
+                    }
+                    let key = (page.target.clone(), column.channel);
+                    let selection = (column.bank_msb, column.bank_lsb, column.program);
+                    if let Some(old) = channel_programs
+                        .insert(key.clone(), selection)
+                        .filter(|old| *old != selection)
+                    {
+                        bail!(
+                            "conflicting master instruments share {} channel {}: {}/{}/{} versus {}/{}/{}",
+                            key.0.label(),
+                            key.1 + 1,
+                            old.0,
+                            old.1,
+                            old.2,
+                            selection.0,
+                            selection.1,
+                            selection.2
+                        );
+                    }
+                }
+            }
+            if let PageTarget::Midi(name) = &page.target {
+                validate_label(name, "pattern page MIDI target", 256)?;
+            }
+            if page.setup.len() > MAX_SETUP_MESSAGES_PER_PAGE
+                || page
+                    .setup
+                    .iter()
+                    .any(|message| message.is_empty() || message.len() > 256)
+            {
+                bail!(
+                    "a page may contain at most {MAX_SETUP_MESSAGES_PER_PAGE} setup messages of 1..=256 bytes"
+                );
+            }
+        }
         if self.rows.is_empty() || self.rows.len() > 256 {
             bail!("pattern must have 1..=256 rows");
         }
@@ -454,6 +667,14 @@ impl Pattern {
         }
         Ok(())
     }
+}
+
+fn validate_label(value: &str, description: &str, max_chars: usize) -> Result<()> {
+    if value.is_empty() || value.chars().count() > max_chars || value.chars().any(char::is_control)
+    {
+        bail!("{description} must contain 1..={max_chars} printable characters");
+    }
+    Ok(())
 }
 
 pub fn songs_dir() -> PathBuf {
@@ -492,10 +713,19 @@ pub fn list(base: &Path) -> Vec<String> {
         .flatten()
         .filter_map(Result::ok)
         .filter_map(|entry| {
-            entry
-                .path()
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
+            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                return None;
+            }
+            let path = entry.path();
+            if !path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("shsong"))
+            {
+                return None;
+            }
+            let name = path.file_stem()?.to_str()?.to_owned();
+            (safe_name(&name) == name).then_some(name)
         })
         .collect::<Vec<_>>();
     names.sort();
@@ -542,17 +772,22 @@ pub fn encode(song: &Song) -> Result<String> {
         ));
         for (page_index, page) in pattern.pages.iter().enumerate() {
             out.push_str(&format!(
-                "pattern_page={number}|{page_index}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",
+                "pattern_page={number}|{page_index}|{}|{}|{}|{}|{}\n",
                 escape(&page.name),
                 u8::from(page.enabled),
-                page.channel + 1,
-                page.bank_msb,
-                page.bank_lsb,
-                page.program,
                 page.velocity,
                 u8::from(page.percussion),
                 target_text(&page.target)
             ));
+            for (column_index, column) in page.columns.iter().enumerate() {
+                out.push_str(&format!(
+                    "pattern_column={number}|{page_index}|{column_index}|{}|{}|{}|{}\n",
+                    column.channel + 1,
+                    column.bank_msb,
+                    column.bank_lsb,
+                    column.program
+                ));
+            }
             for (lane_index, lane) in page.lanes.iter().enumerate() {
                 out.push_str(&format!(
                     "pattern_lane={number}|{page_index}|{lane_index}|{}|{}\n",
@@ -592,13 +827,16 @@ pub fn encode(song: &Song) -> Result<String> {
 }
 
 pub fn decode(text: &str) -> Result<Song> {
+    if text.len() > MAX_PROJECT_BYTES {
+        bail!("song file exceeds {MAX_PROJECT_BYTES} bytes");
+    }
     let mut lines = text.lines();
     let header = lines.next().context("empty song")?;
     let version = header
         .strip_prefix("SHSYNTH-SONG ")
         .context("not an SHR-DAW song")?
         .parse::<u8>()?;
-    if version != SONG_VERSION {
+    if version > SONG_VERSION {
         bail!("unsupported song version {version}; file was not changed");
     }
     let mut name = None;
@@ -609,84 +847,129 @@ pub fn decode(text: &str) -> Result<Song> {
     let mut patterns: BTreeMap<u16, Pattern> = BTreeMap::new();
     let mut pattern_pages: BTreeMap<u16, BTreeMap<usize, Page>> = BTreeMap::new();
     let mut pattern_lanes = Vec::new();
+    let mut pattern_columns = Vec::new();
     let mut pattern_setup = Vec::new();
     let mut cells = Vec::new();
     for line in lines.filter(|line| !line.trim().is_empty() && !line.starts_with('#')) {
         let (key, value) = line.split_once('=').context("invalid song line")?;
         match key {
-            "name" => name = Some(unescape(value)?),
-            "steps" => steps = Some(value.parse()?),
-            "gate" => gate = Some(value.parse()?),
+            "name" => set_once(&mut name, unescape(value)?, "name")?,
+            "steps" => set_once(&mut steps, value.parse()?, "steps")?,
+            "gate" => set_once(&mut gate, value.parse()?, "gate")?,
             "loop" => {
                 let f = value.split('|').collect::<Vec<_>>();
                 if f.len() != 6 {
                     bail!("invalid loop settings");
                 }
-                audio_loop = Some(LoopSettings {
-                    file: unescape(f[0])?,
-                    source_bpm_x100: f[1].parse()?,
-                    interpretation: match f[2] {
-                        "half" => BpmInterpretation::Half,
-                        "normal" => BpmInterpretation::Normal,
-                        "double" => BpmInterpretation::Double,
-                        _ => bail!("invalid loop BPM interpretation"),
+                set_once(
+                    &mut audio_loop,
+                    LoopSettings {
+                        file: unescape(f[0])?,
+                        source_bpm_x100: f[1].parse()?,
+                        interpretation: match f[2] {
+                            "half" => BpmInterpretation::Half,
+                            "normal" => BpmInterpretation::Normal,
+                            "double" => BpmInterpretation::Double,
+                            _ => bail!("invalid loop BPM interpretation"),
+                        },
+                        start_beat: f[3].parse()?,
+                        length_beats: f[4].parse()?,
+                        offset_beats: f[5].parse()?,
                     },
-                    start_beat: f[3].parse()?,
-                    length_beats: f[4].parse()?,
-                    offset_beats: f[5].parse()?,
-                });
+                    "loop",
+                )?;
             }
             "order" => {
-                order = Some(
-                    value
-                        .split(',')
-                        .map(str::parse)
-                        .collect::<std::result::Result<Vec<u16>, _>>()?,
-                )
+                let parsed = value
+                    .split(',')
+                    .map(str::parse)
+                    .collect::<std::result::Result<Vec<u16>, _>>()?;
+                if parsed.len() > MAX_ARRANGEMENT_STEPS {
+                    bail!("arrangement exceeds {MAX_ARRANGEMENT_STEPS} steps");
+                }
+                set_once(&mut order, parsed, "order")?;
             }
             "pattern" => {
                 let f = value.split('|').collect::<Vec<_>>();
                 match f.as_slice() {
                     [number, rows, tempo, meter] => {
-                        patterns.insert(
-                            number.parse()?,
-                            Pattern {
-                                tempo: tempo.parse()?,
-                                meter: meter.parse()?,
-                                pages: Vec::new(),
-                                rows: vec![Vec::new(); rows.parse()?],
-                            },
-                        );
+                        let number = number.parse()?;
+                        let rows = rows.parse::<usize>()?;
+                        if !(1..=256).contains(&rows) {
+                            bail!("pattern must have 1..=256 rows");
+                        }
+                        if patterns.len() >= MAX_PROJECT_PATTERNS {
+                            bail!("project exceeds {MAX_PROJECT_PATTERNS} patterns");
+                        }
+                        if patterns
+                            .insert(
+                                number,
+                                Pattern {
+                                    tempo: tempo.parse()?,
+                                    meter: meter.parse()?,
+                                    pages: Vec::new(),
+                                    rows: vec![Vec::new(); rows],
+                                },
+                            )
+                            .is_some()
+                        {
+                            bail!("duplicate pattern {number}");
+                        }
                     }
                     _ => bail!("invalid pattern"),
                 }
             }
             "pattern_page" => {
                 let f = value.split('|').collect::<Vec<_>>();
-                if f.len() != 11 {
-                    bail!("invalid pattern page");
-                }
-                pattern_pages
-                    .entry(f[0].parse::<u16>()?)
-                    .or_default()
-                    .insert(
-                        f[1].parse::<usize>()?,
+                let (page, legacy_column) = match (version, f.as_slice()) {
+                    (
+                        0,
+                        [_, _, name, enabled, channel, bank_msb, bank_lsb, program, velocity, percussion, target],
+                    ) => (
                         Page {
-                            name: unescape(f[2])?,
-                            enabled: f[3] == "1",
-                            channel: one_based_channel(f[4])?,
-                            bank_msb: midi_value(f[5])?,
-                            bank_lsb: midi_value(f[6])?,
-                            program: midi_value(f[7])?,
-                            velocity: midi_value(f[8])?,
-                            percussion: f[9] == "1",
-                            target: parse_target(f[10])?,
+                            name: unescape(name)?,
+                            enabled: binary_flag(enabled, "pattern page enabled")?,
+                            columns: [ColumnSetup {
+                                channel: one_based_channel(channel)?,
+                                bank_msb: midi_value(bank_msb)?,
+                                bank_lsb: midi_value(bank_lsb)?,
+                                program: midi_value(program)?,
+                            }; LANES_PER_PAGE],
+                            velocity: midi_value(velocity)?,
+                            percussion: binary_flag(percussion, "pattern page percussion")?,
+                            target: parse_target(target)?,
                             setup: Vec::new(),
                             lanes: Vec::new(),
                         },
-                    );
+                        true,
+                    ),
+                    (1, [_, _, name, enabled, velocity, percussion, target]) => (
+                        Page {
+                            name: unescape(name)?,
+                            enabled: binary_flag(enabled, "pattern page enabled")?,
+                            columns: [ColumnSetup::default(); LANES_PER_PAGE],
+                            velocity: midi_value(velocity)?,
+                            percussion: binary_flag(percussion, "pattern page percussion")?,
+                            target: parse_target(target)?,
+                            setup: Vec::new(),
+                            lanes: Vec::new(),
+                        },
+                        false,
+                    ),
+                    _ => bail!("invalid pattern page"),
+                };
+                let page_number = f[1].parse::<usize>()?;
+                let replaced = pattern_pages
+                    .entry(f[0].parse::<u16>()?)
+                    .or_default()
+                    .insert(page_number, page);
+                if replaced.is_some() {
+                    bail!("duplicate pattern page {page_number}");
+                }
+                debug_assert_eq!(legacy_column, version == 0);
             }
             "pattern_lane" => pattern_lanes.push(value.to_owned()),
+            "pattern_column" if version == 1 => pattern_columns.push(value.to_owned()),
             "pattern_setup" => pattern_setup.push(value.to_owned()),
             "cell" => cells.push(value.to_owned()),
             _ => bail!("unknown song field {key}; file was not changed"),
@@ -700,13 +983,31 @@ pub fn decode(text: &str) -> Result<Song> {
         pattern.pages = pages.into_values().collect();
     }
     attach_pattern_lanes(&mut patterns, pattern_lanes)?;
+    if version == 1 {
+        attach_pattern_columns(&mut patterns, pattern_columns)?;
+    }
     attach_pattern_setup(&mut patterns, pattern_setup)?;
+    let total_cells = patterns.values().try_fold(0usize, |total, pattern| {
+        total
+            .checked_add(
+                pattern
+                    .rows
+                    .len()
+                    .checked_mul(pattern.total_lanes())
+                    .context("project cell count overflow")?,
+            )
+            .context("project cell count overflow")
+    })?;
+    if total_cells > MAX_PROJECT_CELLS {
+        bail!("project exceeds {MAX_PROJECT_CELLS} cells");
+    }
     for pattern in patterns.values_mut() {
         let total_lanes = pattern.pages.len() * LANES_PER_PAGE;
         for row in &mut pattern.rows {
             row.resize(total_lanes, Cell::default());
         }
     }
+    let mut occupied_cells = BTreeSet::new();
     for value in cells {
         let f = value.split('|').collect::<Vec<_>>();
         if f.len() != 8 {
@@ -717,6 +1018,9 @@ pub fn decode(text: &str) -> Result<Song> {
             .context("cell pattern missing")?;
         let row_index = f[1].parse::<usize>()?;
         let track_index = f[2].parse::<usize>()?;
+        if !occupied_cells.insert((f[0].parse::<u16>()?, row_index, track_index)) {
+            bail!("duplicate cell");
+        }
         let cell = pattern
             .rows
             .get_mut(row_index)
@@ -761,8 +1065,47 @@ fn attach_pattern_lanes(patterns: &mut BTreeMap<u16, Pattern>, lanes: Vec<String
         }
         page.lanes.push(Lane {
             name: unescape(f[3])?,
-            enabled: f[4] == "1",
+            enabled: binary_flag(f[4], "pattern lane enabled")?,
         });
+    }
+    Ok(())
+}
+
+fn attach_pattern_columns(
+    patterns: &mut BTreeMap<u16, Pattern>,
+    columns: Vec<String>,
+) -> Result<()> {
+    let expected = patterns
+        .values()
+        .map(|pattern| pattern.pages.len() * LANES_PER_PAGE)
+        .sum::<usize>();
+    if columns.len() != expected {
+        bail!("each pattern page needs exactly four column setups");
+    }
+    let mut occupied = BTreeSet::new();
+    for value in columns {
+        let f = value.split('|').collect::<Vec<_>>();
+        if f.len() != 7 {
+            bail!("invalid pattern column");
+        }
+        let pattern_number = f[0].parse::<u16>()?;
+        let page_index = f[1].parse::<usize>()?;
+        let column_index = f[2].parse::<usize>()?;
+        if column_index >= LANES_PER_PAGE
+            || !occupied.insert((pattern_number, page_index, column_index))
+        {
+            bail!("duplicate or invalid pattern column");
+        }
+        let page = patterns
+            .get_mut(&pattern_number)
+            .and_then(|pattern| pattern.pages.get_mut(page_index))
+            .context("column page missing")?;
+        page.columns[column_index] = ColumnSetup {
+            channel: one_based_channel(f[3])?,
+            bank_msb: midi_value(f[4])?,
+            bank_lsb: midi_value(f[5])?,
+            program: midi_value(f[6])?,
+        };
     }
     Ok(())
 }
@@ -780,9 +1123,27 @@ fn attach_pattern_setup(patterns: &mut BTreeMap<u16, Pattern>, setup: Vec<String
             .pages
             .get_mut(f[1].parse::<usize>()?)
             .context("setup page missing")?;
+        if page.setup.len() >= MAX_SETUP_MESSAGES_PER_PAGE {
+            bail!("page exceeds {MAX_SETUP_MESSAGES_PER_PAGE} setup messages");
+        }
         page.setup.push(parse_setup_message(f[2])?);
     }
     Ok(())
+}
+
+fn set_once<T>(slot: &mut Option<T>, value: T, field: &str) -> Result<()> {
+    if slot.replace(value).is_some() {
+        bail!("duplicate song field {field}");
+    }
+    Ok(())
+}
+
+fn binary_flag(value: &str, description: &str) -> Result<bool> {
+    match value {
+        "0" => Ok(false),
+        "1" => Ok(true),
+        _ => bail!("{description} must be 0 or 1"),
+    }
 }
 
 fn parse_setup_message(bytes: &str) -> Result<Vec<u8>> {
@@ -803,11 +1164,6 @@ fn parse_setup_message(bytes: &str) -> Result<Vec<u8>> {
 pub fn save(base: &Path, song: &Song, overwrite: bool) -> Result<PathBuf> {
     fs::create_dir_all(base)?;
     let path = base.join(format!("{}.shsong", safe_name(&song.name)));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    if overwrite {
-        options.create_new(false).create(true).truncate(true);
-    }
     if path.exists() && !overwrite {
         bail!("song already exists; confirm overwrite explicitly");
     }
@@ -818,63 +1174,60 @@ pub fn save(base: &Path, song: &Song, overwrite: bool) -> Result<PathBuf> {
             .next()
             .and_then(|header| header.strip_prefix("SHSYNTH-SONG "))
             .and_then(|version| version.parse::<u8>().ok())
-            .is_some_and(|version| version == SONG_VERSION);
+            .is_some_and(|version| version <= SONG_VERSION);
         if !supported {
             bail!("refusing to overwrite unsupported/newer song file");
         }
     }
-    let tmp = base.join(format!(
-        ".{}.{}.tmp",
-        safe_name(&song.name),
-        std::process::id()
-    ));
-    if tmp.exists() {
-        fs::remove_file(&tmp)?;
-    }
-    let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
-    file.write_all(encode(song)?.as_bytes())?;
-    file.sync_all()?;
-    if path.exists() && !overwrite {
-        let _ = fs::remove_file(&tmp);
-        bail!("song already exists");
-    }
+    let encoded = encode(song)?;
     if overwrite {
-        fs::rename(&tmp, &path)?;
+        crate::fsutil::atomic_write(&path, encoded.as_bytes())?;
     } else {
-        rename_noreplace(&tmp, &path)?;
+        crate::fsutil::atomic_write_noreplace(&path, encoded.as_bytes())
+            .context("publish song without replacement")?;
     }
     Ok(path)
 }
 
-fn rename_noreplace(from: &Path, to: &Path) -> Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    let from = std::ffi::CString::new(from.as_os_str().as_bytes())?;
-    let to = std::ffi::CString::new(to.as_os_str().as_bytes())?;
-    let result = unsafe {
-        libc::renameat2(
-            libc::AT_FDCWD,
-            from.as_ptr(),
-            libc::AT_FDCWD,
-            to.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    };
-    if result != 0 {
-        return Err(std::io::Error::last_os_error()).context("publish song without replacement");
-    }
-    Ok(())
-}
-
 pub fn load(base: &Path, name: &str) -> Result<Song> {
-    decode(&fs::read_to_string(
-        base.join(format!("{}.shsong", safe_name(name))),
-    )?)
+    decode(&fs::read_to_string(song_path(base, name)?)?)
 }
 
 pub fn delete(base: &Path, name: &str) -> Result<()> {
-    let path = base.join(format!("{}.shsong", safe_name(name)));
-    fs::remove_file(path)?;
+    fs::remove_file(song_path(base, name)?)?;
     Ok(())
+}
+
+/// Publish a renamed Project without replacing either source or destination.
+/// The destination is fully encoded before the old directory entry is removed,
+/// so every failure before removal preserves the original Project.
+pub fn rename_project(base: &Path, old_stem: &str, display_name: &str) -> Result<(Song, PathBuf)> {
+    validate_label(display_name, "project name", 64)?;
+    let new_stem = safe_name(display_name);
+    let old_path = song_path(base, old_stem)?;
+    let new_path = song_path(base, &new_stem)?;
+    let mut song = load(base, old_stem)?;
+    song.name = display_name.to_owned();
+    song.validate()?;
+    if old_path == new_path {
+        crate::fsutil::atomic_write(&old_path, encode(&song)?.as_bytes())?;
+    } else {
+        crate::fsutil::atomic_write_noreplace(&new_path, encode(&song)?.as_bytes())
+            .context("publish renamed Project without replacement")?;
+        if let Err(error) = fs::remove_file(&old_path) {
+            let _ = fs::remove_file(&new_path);
+            return Err(error).context("remove old Project name");
+        }
+        fs::File::open(base)?.sync_all()?;
+    }
+    Ok((song, new_path))
+}
+
+fn song_path(base: &Path, name: &str) -> Result<PathBuf> {
+    if name.is_empty() || safe_name(name) != name {
+        bail!("invalid song name");
+    }
+    Ok(base.join(format!("{name}.shsong")))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -896,13 +1249,23 @@ pub fn schedule(
     start_row: usize,
 ) -> Result<Vec<ScheduledMessage>> {
     song.validate()?;
+    let device_profiles = DeviceProfiles::discover();
+    let first_pattern = song
+        .order
+        .get(start_order)
+        .and_then(|number| song.patterns.get(number))
+        .context("start order outside arrangement")?;
+    if start_row >= first_pattern.rows.len() {
+        bail!("start row outside pattern");
+    }
     let mut result = Vec::new();
     let mut at = Duration::ZERO;
+    let mut clock_step = 0usize;
     let mut active: BTreeMap<usize, (PageTarget, u8, u8)> = BTreeMap::new();
     for (order_index, pattern_number) in song.order.iter().enumerate().skip(start_order) {
         let pattern = &song.patterns[pattern_number];
         let mut tempo = pattern.tempo;
-        let mut programmed = vec![false; pattern.pages.len()];
+        let mut programmed = vec![false; pattern.total_lanes()];
         for page in pattern.pages.iter().filter(|page| page.enabled) {
             for message in &page.setup {
                 push(
@@ -928,7 +1291,6 @@ pub fn schedule(
             // play cursor moves before that row's notes are sent.
             push(&mut result, at, order_index, row_index, Vec::new(), None);
             if config.send_transport {
-                let clocks = (24 / usize::from(song.steps_per_beat)).max(1);
                 let targets = pattern
                     .pages
                     .iter()
@@ -936,10 +1298,11 @@ pub fn schedule(
                     .map(|page| page.target.clone())
                     .collect::<BTreeSet<_>>();
                 for target in targets {
-                    for clock in 0..clocks {
+                    for offset in midi_clock_offsets(clock_step, song.steps_per_beat, row_duration)
+                    {
                         push(
                             &mut result,
-                            at + row_duration.mul_f64(clock as f64 / clocks as f64),
+                            at + offset,
                             order_index,
                             row_index,
                             vec![0xf8],
@@ -951,7 +1314,9 @@ pub fn schedule(
             for (lane_index, cell) in row.iter().enumerate() {
                 let page_index = lane_index / LANES_PER_PAGE;
                 let page = &pattern.pages[page_index];
-                let lane = &page.lanes[lane_index % LANES_PER_PAGE];
+                let column_index = lane_index % LANES_PER_PAGE;
+                let lane = &page.lanes[column_index];
+                let column = page.column(column_index);
                 if !page.enabled || !lane.enabled {
                     continue;
                 }
@@ -965,17 +1330,21 @@ pub fn schedule(
                 let event_at = at + delay;
                 match cell.note {
                     Note::On(note) => {
-                        if cell.program.is_some() || !programmed[page_index] {
+                        if cell.program.is_some() || !programmed[lane_index] {
                             append_program(
                                 &mut result,
-                                event_at,
-                                order_index,
-                                row_index,
+                                SchedulePosition {
+                                    at: event_at,
+                                    order: order_index,
+                                    row: row_index,
+                                },
                                 page,
-                                cell.program.unwrap_or(page.program),
+                                column,
+                                cell.program.unwrap_or(column.program),
                                 config,
+                                &device_profiles,
                             );
-                            programmed[page_index] = true;
+                            programmed[lane_index] = true;
                         }
                         if let Some((old_target, old_channel, old)) = active.remove(&lane_index) {
                             push_lane(
@@ -988,7 +1357,7 @@ pub fn schedule(
                                 &old_target,
                             );
                         }
-                        active.insert(lane_index, (page.target.clone(), page.channel, note));
+                        active.insert(lane_index, (page.target.clone(), column.channel, note));
                         let pulses = match cell.command {
                             Command::Retrigger(count) => count,
                             _ => 1,
@@ -1007,7 +1376,7 @@ pub fn schedule(
                                 order_index,
                                 row_index,
                                 vec![
-                                    0x90 | page.channel,
+                                    0x90 | column.channel,
                                     note,
                                     cell.velocity.unwrap_or(page.velocity),
                                 ],
@@ -1019,7 +1388,7 @@ pub fn schedule(
                                 (pulse_at + gate).min(at + row_duration),
                                 order_index,
                                 row_index,
-                                vec![0x80 | page.channel, note, 0],
+                                vec![0x80 | column.channel, note, 0],
                                 lane_index,
                                 &page.target,
                             );
@@ -1054,6 +1423,7 @@ pub fn schedule(
                     }
                 }
             }
+            clock_step += 1;
             at += row_duration;
         }
     }
@@ -1073,6 +1443,24 @@ pub fn schedule(
     }
     result.sort_by_key(|message| message.at);
     Ok(result)
+}
+
+/// MIDI clock is always 24 pulses per quarter note. When the tracker uses a
+/// row count that does not divide 24, distribute pulses across rows without
+/// changing the average clock rate.
+fn midi_clock_offsets(
+    step: usize,
+    steps_per_beat: u8,
+    row_duration: Duration,
+) -> impl Iterator<Item = Duration> {
+    let steps = usize::from(steps_per_beat);
+    let phase = step % steps;
+    let first_tick = (phase * 24).div_ceil(steps);
+    let end_tick = ((phase + 1) * 24).div_ceil(steps);
+    (first_tick..end_tick).map(move |tick| {
+        let numerator = tick * steps - phase * 24;
+        row_duration.mul_f64(numerator as f64 / 24.0)
+    })
 }
 
 fn release_active_notes(
@@ -1095,51 +1483,67 @@ fn release_active_notes(
     }
 }
 
-fn append_program(
-    out: &mut Vec<ScheduledMessage>,
+#[derive(Clone, Copy)]
+struct SchedulePosition {
     at: Duration,
     order: usize,
     row: usize,
+}
+
+fn append_program(
+    out: &mut Vec<ScheduledMessage>,
+    position: SchedulePosition,
     page: &Page,
+    column: &ColumnSetup,
     program: u8,
     config: &ExternalMidiConfig,
+    device_profiles: &DeviceProfiles,
 ) {
-    match config.bank_select {
+    let mut selection = config.clone();
+    let profile = match &page.target {
+        PageTarget::ConfiguredExternal => device_profiles.by_id(&config.profile),
+        PageTarget::Midi(port) => device_profiles.matching_port(port),
+        PageTarget::ActiveInstrument => None,
+    };
+    if let Some(profile) = profile {
+        profile.apply_midi_selection(&mut selection);
+    }
+    match selection.bank_select {
         BankSelectMode::Off => {}
         BankSelectMode::Cc0 => push(
             out,
-            at,
-            order,
-            row,
-            vec![0xb0 | page.channel, 0, page.bank_msb],
+            position.at,
+            position.order,
+            position.row,
+            vec![0xb0 | column.channel, 0, column.bank_msb],
             Some(page.target.clone()),
         ),
         BankSelectMode::Cc0Cc32 => {
             push(
                 out,
-                at,
-                order,
-                row,
-                vec![0xb0 | page.channel, 0, page.bank_msb],
+                position.at,
+                position.order,
+                position.row,
+                vec![0xb0 | column.channel, 0, column.bank_msb],
                 Some(page.target.clone()),
             );
             push(
                 out,
-                at,
-                order,
-                row,
-                vec![0xb0 | page.channel, 32, page.bank_lsb],
+                position.at,
+                position.order,
+                position.row,
+                vec![0xb0 | column.channel, 32, column.bank_lsb],
                 Some(page.target.clone()),
             );
         }
     }
-    if config.program_changes {
+    if selection.program_changes {
         push(
             out,
-            at,
-            order,
-            row,
-            vec![0xc0 | page.channel, program],
+            position.at,
+            position.order,
+            position.row,
+            vec![0xc0 | column.channel, program],
             Some(page.target.clone()),
         );
     }
@@ -1522,28 +1926,12 @@ fn run_transport(
                     .and_then(|target| outputs.send(target, &message.bytes).err())
             };
             if !muted_message {
-                if let (Some(lane), Some(target), [status, note, ..]) = (
+                update_active_notes(
+                    &mut active_notes,
                     message.lane,
                     message.target.as_ref(),
-                    message.bytes.as_slice(),
-                ) {
-                    let channel = status & 0x0f;
-                    match status & 0xf0 {
-                        0x90 if message.bytes.get(2).copied().unwrap_or(0) > 0 => {
-                            active_notes
-                                .entry(lane)
-                                .or_insert_with(|| (target.clone(), channel, BTreeSet::new()))
-                                .2
-                                .insert(*note);
-                        }
-                        0x80 | 0x90 => {
-                            if let Some((_, _, notes)) = active_notes.get_mut(&lane) {
-                                notes.remove(note);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
+                    &message.bytes,
+                );
             }
             if let Some(error) = send_error {
                 if let Ok(mut s) = status.lock() {
@@ -1567,6 +1955,37 @@ fn run_transport(
             started = Instant::now();
             clock.play(loop_origin_beat, transport_tempo);
         }
+    }
+}
+
+fn update_active_notes(
+    active: &mut BTreeMap<usize, (PageTarget, u8, BTreeSet<u8>)>,
+    lane: Option<usize>,
+    target: Option<&PageTarget>,
+    bytes: &[u8],
+) {
+    let (Some(lane), Some(target), [status, note, velocity, ..]) = (lane, target, bytes) else {
+        return;
+    };
+    let channel = status & 0x0f;
+    match status & 0xf0 {
+        0x90 if *velocity > 0 => {
+            active
+                .entry(lane)
+                .or_insert_with(|| (target.clone(), channel, BTreeSet::new()))
+                .2
+                .insert(*note);
+        }
+        0x80 | 0x90 => {
+            let empty = active.get_mut(&lane).is_some_and(|(_, _, notes)| {
+                notes.remove(note);
+                notes.is_empty()
+            });
+            if empty {
+                active.remove(&lane);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1769,6 +2188,13 @@ pub fn available_midi_outputs(client_name: &str) -> Result<Vec<String>> {
 }
 
 pub fn diagnostic(config: &ExternalMidiConfig) -> Result<String> {
+    let channel = *config
+        .channels
+        .first()
+        .context("external MIDI has no configured channels")?;
+    if channel > 15 {
+        bail!("external MIDI channel out of range");
+    }
     let output = MidiOutput::new(&config.client_name)?;
     let ports = output
         .ports()
@@ -1786,10 +2212,12 @@ pub fn diagnostic(config: &ExternalMidiConfig) -> Result<String> {
     let page = Page {
         name: "dry-run".into(),
         enabled: true,
-        channel: config.channels[0],
-        bank_msb: 0,
-        bank_lsb: 0,
-        program: 0,
+        columns: [ColumnSetup {
+            channel,
+            bank_msb: 0,
+            bank_lsb: 0,
+            program: 0,
+        }; LANES_PER_PAGE],
         velocity: 64,
         percussion: false,
         target: PageTarget::ConfiguredExternal,
@@ -1802,13 +2230,25 @@ pub fn diagnostic(config: &ExternalMidiConfig) -> Result<String> {
             .collect(),
     };
     let mut dry = Vec::new();
-    append_program(&mut dry, Duration::ZERO, 0, 0, &page, 0, config);
+    append_program(
+        &mut dry,
+        SchedulePosition {
+            at: Duration::ZERO,
+            order: 0,
+            row: 0,
+        },
+        &page,
+        page.column(0),
+        0,
+        config,
+        &DeviceProfiles::discover(),
+    );
     push(
         &mut dry,
         Duration::ZERO,
         0,
         0,
-        vec![0x90 | page.channel, 60, 64],
+        vec![0x90 | page.column(0).channel, 60, 64],
         Some(page.target.clone()),
     );
     push(
@@ -1816,7 +2256,7 @@ pub fn diagnostic(config: &ExternalMidiConfig) -> Result<String> {
         Duration::from_millis(250),
         0,
         0,
-        vec![0x80 | page.channel, 60, 0],
+        vec![0x80 | page.column(0).channel, 60, 0],
         Some(page.target.clone()),
     );
     if let Some(channel) = config.percussion_channel {
@@ -2040,7 +2480,7 @@ mod tests {
             command: Command::Delay(6),
         };
         let encoded = encode(&song).unwrap();
-        assert!(encoded.starts_with("SHSYNTH-SONG 0\n"));
+        assert!(encoded.starts_with("SHSYNTH-SONG 1\n"));
         assert!(encoded.contains("|64|111|17|37|D6\n"));
         assert_eq!(decode(&encoded).unwrap(), song);
     }
@@ -2174,6 +2614,37 @@ mod tests {
         assert_eq!(m[3].bytes[0] & 0xf0, 0x90);
         assert!(m.iter().any(|x| x.bytes[0] & 0xf0 == 0x80));
     }
+
+    #[test]
+    fn exact_device_target_uses_its_own_program_selection_protocol() {
+        let mut config = config();
+        config.bank_select = BankSelectMode::Cc0Cc32;
+        config.program_changes = true;
+        let mut song = Song::new(&config);
+        let page = &mut song.patterns.get_mut(&0).unwrap().pages[0];
+        page.target = PageTarget::Midi("USB MIDI: Roland D-50".into());
+        for column in &mut page.columns {
+            column.bank_msb = 5;
+            column.bank_lsb = 9;
+        }
+        song.patterns.get_mut(&0).unwrap().rows[0][0] = Cell {
+            note: Note::On(60),
+            program: Some(7),
+            ..Cell::default()
+        };
+
+        let transmitted = schedule(&song, &config, 0, 0)
+            .unwrap()
+            .into_iter()
+            .filter(|message| !message.bytes.is_empty())
+            .map(|message| message.bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(transmitted[0], [0xc0, 7]);
+        assert_eq!(transmitted[1], [0x90, 60, 96]);
+        assert!(!transmitted.iter().any(|message| {
+            message.len() >= 2 && message[0] & 0xf0 == 0xb0 && matches!(message[1], 0 | 32)
+        }));
+    }
     #[test]
     fn row_timing_pattern_transition_and_tempo() {
         let c = config();
@@ -2221,11 +2692,11 @@ mod tests {
         c.bank_select = BankSelectMode::Off;
         let mut song = Song::new(&c);
         pages_mut(&mut song)[0].target = PageTarget::Midi("A".into());
-        pages_mut(&mut song)[0].channel = 0;
+        pages_mut(&mut song)[0].column_mut(0).channel = 0;
         song.patterns.get_mut(&0).unwrap().rows[0][0].note = Note::On(60);
         let mut second = Pattern::empty_like_setup(1, &song.patterns[&0]);
         second.pages[0].target = PageTarget::Midi("B".into());
-        second.pages[0].channel = 5;
+        second.pages[0].column_mut(0).channel = 5;
         second.rows[0][0].note = Note::On(61);
         song.patterns.insert(1, second);
         song.order = vec![0, 1];
@@ -2302,7 +2773,7 @@ mod tests {
     fn installed_profile_has_four_lane_drum_page_on_channel_two() {
         let c = config();
         let mut song = Song::new(&c);
-        assert_eq!(pages(&song)[1].channel, 1);
+        assert_eq!(pages(&song)[1].column(0).channel, 1);
         assert!(pages(&song)[1].percussion);
         song.patterns.get_mut(&0).unwrap().rows[0][4].note = Note::On(36);
         assert!(schedule(&song, &c, 0, 0).unwrap().iter().any(|message| {
@@ -2319,8 +2790,8 @@ mod tests {
         c.max_tracks = 2;
         c.bank_select = BankSelectMode::Off;
         let mut song = Song::new(&c);
-        assert_eq!(pages(&song)[1].channel, 1);
-        assert_eq!(pages(&song)[1].program, 9);
+        assert_eq!(pages(&song)[1].column(0).channel, 1);
+        assert_eq!(pages(&song)[1].column(0).program, 9);
         assert!(pages(&song)[1].percussion);
         song.patterns.get_mut(&0).unwrap().rows[0][4].note = Note::On(36);
         let midi = schedule(&song, &c, 0, 0)
@@ -2538,13 +3009,50 @@ mod tests {
     }
 
     #[test]
+    fn bounded_project_mutations_leave_the_song_unchanged_on_error() {
+        let config = config();
+        let mut pages_song = Song::new(&config);
+        while pages_song.patterns[&0].pages.len() < 64 {
+            pages_song
+                .add_page(PageTarget::ConfiguredExternal, 0)
+                .unwrap();
+        }
+        let page_snapshot = pages_song.clone();
+        assert!(pages_song
+            .add_page(PageTarget::ConfiguredExternal, 0)
+            .is_err());
+        assert_eq!(pages_song, page_snapshot);
+
+        let mut pattern_song = Song::new(&config);
+        let pattern = pattern_song.patterns[&0].clone();
+        for number in 1..MAX_PROJECT_PATTERNS as u16 {
+            pattern_song.patterns.insert(number, pattern.clone());
+        }
+        let pattern_snapshot = pattern_song.clone();
+        assert!(pattern_song.append_pattern(pattern).is_err());
+        assert_eq!(pattern_song, pattern_snapshot);
+
+        let mut arrangement_song = Song::new(&config);
+        arrangement_song.order = vec![0; MAX_ARRANGEMENT_STEPS];
+        let arrangement_snapshot = arrangement_song.clone();
+        assert!(arrangement_song.insert_arrangement_step(0, 0).is_err());
+        assert_eq!(arrangement_song, arrangement_snapshot);
+
+        let mut replacement_song = Song::new(&config);
+        let replacement_snapshot = replacement_song.clone();
+        let invalid = Pattern::new(0, 120, 4, default_pages(&config));
+        assert!(replacement_song.replace_pattern(0, invalid).is_err());
+        assert_eq!(replacement_song, replacement_snapshot);
+    }
+
+    #[test]
     fn pages_schedule_simultaneously_to_independent_devices_and_channels() {
         let c = config();
         let mut song = Song::new(&c);
         pages_mut(&mut song)[0].target = PageTarget::Midi("Hardware A".into());
-        pages_mut(&mut song)[0].channel = 2;
+        pages_mut(&mut song)[0].column_mut(0).channel = 2;
         pages_mut(&mut song)[1].target = PageTarget::Midi("Hardware B".into());
-        pages_mut(&mut song)[1].channel = 11;
+        pages_mut(&mut song)[1].column_mut(0).channel = 11;
         let row = &mut song.patterns.get_mut(&0).unwrap().rows[0];
         row[0].note = Note::On(60);
         row[4].note = Note::On(36);
@@ -2569,9 +3077,9 @@ mod tests {
         c.bank_select = BankSelectMode::Off;
         let mut song = Song::new(&c);
         pages_mut(&mut song)[0].target = PageTarget::Midi("A".into());
-        pages_mut(&mut song)[0].channel = 2;
+        pages_mut(&mut song)[0].column_mut(0).channel = 2;
         pages_mut(&mut song)[1].target = PageTarget::Midi("B".into());
-        pages_mut(&mut song)[1].channel = 7;
+        pages_mut(&mut song)[1].column_mut(0).channel = 7;
         song.patterns.get_mut(&0).unwrap().rows[0][0] = Cell {
             note: Note::On(60),
             program: Some(11),
@@ -2609,9 +3117,9 @@ mod tests {
         let c = config();
         let mut song = Song::new(&c);
         pages_mut(&mut song)[0].target = PageTarget::ActiveInstrument;
-        pages_mut(&mut song)[0].channel = 5;
+        pages_mut(&mut song)[0].column_mut(0).channel = 5;
         pages_mut(&mut song)[1].target = PageTarget::Midi("One box".into());
-        pages_mut(&mut song)[1].channel = 9;
+        pages_mut(&mut song)[1].column_mut(0).channel = 9;
         song.add_page(PageTarget::Midi("One box".into()), 10)
             .unwrap();
         let row = &mut song.patterns.get_mut(&0).unwrap().rows[0];
@@ -2672,5 +3180,210 @@ mod tests {
         assert_eq!(owners[&key], BTreeSet::from([1]));
         assert!(release_note_owner(&mut owners, 1, &target, 3, 60));
         assert!(!owners.contains_key(&key));
+    }
+
+    #[test]
+    fn project_list_ignores_temporary_unrelated_and_directory_entries() {
+        let base = env::temp_dir().join(format!("shsong-list-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("fake.shsong")).unwrap();
+        fs::write(base.join("alpha.shsong"), "project").unwrap();
+        fs::write(base.join("BETA.SHSONG"), "project").unwrap();
+        std::os::unix::fs::symlink(base.join("alpha.shsong"), base.join("alias.shsong")).unwrap();
+        fs::write(base.join(".alpha.123.tmp"), "temporary").unwrap();
+        fs::write(base.join("notes.txt"), "unrelated").unwrap();
+        assert_eq!(list(&base), ["BETA", "alpha"]);
+        assert!(load(&base, "../alpha").is_err());
+        assert!(delete(&base, "../alpha").is_err());
+        assert!(base.join("alpha.shsong").exists());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn in_memory_page_values_and_setup_are_validated_before_save() {
+        let mut song = Song::new(&config());
+        pages_mut(&mut song)[0].column_mut(0).channel = 16;
+        assert!(encode(&song)
+            .unwrap_err()
+            .to_string()
+            .contains("MIDI value"));
+
+        pages_mut(&mut song)[0].column_mut(0).channel = 0;
+        pages_mut(&mut song)[0].setup = vec![Vec::new()];
+        assert!(encode(&song)
+            .unwrap_err()
+            .to_string()
+            .contains("setup message"));
+    }
+
+    #[test]
+    fn schedule_rejects_out_of_range_start_without_zero_time_loop() {
+        let song = Song::new(&config());
+        assert!(schedule(&song, &config(), song.order.len(), 0).is_err());
+        assert!(schedule(&song, &config(), 0, song.patterns[&0].rows.len()).is_err());
+    }
+
+    #[test]
+    fn midi_clock_keeps_twenty_four_ppqn_for_non_divisor_row_grids() {
+        let mut cfg = config();
+        cfg.send_transport = true;
+        cfg.steps_per_beat = 5;
+        let mut song = Song::new(&cfg);
+        song.patterns.get_mut(&0).unwrap().rows.truncate(5);
+        let clocks = schedule(&song, &cfg, 0, 0)
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.bytes == [0xf8])
+            .collect::<Vec<_>>();
+        // Two enabled page targets share one configured destination, so clock
+        // is de-duplicated and sent exactly 24 times per quarter note.
+        assert_eq!(clocks.len(), 24);
+        assert_eq!(clocks.first().unwrap().at, Duration::ZERO);
+        assert!(clocks.last().unwrap().at < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn stopped_lane_cleanup_follows_a_later_pattern_target() {
+        let first = PageTarget::Midi("first".into());
+        let second = PageTarget::Midi("second".into());
+        let mut active = BTreeMap::new();
+        update_active_notes(&mut active, Some(0), Some(&first), &[0x90, 60, 100]);
+        update_active_notes(&mut active, Some(0), Some(&first), &[0x80, 60, 0]);
+        update_active_notes(&mut active, Some(0), Some(&second), &[0x95, 62, 100]);
+        assert_eq!(planned_lane_cleanup(&active), [(second, vec![0x85, 62, 0])]);
+    }
+
+    #[test]
+    fn song_decoder_rejects_oversized_duplicate_and_non_binary_fields() {
+        let encoded = encode(&Song::new(&config())).unwrap();
+        assert!(decode(&encoded.replace("pattern=0|64|", "pattern=0|257|")).is_err());
+        assert!(decode(&encoded.replace("steps=4\n", "steps=4\nsteps=4\n")).is_err());
+        assert!(decode(&encoded.replace("|MELODY|1|", "|MELODY|yes|")).is_err());
+
+        let duplicate_pattern = encoded.replace(
+            "pattern=0|64|120|4\n",
+            "pattern=0|64|120|4\npattern=0|64|120|4\n",
+        );
+        assert!(decode(&duplicate_pattern).is_err());
+    }
+
+    #[test]
+    fn in_memory_song_limits_apply_before_save_or_schedule() {
+        let mut song = Song::new(&config());
+        song.name = "bad\nname".into();
+        assert!(encode(&song).is_err());
+
+        song.name = "bounded".into();
+        song.order = vec![0; MAX_ARRANGEMENT_STEPS + 1];
+        assert!(schedule(&song, &config(), 0, 0).is_err());
+
+        let mut invalid_config = config();
+        invalid_config.channels.clear();
+        assert!(diagnostic(&invalid_config).is_err());
+    }
+
+    #[test]
+    fn version_zero_page_setup_migrates_to_four_identical_columns() {
+        let legacy = "SHSYNTH-SONG 0\nname=legacy\nsteps=4\ngate=80\norder=0\npattern=0|1|120|4\npattern_page=0|0|MELODY|1|3|4|5|6|96|0|configured\npattern_lane=0|0|0|L1|1\npattern_lane=0|0|1|L2|1\npattern_lane=0|0|2|L3|1\npattern_lane=0|0|3|L4|1\n";
+        let song = decode(legacy).unwrap();
+        let page = &song.patterns[&0].pages[0];
+        assert_eq!(
+            page.columns,
+            [ColumnSetup {
+                channel: 2,
+                bank_msb: 4,
+                bank_lsb: 5,
+                program: 6,
+            }; LANES_PER_PAGE]
+        );
+        assert!(encode(&song).unwrap().starts_with("SHSYNTH-SONG 1\n"));
+    }
+
+    #[test]
+    fn four_columns_schedule_distinct_channels_and_master_programs() {
+        let mut cfg = config();
+        cfg.program_changes = true;
+        let mut song = Song::new(&cfg);
+        song.patterns.get_mut(&0).unwrap().pages[1].enabled = false;
+        let pattern = song.patterns.get_mut(&0).unwrap();
+        pattern.rows.truncate(1);
+        for column in 0..LANES_PER_PAGE {
+            pattern.pages[0].columns[column] = ColumnSetup {
+                channel: column as u8,
+                program: 10 + column as u8,
+                ..ColumnSetup::default()
+            };
+            pattern.rows[0][column].note = Note::On(60 + column as u8);
+        }
+        let messages = schedule(&song, &cfg, 0, 0).unwrap();
+        for column in 0..LANES_PER_PAGE {
+            assert!(messages
+                .iter()
+                .any(|message| message.bytes == [0xc0 | column as u8, 10 + column as u8]));
+            assert!(messages
+                .iter()
+                .any(|message| message.bytes == [0x90 | column as u8, 60 + column as u8, 96]));
+        }
+    }
+
+    #[test]
+    fn shared_channel_requires_compatible_master_instruments() {
+        let mut song = Song::new(&config());
+        song.patterns.get_mut(&0).unwrap().pages[1].enabled = false;
+        let page = &mut song.patterns.get_mut(&0).unwrap().pages[0];
+        page.columns = [ColumnSetup {
+            channel: 3,
+            program: 9,
+            ..ColumnSetup::default()
+        }; LANES_PER_PAGE];
+        assert!(song.validate().is_ok());
+        song.patterns.get_mut(&0).unwrap().pages[0]
+            .column_mut(2)
+            .program = 10;
+        assert!(song
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("conflicting"));
+    }
+
+    #[test]
+    fn unused_pattern_deletion_never_rewrites_arrangement() {
+        let mut song = Song::new(&config());
+        let referenced_snapshot = song.clone();
+        assert!(song
+            .delete_unused_pattern(0)
+            .unwrap_err()
+            .to_string()
+            .contains("1 arrangement"));
+        assert_eq!(song, referenced_snapshot);
+        let setup = song.patterns[&0].clone();
+        let orphan = song.append_pattern(setup).unwrap();
+        song.order.pop();
+        let order = song.order.clone();
+        song.delete_unused_pattern(orphan).unwrap();
+        assert_eq!(song.order, order);
+        assert!(!song.patterns.contains_key(&orphan));
+    }
+
+    #[test]
+    fn project_rename_preserves_source_on_invalid_name_or_collision() {
+        let base = std::env::temp_dir().join(format!("shr-rename-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let mut first = Song::new(&config());
+        first.name = "first".into();
+        save(&base, &first, false).unwrap();
+        let mut taken = Song::new(&config());
+        taken.name = "taken".into();
+        save(&base, &taken, false).unwrap();
+        assert!(rename_project(&base, "first", "taken").is_err());
+        assert!(base.join("first.shsong").exists());
+        assert!(rename_project(&base, "first", "bad\nname").is_err());
+        assert!(base.join("first.shsong").exists());
+        let (renamed, path) = rename_project(&base, "first", "My Bass Project").unwrap();
+        assert_eq!(renamed.name, "My Bass Project");
+        assert_eq!(path.file_name().unwrap(), "My-Bass-Project.shsong");
+        assert!(!base.join("first.shsong").exists());
+        let _ = fs::remove_dir_all(base);
     }
 }

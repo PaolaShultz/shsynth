@@ -6,6 +6,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use midir::{Ignore, MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -16,7 +17,7 @@ use std::time::{Duration, Instant};
 #[derive(Debug)]
 pub enum MidiEvent {
     Value(u8, f32),
-    Raw(Vec<u8>),
+    Raw { received: Instant, bytes: Vec<u8> },
     Pad(PadAction, bool),
     Encoder(EncoderAction),
     PadLock(bool),
@@ -44,10 +45,10 @@ pub type SharedTrackerInput = Arc<Mutex<Option<crate::sequencer::LiveInput>>>;
 pub struct TrackerRouteConfig<'a> {
     pub enabled: bool,
     pub target: crate::sequencer::PageTarget,
-    pub channel: u8,
+    pub columns: [(u8, (u8, u8, u8)); crate::sequencer::LANES_PER_PAGE],
+    pub start_column: usize,
     pub percussion: bool,
     pub scale: Option<crate::scale::Scale>,
-    pub selection: (u8, u8, u8),
     pub external: &'a crate::config::ExternalMidiConfig,
 }
 
@@ -55,14 +56,20 @@ pub struct TrackerRouteConfig<'a> {
 pub struct TrackerRoute {
     enabled: bool,
     target: crate::sequencer::PageTarget,
-    channel: u8,
+    columns: [TrackerColumnRoute; crate::sequencer::LANES_PER_PAGE],
+    start_column: usize,
     note_map: [u8; 128],
-    program: Option<u8>,
     bank_select: crate::config::BankSelectMode,
-    bank_msb: u8,
-    bank_lsb: u8,
     scale: Option<crate::scale::Scale>,
     revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TrackerColumnRoute {
+    channel: u8,
+    program: Option<u8>,
+    bank_msb: u8,
+    bank_lsb: u8,
 }
 
 struct CallbackRouting {
@@ -78,12 +85,10 @@ impl Default for TrackerRoute {
         Self {
             enabled: false,
             target: crate::sequencer::PageTarget::ConfiguredExternal,
-            channel: 0,
+            columns: [TrackerColumnRoute::default(); crate::sequencer::LANES_PER_PAGE],
+            start_column: 0,
             note_map: std::array::from_fn(|note| note as u8),
-            program: None,
             bank_select: crate::config::BankSelectMode::Off,
-            bank_msb: 0,
-            bank_lsb: 0,
             scale: None,
             revision: 0,
         }
@@ -95,15 +100,20 @@ impl TrackerRoute {
         self.revision = self.revision.wrapping_add(1);
         self.enabled = config.enabled;
         self.target = config.target;
-        self.channel = config.channel;
+        self.columns = config
+            .columns
+            .map(|(channel, selection)| TrackerColumnRoute {
+                channel,
+                program: config.external.program_changes.then_some(selection.0),
+                bank_msb: selection.1,
+                bank_lsb: selection.2,
+            });
+        self.start_column = config
+            .start_column
+            .min(crate::sequencer::LANES_PER_PAGE - 1);
         self.note_map = std::array::from_fn(|note| note as u8);
         self.scale = config.scale;
-        self.program = config
-            .external
-            .program_changes
-            .then_some(config.selection.0);
         self.bank_select = config.external.bank_select;
-        (self.bank_msb, self.bank_lsb) = (config.selection.1, config.selection.2);
         if config.percussion {
             for (offset, &note) in config.external.percussion_notes.iter().enumerate() {
                 self.note_map[usize::from(config.external.percussion_input_base) + offset] = note;
@@ -116,19 +126,42 @@ impl TrackerRoute {
         }
     }
 
-    fn mapped_note(&self, note: u8) -> u8 {
-        self.note_map[usize::from(note)]
+    fn mapped_note(&self, note: u8) -> Option<u8> {
+        self.note_map.get(usize::from(note)).copied()
+    }
+
+    fn column(&self, index: usize) -> TrackerColumnRoute {
+        self.columns[index % crate::sequencer::LANES_PER_PAGE]
     }
 
     #[cfg(test)]
     pub fn preview_state(&self) -> (bool, Option<u8>, u8, u8) {
-        (self.enabled, self.program, self.bank_msb, self.bank_lsb)
+        let column = self.column(self.start_column);
+        (
+            self.enabled,
+            column.program,
+            column.bank_msb,
+            column.bank_lsb,
+        )
     }
 }
 
 fn tracker_edit_consumes_note(route: Option<&TrackerRoute>, message: &[u8]) -> bool {
-    let note_message = message.len() >= 3 && matches!(message[0] & 0xf0, 0x80 | 0x90);
-    route.is_some_and(|route| route.enabled && note_message)
+    route.is_some_and(|route| route.enabled && valid_note_message(message))
+}
+
+fn valid_note_message(message: &[u8]) -> bool {
+    message.len() == 3
+        && matches!(message[0] & 0xf0, 0x80 | 0x90)
+        && message[1] <= 127
+        && message[2] <= 127
+}
+
+fn invalid_note_message(message: &[u8]) -> bool {
+    message
+        .first()
+        .is_some_and(|status| matches!(status & 0xf0, 0x80 | 0x90))
+        && !valid_note_message(message)
 }
 
 pub struct MidiRouter {
@@ -145,7 +178,7 @@ impl MidiRouter {
         if !config.midi_autoconnect {
             bail!("MIDI routing is disabled in shsynth.conf");
         }
-        let pads = PadConfig::load(&state.join("controller.conf")).unwrap_or_default();
+        let pads = PadConfig::load(&state.join("controller.conf"))?;
         let output = Arc::new(Mutex::new(None));
         let pickup = Arc::new(Mutex::new(crate::midi::Pickup::default()));
         let backend = Arc::new(Mutex::new(BackendKind::Synthv1));
@@ -222,14 +255,15 @@ impl Engine {
         output: SharedOutput,
         config: &RuntimeConfig,
     ) -> Result<Self> {
-        stop_managed(state)?;
         fs::create_dir_all(state)?;
-        let controller = PadConfig::load(&state.join("controller.conf")).unwrap_or_default();
-        let fluid_soundfonts = if preset.backend == BackendKind::FluidSynth {
-            preset::soundfont_offsets(&config.fluidsynth.soundfonts)?
-        } else {
-            Vec::new()
-        };
+        let EnginePreflight {
+            controller,
+            fluid_soundfonts,
+            backend_config,
+            mut command,
+        } = preflight_start(preset, state, config)?;
+
+        stop_managed(state)?;
         if preset.backend == BackendKind::Synthv1 {
             write_synthv1_config(&state.join("config"), &controller)?;
         }
@@ -237,7 +271,6 @@ impl Engine {
             write_fluidsynth_config(state, &fluid_soundfonts)?;
         }
 
-        let backend_config = backend_config(config, preset.backend);
         let log_path = state.join("engine.log");
         let log = OpenOptions::new()
             .create(true)
@@ -245,7 +278,6 @@ impl Engine {
             .write(true)
             .open(&log_path)?;
         let log_err = log.try_clone()?;
-        let mut command = backend_command(preset, state, config)?;
         set_command_affinity(&mut command, config.audio_engine_cpu);
         let mut child = command
             .stdin(if preset.backend == BackendKind::Synthv1 {
@@ -259,10 +291,6 @@ impl Engine {
             .with_context(|| format!("start {}", backend_config.command))?;
         let prepare = (|| -> Result<()> {
             write_owner(&state.join("engine.pid"), child.id() as i32)?;
-            fs::write(
-                state.join("current"),
-                format!("{}\t{}\n", preset.backend.label(), preset.name),
-            )?;
             wait_ready(
                 &mut child,
                 preset.backend,
@@ -286,6 +314,10 @@ impl Engine {
             for source in input_matches {
                 disconnect_direct_midi(source, &backend_config.client_name);
             }
+            fs::write(
+                state.join("current"),
+                format!("{}\t{}\n", preset.backend.label(), preset.name),
+            )?;
             Ok(())
         })();
         if let Err(error) = prepare {
@@ -342,12 +374,6 @@ impl Engine {
         for message in crate::recording::all_notes_off() {
             let _ = self.send(&message);
         }
-        if self.backend == BackendKind::FluidSynth {
-            // CC120 complements All Notes Off by silencing any sustained voice.
-            for channel in 0..16 {
-                let _ = self.send(&[0xb0 | channel, 120, 0]);
-            }
-        }
     }
 
     /// Loads a sound without replacing the process when that backend supports
@@ -356,10 +382,10 @@ impl Engine {
         if preset.backend != self.backend || !self.alive() {
             return Ok(false);
         }
-        self.panic();
         match (&self.backend, &preset.id) {
             (BackendKind::Yoshimi, PresetId::Yoshimi { path }) => {
                 let path = safe_command_path(path)?;
+                self.panic();
                 let stdin = self
                     .stdin
                     .as_mut()
@@ -368,6 +394,8 @@ impl Engine {
                 stdin.flush()?;
             }
             (BackendKind::FluidSynth, PresetId::FluidSynth { .. }) => {
+                fluidsynth_selection(preset, &self.fluid_soundfonts)?;
+                self.panic();
                 self.select_fluidsynth(preset)?;
             }
             _ => return Ok(false),
@@ -397,33 +425,88 @@ impl Engine {
     }
 
     fn select_fluidsynth(&self, preset: &Preset) -> Result<()> {
-        let PresetId::FluidSynth {
-            soundfont,
-            bank,
-            program,
-            ..
-        } = &preset.id
-        else {
-            bail!("not a FluidSynth preset")
-        };
-        let offset = self
-            .fluid_soundfonts
-            .iter()
-            .find_map(|(candidate, offset)| (candidate == soundfont).then_some(*offset))
-            .context("preset SoundFont is not configured for this FluidSynth process")?;
-        let effective_bank = offset
-            .checked_add(*bank)
-            .context("SoundFont bank exceeds the MIDI bank range")?;
-        if effective_bank > 16_383 {
-            bail!("SoundFont bank exceeds the MIDI bank range");
-        }
+        let (effective_bank, program) = fluidsynth_selection(preset, &self.fluid_soundfonts)?;
         for channel in 0..16u8 {
             self.send(&[0xb0 | channel, 0, (effective_bank >> 7) as u8])?;
             self.send(&[0xb0 | channel, 32, (effective_bank & 0x7f) as u8])?;
-            self.send(&[0xc0 | channel, *program])?;
+            self.send(&[0xc0 | channel, program])?;
         }
         Ok(())
     }
+}
+
+struct EnginePreflight {
+    controller: PadConfig,
+    fluid_soundfonts: Vec<(PathBuf, u16)>,
+    backend_config: BackendConfig,
+    command: Command,
+}
+
+pub fn validate_start(preset: &Preset, state: &Path, config: &RuntimeConfig) -> Result<()> {
+    preflight_start(preset, state, config).map(|_| ())
+}
+
+fn preflight_start(
+    preset: &Preset,
+    state: &Path,
+    config: &RuntimeConfig,
+) -> Result<EnginePreflight> {
+    let controller = PadConfig::load(&state.join("controller.conf"))?;
+    initial_values(preset)?;
+    if let PresetId::Yoshimi { path } = &preset.id {
+        if !path.is_file() {
+            bail!("Yoshimi instrument is missing: {}", path.display());
+        }
+    }
+    let fluid_soundfonts = if preset.backend == BackendKind::FluidSynth {
+        preset::soundfont_offsets(&config.fluidsynth.soundfonts)?
+    } else {
+        Vec::new()
+    };
+    for (path, _) in &fluid_soundfonts {
+        safe_command_path(path)?;
+    }
+    if preset.backend == BackendKind::FluidSynth {
+        fluidsynth_selection(preset, &fluid_soundfonts)?;
+    }
+    let backend_config = backend_config(config, preset.backend);
+    if !crate::fsutil::command_exists(&backend_config.command) {
+        bail!(
+            "{} command is unavailable or not executable: {}",
+            preset.backend.label(),
+            backend_config.command
+        );
+    }
+    let command = backend_command(preset, state, config)?;
+    Ok(EnginePreflight {
+        controller,
+        fluid_soundfonts,
+        backend_config,
+        command,
+    })
+}
+
+fn fluidsynth_selection(preset: &Preset, soundfonts: &[(PathBuf, u16)]) -> Result<(u16, u8)> {
+    let PresetId::FluidSynth {
+        soundfont,
+        bank,
+        program,
+        ..
+    } = &preset.id
+    else {
+        bail!("not a FluidSynth preset")
+    };
+    let offset = soundfonts
+        .iter()
+        .find_map(|(candidate, offset)| (candidate == soundfont).then_some(*offset))
+        .context("preset SoundFont is not configured for this FluidSynth process")?;
+    let effective_bank = offset
+        .checked_add(*bank)
+        .context("SoundFont bank exceeds the MIDI bank range")?;
+    if effective_bank > 16_383 {
+        bail!("SoundFont bank exceeds the MIDI bank range");
+    }
+    Ok((effective_bank, *program))
 }
 
 /// Restrict only the managed engine process. The TUI, MIDI routing, and WAV
@@ -611,46 +694,52 @@ fn connect_midi_input(
     let mut input = MidiInput::new("SHR-DAW MIDI input")?;
     input.ignore(Ignore::None);
     let ports = input.ports();
-    let matches = |port: &&midir::MidiInputPort, needles: &[&str]| {
-        input
-            .port_name(port)
-            .map(|name| {
-                let name = name.to_lowercase();
-                needles
-                    .iter()
-                    .any(|needle| name.contains(&needle.to_lowercase()))
-            })
-            .unwrap_or(false)
-    };
-    let configured = pads
-        .input_match
-        .as_ref()
-        .and_then(|wanted| ports.iter().find(|port| matches(port, &[wanted])));
-    let port = configured
-        .or_else(|| {
-            config
-                .midi_input_matches
-                .iter()
-                .find_map(|wanted| ports.iter().find(|port| matches(port, &[wanted])))
-        })
-        .ok_or_else(|| {
-            anyhow!(
-                "MIDI input not found (wanted: {})",
-                config.midi_input_matches.join(", ")
-            )
-        })?;
-    let input_name = input.port_name(port).unwrap_or_default();
+    let names = ports
+        .iter()
+        .map(|port| input.port_name(port).map_err(anyhow::Error::from))
+        .collect::<Result<Vec<_>>>()?;
+    let port_index = if let Some(wanted) = pads.input_match.as_ref() {
+        unique_name_match(&names, wanted, "MIDI input")?
+    } else {
+        let mut selected = None;
+        for wanted in &config.midi_input_matches {
+            if let Some(index) = unique_name_match(&names, wanted, "MIDI input")? {
+                selected = Some(index);
+                break;
+            }
+        }
+        selected
+    }
+    .ok_or_else(|| {
+        let wanted = pads
+            .input_match
+            .as_deref()
+            .map(str::to_owned)
+            .unwrap_or_else(|| config.midi_input_matches.join(", "));
+        anyhow!("MIDI input not found (wanted: {wanted})")
+    })?;
+    let port = &ports[port_index];
+    let input_name = names[port_index].clone();
     let output2 = Arc::clone(&output);
     let mut pad_locked = false;
     let mut lock_pressed = false;
     let mut preview_notes = crate::scale::NoteLifecycle::default();
+    let mut preview_next_column = 0usize;
     let mut preview_programs = std::collections::BTreeMap::new();
+    let mut locked_pad_notes = std::collections::HashMap::new();
     let mut route_revision = 0;
     let connection = input
         .connect(
             port,
             "SHR-DAW monitor",
             move |_stamp, message, _| {
+                let received = Instant::now();
+                if invalid_note_message(message) {
+                    let _ = tx.send(MidiEvent::Error(
+                        "ignored malformed MIDI note message".into(),
+                    ));
+                    return;
+                }
                 let backend = backend
                     .lock()
                     .map(|kind| *kind)
@@ -663,6 +752,8 @@ fn connect_midi_input(
                 if lock_message {
                     lock_pressed = lock_down;
                 }
+                let forced_pad_release =
+                    locked_pad_release(&pads, message, pad_locked, &mut locked_pad_notes);
                 let routed = crate::midi::route_with_pad_lock(&pads, backend, message, pad_locked);
                 let accepted = routed
                     .value
@@ -690,10 +781,10 @@ fn connect_midi_input(
                         .as_ref()
                         .map(|bytes| &bytes[..])
                         .or(routed.forward)
+                        .or_else(|| forced_pad_release.then_some(message))
                     {
                         let status = message.first().copied().unwrap_or(0);
-                        let note_message =
-                            message.len() >= 3 && matches!(status & 0xf0, 0x80 | 0x90);
+                        let note_message = valid_note_message(message);
                         let route = tracker_route.lock().ok().map(|route| route.clone());
                         let tracker_consumes_note =
                             tracker_edit_consumes_note(route.as_ref(), message);
@@ -709,6 +800,8 @@ fn connect_midi_input(
                                 }
                             }
                             route_revision = route.as_ref().map_or(0, |route| route.revision);
+                            preview_next_column =
+                                route.as_ref().map_or(0, |route| route.start_column);
                             preview_programs.clear();
                         }
                         let mut preview = None;
@@ -720,25 +813,31 @@ fn connect_midi_input(
                             if note_off {
                                 preview = preview_notes.note_off(source_channel, source_note);
                             } else if let Some(route) = route.filter(|route| route.enabled) {
-                                let destination = (
-                                    route.target.clone(),
-                                    route.channel,
-                                    route.mapped_note(source_note),
-                                );
+                                let Some(mapped_note) = route.mapped_note(source_note) else {
+                                    return;
+                                };
+                                let column = route.column(preview_next_column);
+                                preview_next_column =
+                                    (preview_next_column + 1) % crate::sequencer::LANES_PER_PAGE;
+                                let destination =
+                                    (route.target.clone(), column.channel, mapped_note);
                                 preview_notes.note_on(
                                     source_channel,
                                     source_note,
                                     destination.clone(),
                                 );
                                 preview = Some(destination);
-                                program = route.program.map(|program| {
-                                    (program, route.bank_select, route.bank_msb, route.bank_lsb)
+                                program = column.program.map(|program| {
+                                    (program, route.bank_select, column.bank_msb, column.bank_lsb)
                                 });
                             }
                         }
                         if let Some((target, channel, note)) = preview {
                             let preview_message = [status & 0xf0 | channel, note, message[2]];
-                            let _ = tx.send(MidiEvent::Raw(preview_message.to_vec()));
+                            let _ = tx.send(MidiEvent::Raw {
+                                received,
+                                bytes: preview_message.to_vec(),
+                            });
                             if let Ok(input) = tracker_input.lock() {
                                 if let Some(input) = input.as_ref() {
                                     if let Some((program, bank_select, bank_msb, bank_lsb)) =
@@ -765,7 +864,10 @@ fn connect_midi_input(
                                 }
                             }
                         } else if !tracker_consumes_note {
-                            let _ = tx.send(MidiEvent::Raw(message.to_vec()));
+                            let _ = tx.send(MidiEvent::Raw {
+                                received,
+                                bytes: message.to_vec(),
+                            });
                             if let Ok(mut output) = output2.lock() {
                                 if let Some(output) = output.as_mut() {
                                     if let Err(error) = output.send(message) {
@@ -793,6 +895,33 @@ fn connect_midi_input(
     Ok(connection)
 }
 
+fn locked_pad_release(
+    pads: &PadConfig,
+    message: &[u8],
+    pad_locked: bool,
+    active: &mut std::collections::HashMap<(u8, u8), usize>,
+) -> bool {
+    if !valid_note_message(message) {
+        return false;
+    }
+    let key = (message[0] & 0x0f, message[1]);
+    let note_on = message[0] & 0xf0 == 0x90 && message[2] > 0;
+    if note_on {
+        if pad_locked && pads.action_state(message).is_some() {
+            *active.entry(key).or_default() += 1;
+        }
+        return false;
+    }
+    let Some(count) = active.get_mut(&key) else {
+        return false;
+    };
+    *count -= 1;
+    if *count == 0 {
+        active.remove(&key);
+    }
+    true
+}
+
 fn disconnect_direct_midi(source: &str, client_name: &str) {
     disconnect_midi_routes(source, &[client_name]);
 }
@@ -802,28 +931,23 @@ fn disconnect_direct_midi(source: &str, client_name: &str) {
 /// never reconfigured.
 pub fn disconnect_midi_routes(source_match: &str, destination_matches: &[&str]) {
     let clients = parse_alsa_clients(&command_lines("aconnect", &["-l"]));
-    let source = clients.iter().find(|(_, name)| {
-        name.to_ascii_lowercase()
-            .contains(&source_match.to_ascii_lowercase())
-    });
-    let Some((source_id, _)) = source else {
+    let Some((source_id, _)) = unique_client_match(&clients, source_match) else {
         return;
     };
-    for (destination_id, name) in &clients {
-        if destination_matches.iter().any(|wanted| {
-            name.to_ascii_lowercase()
-                .contains(&wanted.to_ascii_lowercase())
-        }) {
-            let _ = Command::new("aconnect")
-                .args([
-                    "-d",
-                    &format!("{source_id}:0"),
-                    &format!("{destination_id}:0"),
-                ])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
+    let destination_ids = destination_matches
+        .iter()
+        .filter_map(|wanted| unique_client_match(&clients, wanted).map(|(id, _)| *id))
+        .collect::<std::collections::HashSet<_>>();
+    for destination_id in destination_ids {
+        let _ = Command::new("aconnect")
+            .args([
+                "-d",
+                &format!("{source_id}:0"),
+                &format!("{destination_id}:0"),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
 
@@ -833,25 +957,47 @@ pub fn disconnect_midi_routes(source_match: &str, destination_matches: &[&str]) 
 pub fn retain_midi_destination(source_match: &str, destination_match: &str) {
     let lines = command_lines("aconnect", &["-l"]);
     let clients = parse_alsa_clients(&lines);
-    let Some((source_id, _)) = clients.iter().find(|(_, name)| {
-        name.to_ascii_lowercase()
-            .contains(&source_match.to_ascii_lowercase())
-    }) else {
+    let Some((source_id, _)) = unique_client_match(&clients, source_match) else {
         return;
     };
-    let destination = destination_match.to_ascii_lowercase();
+    let Some((destination_id, _)) = unique_client_match(&clients, destination_match) else {
+        return;
+    };
     for (client, port) in parse_alsa_destinations(&lines, *source_id) {
-        let keep = clients
-            .iter()
-            .find(|(id, _)| *id == client)
-            .is_some_and(|(_, name)| name.to_ascii_lowercase().contains(&destination));
-        if !keep {
+        if client != *destination_id {
             let _ = Command::new("aconnect")
                 .args(["-d", &format!("{source_id}:0"), &format!("{client}:{port}")])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
         }
+    }
+}
+
+fn unique_client_match<'a>(
+    clients: &'a [(u32, String)],
+    wanted: &str,
+) -> Option<&'a (u32, String)> {
+    let wanted = wanted.to_ascii_lowercase();
+    if wanted.is_empty() {
+        return None;
+    }
+    let exact = clients
+        .iter()
+        .filter(|(_, name)| name.to_ascii_lowercase() == wanted)
+        .collect::<Vec<_>>();
+    match exact.as_slice() {
+        [client] => return Some(*client),
+        [] => {}
+        _ => return None,
+    }
+    let partial = clients
+        .iter()
+        .filter(|(_, name)| name.to_ascii_lowercase().contains(&wanted))
+        .collect::<Vec<_>>();
+    match partial.as_slice() {
+        [client] => Some(*client),
+        _ => None,
     }
 }
 
@@ -905,27 +1051,58 @@ fn attach_midi_output(
 ) -> Result<()> {
     let output = MidiOutput::new("SHR-DAW MIDI output")?;
     let ports = output.ports();
-    let port = ports
+    let names = ports
         .iter()
-        .find(|port| {
-            output
-                .port_name(port)
-                .map(|name| name.to_lowercase().contains(&output_match.to_lowercase()))
-                .unwrap_or(false)
-        })
-        .ok_or_else(|| {
-            anyhow!(
-                "{} MIDI output matching {output_match:?} not found",
-                backend.label()
-            )
-        })?;
+        .map(|port| output.port_name(port).map_err(anyhow::Error::from))
+        .collect::<Result<Vec<_>>>()?;
+    let index = unique_name_match(&names, output_match, "MIDI output")?.ok_or_else(|| {
+        anyhow!(
+            "{} MIDI output matching {output_match:?} not found",
+            backend.label()
+        )
+    })?;
     let connection = output
-        .connect(port, "SHR-DAW forward")
+        .connect(&ports[index], "SHR-DAW forward")
         .map_err(|error| anyhow!("connect {} MIDI output: {error}", backend.label()))?;
     *shared
         .lock()
         .map_err(|_| anyhow!("MIDI output lock poisoned"))? = Some(connection);
     Ok(())
+}
+
+fn unique_name_match(names: &[String], wanted: &str, description: &str) -> Result<Option<usize>> {
+    let wanted_lower = wanted.to_ascii_lowercase();
+    if wanted_lower.is_empty() {
+        bail!("{description} match cannot be empty");
+    }
+    let exact = names
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| name.to_ascii_lowercase() == wanted_lower)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let matches = if exact.is_empty() {
+        names
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| name.to_ascii_lowercase().contains(&wanted_lower))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>()
+    } else {
+        exact
+    };
+    match matches.as_slice() {
+        [] => Ok(None),
+        [index] => Ok(Some(*index)),
+        _ => bail!(
+            "{description} match {wanted:?} is ambiguous: {}",
+            matches
+                .iter()
+                .map(|index| names[*index].as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 fn command_lines(program: &str, args: &[&str]) -> Vec<String> {
@@ -1043,36 +1220,72 @@ fn read_owner(path: &Path) -> Option<Owner> {
 }
 
 fn still_owned(owner: &Owner) -> bool {
-    owner_for(owner.pid).is_some_and(|current| current == *owner)
+    owner_for(owner.pid).is_some_and(|current| {
+        current.pid == owner.pid
+            && current.start_time == owner.start_time
+            && same_executable(&owner.executable, &current.executable)
+    })
 }
 
-fn stop_owned(path: &Path, timeout: Duration) {
+fn same_executable(recorded: &Path, current: &Path) -> bool {
+    executable_bytes(recorded) == executable_bytes(current)
+}
+
+fn executable_bytes(path: &Path) -> &[u8] {
+    let bytes = path.as_os_str().as_bytes();
+    bytes.strip_suffix(b" (deleted)").unwrap_or(bytes)
+}
+
+fn stop_owned(path: &Path, timeout: Duration) -> Result<()> {
     let Some(owner) = read_owner(path) else {
         // Legacy bare-PID files are deliberately not trusted: PID reuse could
         // otherwise terminate an unrelated live process.
         let _ = fs::remove_file(path);
-        return;
+        return Ok(());
     };
     if still_owned(&owner) {
-        unsafe {
-            libc::kill(owner.pid, libc::SIGTERM);
-        }
+        signal_owned(&owner, libc::SIGTERM)?;
         let deadline = Instant::now() + timeout;
         while still_owned(&owner) && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(50));
         }
         if still_owned(&owner) {
-            unsafe {
-                libc::kill(owner.pid, libc::SIGKILL);
+            signal_owned(&owner, libc::SIGKILL)?;
+            let kill_deadline = Instant::now() + Duration::from_secs(2);
+            while still_owned(&owner) && Instant::now() < kill_deadline {
+                thread::sleep(Duration::from_millis(25));
+            }
+            if still_owned(&owner) {
+                bail!(
+                    "owned process {} remained alive after forced shutdown",
+                    owner.pid
+                );
             }
         }
     }
-    let _ = fs::remove_file(path);
+    fs::remove_file(path).or_else(|error| {
+        (error.kind() == std::io::ErrorKind::NotFound)
+            .then_some(())
+            .ok_or(error)
+    })?;
+    Ok(())
+}
+
+fn signal_owned(owner: &Owner, signal: libc::c_int) -> Result<()> {
+    let result = unsafe { libc::kill(owner.pid, signal) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(error).with_context(|| format!("signal owned process {}", owner.pid))
 }
 
 pub fn stop_managed(state: &Path) -> Result<()> {
-    stop_owned(&state.join("daemon.pid"), Duration::from_secs(3));
-    stop_owned(&state.join("engine.pid"), Duration::from_secs(2));
+    stop_owned(&state.join("daemon.pid"), Duration::from_secs(3))?;
+    stop_owned(&state.join("engine.pid"), Duration::from_secs(2))?;
     cleanup_state(state);
     Ok(())
 }
@@ -1093,7 +1306,10 @@ pub fn status(state: &Path) -> String {
 
 pub fn daemon(preset: Preset, state: PathBuf, config: RuntimeConfig) -> Result<()> {
     fs::create_dir_all(&state)?;
-    let (tx, _rx) = std::sync::mpsc::channel();
+    let (tx, rx) = std::sync::mpsc::channel();
+    // A daemon has no UI event consumer. Keeping this receiver alive queues a
+    // copy of every MIDI message for the lifetime of the process.
+    drop(rx);
     let router = MidiRouter::start(&state, &config, tx)?;
     if let Ok(mut backend) = router.backend().lock() {
         *backend = preset.backend;
@@ -1130,29 +1346,34 @@ mod tests {
         route.configure(TrackerRouteConfig {
             enabled: true,
             target: crate::sequencer::PageTarget::ConfiguredExternal,
-            channel: 2,
+            columns: [(2, (9, 0, 0)); crate::sequencer::LANES_PER_PAGE],
+            start_column: 0,
             percussion: true,
             scale: None,
-            selection: (9, 0, 0),
             external: &config,
         });
         assert!(route.enabled);
-        assert_eq!(route.channel, 2);
-        assert_eq!(route.program, Some(9));
-        assert_eq!(route.mapped_note(60), 36);
-        assert_eq!(route.mapped_note(61), 38);
-        assert_eq!(route.mapped_note(72), 72);
+        assert_eq!(route.column(0).channel, 2);
+        assert_eq!(route.column(0).program, Some(9));
+        assert_eq!(route.mapped_note(60), Some(36));
+        assert_eq!(route.mapped_note(61), Some(38));
+        assert_eq!(route.mapped_note(72), Some(72));
+        assert_eq!(route.mapped_note(128), None);
         assert!(tracker_edit_consumes_note(Some(&route), &[0x90, 60, 100]));
         assert!(tracker_edit_consumes_note(Some(&route), &[0x90, 60, 0]));
         assert!(tracker_edit_consumes_note(Some(&route), &[0x80, 60, 0]));
         assert!(!tracker_edit_consumes_note(Some(&route), &[0xb0, 1, 64]));
+        assert!(!tracker_edit_consumes_note(Some(&route), &[0x90, 128, 100]));
+        assert!(invalid_note_message(&[0x90, 128, 100]));
+        assert!(invalid_note_message(&[0x80, 60]));
+        assert!(invalid_note_message(&[0x90, 60, 100, 0]));
         route.configure(TrackerRouteConfig {
             enabled: false,
             target: crate::sequencer::PageTarget::ConfiguredExternal,
-            channel: 2,
+            columns: [(2, (9, 0, 0)); crate::sequencer::LANES_PER_PAGE],
+            start_column: 0,
             percussion: true,
             scale: None,
-            selection: (9, 0, 0),
             external: &config,
         });
         assert!(!tracker_edit_consumes_note(Some(&route), &[0x90, 60, 100]));
@@ -1169,14 +1390,14 @@ mod tests {
         route.configure(TrackerRouteConfig {
             enabled: true,
             target: crate::sequencer::PageTarget::ConfiguredExternal,
-            channel: 4,
+            columns: [(4, (0, 0, 0)); crate::sequencer::LANES_PER_PAGE],
+            start_column: 0,
             percussion: false,
             scale: Some(scale),
-            selection: (0, 0, 0),
             external: &config,
         });
-        assert_eq!(route.mapped_note(64), scale.map(64));
-        assert_eq!(route.mapped_note(127), 126);
+        assert_eq!(route.mapped_note(64), Some(scale.map(64)));
+        assert_eq!(route.mapped_note(127), Some(126));
     }
 
     #[test]
@@ -1186,6 +1407,33 @@ mod tests {
             &std::collections::HashMap::from([(74, 0.5), (76, 0.0)]),
         );
         assert_eq!(messages, [[0xb0, 86, 64], [0xb0, 89, 64]]);
+    }
+
+    #[test]
+    fn pad_lock_preserves_note_off_ownership_across_unlock() {
+        let pads = PadConfig {
+            pads: std::collections::HashMap::from([(36, PadAction::Play)]),
+            ..PadConfig::default()
+        };
+        let mut active = std::collections::HashMap::new();
+        assert!(!locked_pad_release(
+            &pads,
+            &[0x92, 36, 100],
+            true,
+            &mut active
+        ));
+        assert!(locked_pad_release(
+            &pads,
+            &[0x82, 36, 0],
+            false,
+            &mut active
+        ));
+        assert!(!locked_pad_release(
+            &pads,
+            &[0x82, 36, 0],
+            false,
+            &mut active
+        ));
     }
 
     #[test]
@@ -1206,6 +1454,36 @@ mod tests {
             ]
         );
         assert_eq!(parse_alsa_destinations(&lines, 133), [(28, 0), (134, 0)]);
+        let clients = parse_alsa_clients(&lines);
+        assert_eq!(
+            unique_client_match(&clients, "AudioBox").map(|client| client.0),
+            Some(28)
+        );
+    }
+
+    #[test]
+    fn runtime_port_matching_prefers_exact_and_rejects_ambiguity() {
+        let names = vec![
+            "Controller MIDI 1".into(),
+            "Controller MIDI 2".into(),
+            "Exact".into(),
+        ];
+        assert_eq!(
+            unique_name_match(&names, "Exact", "MIDI input").unwrap(),
+            Some(2)
+        );
+        assert!(unique_name_match(&names, "Controller", "MIDI input").is_err());
+        assert_eq!(
+            unique_name_match(&names, "missing", "MIDI input").unwrap(),
+            None
+        );
+
+        let clients = vec![(1, "synth-one".into()), (2, "synth-two".into())];
+        assert!(unique_client_match(&clients, "synth").is_none());
+        assert_eq!(
+            unique_client_match(&clients, "synth-one").map(|client| client.0),
+            Some(1)
+        );
     }
 
     #[test]
@@ -1220,11 +1498,23 @@ mod tests {
     }
 
     #[test]
+    fn deleted_executable_suffix_does_not_orphan_a_verified_owner() {
+        assert!(same_executable(
+            Path::new("/usr/bin/shr"),
+            Path::new("/usr/bin/shr (deleted)")
+        ));
+        assert!(!same_executable(
+            Path::new("/usr/bin/shr"),
+            Path::new("/usr/bin/other (deleted)")
+        ));
+    }
+
+    #[test]
     fn verified_owned_process_is_stopped_and_marker_is_cleaned() {
         let dir = std::env::temp_dir().join(format!("shsynth-owned-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let mut child = Command::new("sleep").arg("300").spawn().unwrap();
         write_owner(&dir.join("engine.pid"), child.id() as i32).unwrap();
         stop_managed(&dir).unwrap();
         assert!(child.wait().unwrap().code().is_none());
@@ -1236,5 +1526,40 @@ mod tests {
     fn fluid_bank_selection_encodes_14_bit_mma_banks() {
         let bank = 258u16;
         assert_eq!([(bank >> 7) as u8, (bank & 0x7f) as u8], [2, 2]);
+
+        let path = PathBuf::from("configured.sf2");
+        let preset = Preset {
+            backend: BackendKind::FluidSynth,
+            name: "Program".into(),
+            category: None,
+            id: PresetId::FluidSynth {
+                soundfont: path.clone(),
+                soundfont_index: 0,
+                bank: 2,
+                program: 9,
+            },
+        };
+        assert!(fluidsynth_selection(&preset, &[]).is_err());
+        assert_eq!(
+            fluidsynth_selection(&preset, &[(path, 256)]).unwrap(),
+            (258, 9)
+        );
+    }
+
+    #[test]
+    fn engine_preflight_rejects_an_unavailable_command_without_state_markers() {
+        let base = std::env::temp_dir().join(format!("shsynth-preflight-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let preset_path = base.join("preset.synthv1");
+        fs::write(&preset_path, "<preset/>").unwrap();
+        let preset = Preset::synthv1("test", preset_path);
+        let mut config = RuntimeConfig::default();
+        config.synth_command = base.join("missing-synth").to_string_lossy().into_owned();
+
+        assert!(validate_start(&preset, &base, &config).is_err());
+        assert!(!base.join("engine.pid").exists());
+        assert!(!base.join("current").exists());
+        let _ = fs::remove_dir_all(base);
     }
 }
