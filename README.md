@@ -34,17 +34,17 @@ Play, record, review, and save MIDI ideas.
 
 Edit notes, velocity, programs, gates, and commands.
 
-### FT2 Arrangement
-
-<img src="docs/images/shr-daw-ft2-arrangement.png" alt="FT2 Arrangement screen listing ordered pattern steps" width="100%">
-
-Chain Pattern IDs into the Project timeline.
-
 ### Pattern Pages
 
 <img src="docs/images/shr-daw-ft2-pages.png" alt="FT2 Pattern page routing screen with MIDI channels and targets" width="100%">
 
 Keep routes, channels, lanes, mutes, and targets inside each Pattern.
+
+### FT2 Arrangement
+
+<img src="docs/images/shr-daw-ft2-arrangement.png" alt="FT2 Arrangement screen listing ordered pattern steps" width="100%">
+
+Chain Pattern IDs into the Project timeline.
 
 ### Project Files
 
