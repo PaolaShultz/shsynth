@@ -10,14 +10,14 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "docs" / "images"
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 
-CELL_W = 18
-CELL_H = 28
-PAD_X = 18
-PAD_Y = 16
+FONT_SIZE = 13
+CELL_H = 15
+PAD_X = 12
+PAD_Y = 9
 COLS = 40
 ROWS = 20
-W = COLS * CELL_W + PAD_X * 2
-H = ROWS * CELL_H + PAD_Y * 2
+W = 480
+H = 320
 
 BG = (17, 19, 22)
 PANEL = (24, 27, 31)
@@ -218,10 +218,10 @@ def color_for(line: str, y: int) -> tuple[int, int, int]:
 
 
 def render(name: str, content: list[str]) -> None:
-    font = ImageFont.truetype(FONT, 20)
+    font = ImageFont.truetype(FONT, FONT_SIZE)
     image = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(image)
-    draw.rounded_rectangle((5, 5, W - 5, H - 5), radius=12, fill=PANEL, outline=(46, 51, 57), width=2)
+    draw.rounded_rectangle((3, 3, W - 3, H - 3), radius=8, fill=PANEL, outline=(46, 51, 57), width=1)
     for y, line in enumerate(content):
         x0 = PAD_X
         y0 = PAD_Y + y * CELL_H
