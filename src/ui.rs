@@ -5146,6 +5146,22 @@ fn configure_screenshot(app: &mut App, screen: Screen) {
             for note in [60, 64, 67] {
                 app.held_notes.observe(&[0x90, note, 100]);
             }
+            let originals = [
+                0.72, 0.28, 0.34, 0.46, 0.82, 0.18, 0.42, 0.31, 0.03, 0.36, 0.68, 0.22,
+            ];
+            let values = [
+                0.64, 0.28, 0.46, 0.46, 0.78, 0.25, 0.42, 0.20, 0.03, 0.31, 0.68, 0.29,
+            ];
+            app.original_values = CONTROLS
+                .iter()
+                .zip(originals)
+                .map(|(control, value)| (control.cc, value))
+                .collect();
+            app.values = CONTROLS
+                .iter()
+                .zip(values)
+                .map(|(control, value)| (control.cc, value))
+                .collect();
             app.status = "Playback to review".into();
         }
         Screen::Tracker => {
