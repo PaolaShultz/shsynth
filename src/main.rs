@@ -82,6 +82,7 @@ fn real_main() -> Result<()> {
         "ideas" => ideas_command(&args[1..], &presets, &state, &runtime),
         "pads" => pads_command(&args[1..], &state),
         "casio" => casio_command(&args[1..], &runtime),
+        "phase2-checkpoint" => phase2_checkpoint(&args[1..], &presets, &state, &runtime),
         "start" => {
             let arg = args.get(1).context("usage: shr start PRESET")?;
             let p = preset::resolve(&presets, arg)
@@ -104,6 +105,167 @@ fn real_main() -> Result<()> {
             bail!("unknown command: {other}")
         }
     }
+}
+
+fn phase2_checkpoint(
+    args: &[String],
+    presets: &[preset::Preset],
+    state: &Path,
+    config: &config::RuntimeConfig,
+) -> Result<()> {
+    let selector = args
+        .first()
+        .context("usage: shr phase2-checkpoint PRESET [PROFILE] [SECONDS]")?;
+    let preset = preset::resolve(presets, selector)
+        .with_context(|| format!("unknown preset (use ENGINE:NAME): {selector}"))?;
+    let profile = args.get(1).map(String::as_str).unwrap_or("full");
+    let seconds = args
+        .get(2)
+        .map(|value| value.parse::<u64>())
+        .transpose()?
+        .unwrap_or(10);
+    if !(1..=60).contains(&seconds) {
+        bail!("checkpoint duration must be 1..=60 seconds");
+    }
+    let rack = phase2_rack(profile)?;
+    let mut config = config.clone();
+    config.audio_graph.enabled = true;
+    let maximum_frames = config.audio_graph.maximum_callback_frames as usize;
+    let effect_memory_bytes = rack
+        .effects
+        .iter()
+        .map(|effect| effect_schema::minimum_runtime_memory_bytes(effect.kind, maximum_frames))
+        .sum::<usize>();
+    let graph_buffer_bytes = (rack.order.len() + 2)
+        .saturating_mul(maximum_frames)
+        .saturating_mul(std::mem::size_of::<dsp::StereoFrame>());
+    let (tx, _) = std::sync::mpsc::channel();
+    let router = engine::MidiRouter::start(state, &config, tx)?;
+    let mut engine =
+        engine::Engine::start_with_rack(preset, state, router.output(), &config, &rack)?;
+    let owner_pid = std::process::id();
+    let synth_pid = engine.process_id();
+    let owner_start = process_ticks(owner_pid).unwrap_or(0);
+    let synth_start = process_ticks(synth_pid).unwrap_or(0);
+    let mut owner_rss_kib = process_rss_kib(owner_pid).unwrap_or(0);
+    let mut synth_rss_kib = process_rss_kib(synth_pid).unwrap_or(0);
+    let started = Instant::now();
+    engine.send(&[0x90, 48, 8])?;
+    while started.elapsed() < Duration::from_secs(seconds) {
+        thread::sleep(Duration::from_millis(100));
+        owner_rss_kib = owner_rss_kib.max(process_rss_kib(owner_pid).unwrap_or(0));
+        synth_rss_kib = synth_rss_kib.max(process_rss_kib(synth_pid).unwrap_or(0));
+    }
+    let _ = engine.send(&[0x80, 48, 0]);
+    engine.panic();
+    let elapsed = started.elapsed().as_secs_f64();
+    let owner_ticks = process_ticks(owner_pid)
+        .unwrap_or(owner_start)
+        .saturating_sub(owner_start);
+    let synth_ticks = process_ticks(synth_pid)
+        .unwrap_or(synth_start)
+        .saturating_sub(synth_start);
+    let clock_ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as f64;
+    let cpu_percent = |ticks: u64| ticks as f64 / clock_ticks / elapsed * 100.0;
+    let (timing, restored) = engine
+        .finish_audio_graph_checkpoint()
+        .context("owned graph fell back before checkpoint completed")?;
+    println!(
+        "PROFILE {profile} · effects {} · {elapsed:.3} s",
+        rack.order.len()
+    );
+    println!(
+        "AUDIO GRAPH METRICS · {}",
+        engine::audio_graph_metrics(&timing)
+    );
+    println!(
+        "OWNER CPU {:.2}% · max RSS {} KiB · SYNTH CPU {:.2}% · max RSS {} KiB",
+        cpu_percent(owner_ticks),
+        owner_rss_kib,
+        cpu_percent(synth_ticks),
+        synth_rss_kib
+    );
+    println!(
+        "PREALLOCATED AUDIO ARRAYS · effects {} bytes · graph buffers {} bytes · capacity {} frames",
+        effect_memory_bytes, graph_buffer_bytes, maximum_frames
+    );
+    restored.context("restore exact direct route after checkpoint")?;
+    drop(engine);
+    Ok(())
+}
+
+fn phase2_rack(profile: &str) -> Result<audio_graph::InsertRack> {
+    use audio_graph::EffectKind;
+    let mut rack = audio_graph::InsertRack::default();
+    let mut add = |kind, parameters: &[(&str, f32)]| -> Result<()> {
+        let id = rack
+            .add(kind)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let effect = rack.effect_mut(id).context("new rack effect missing")?;
+        for (name, value) in parameters {
+            effect.parameters.insert((*name).into(), *value);
+        }
+        Ok(())
+    };
+    match profile {
+        "dry" => {}
+        "eq" => add(
+            EffectKind::Eq,
+            &[("low_cut_enabled", 1.0), ("low_cut_hz", 80.0)],
+        )?,
+        "compressor" => add(EffectKind::Compressor, &[("threshold_db", -24.0)])?,
+        "soft-cubic" => add(EffectKind::Distortion, &[("mode", 0.0)])?,
+        "hard-clip" => add(EffectKind::Distortion, &[("mode", 1.0)])?,
+        "asymmetric" => add(EffectKind::Distortion, &[("mode", 2.0)])?,
+        "gate" => add(EffectKind::Gate, &[])?,
+        "filter-lp" => add(EffectKind::Filter, &[("mode", 0.0)])?,
+        "filter-bp" => add(EffectKind::Filter, &[("mode", 1.0)])?,
+        "filter-hp" => add(EffectKind::Filter, &[("mode", 2.0)])?,
+        "crusher" => add(
+            EffectKind::Crusher,
+            &[("bit_depth", 8.0), ("hold_factor", 4.0)],
+        )?,
+        "full" => {
+            add(
+                EffectKind::Eq,
+                &[("low_cut_enabled", 1.0), ("low_cut_hz", 80.0)],
+            )?;
+            add(EffectKind::Compressor, &[("threshold_db", -24.0)])?;
+            add(EffectKind::Distortion, &[("mode", 2.0)])?;
+            add(
+                EffectKind::Crusher,
+                &[("bit_depth", 10.0), ("hold_factor", 2.0)],
+            )?;
+            add(EffectKind::Gate, &[])?;
+            add(EffectKind::Filter, &[("mode", 0.0)])?;
+            add(EffectKind::Eq, &[])?;
+            add(EffectKind::Compressor, &[])?;
+        }
+        _ => bail!("unknown checkpoint profile {profile}"),
+    }
+    rack.validate()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    Ok(rack)
+}
+
+fn process_ticks(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let fields = stat
+        .get(stat.rfind(')')? + 2..)?
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    Some(fields.get(11)?.parse::<u64>().ok()? + fields.get(12)?.parse::<u64>().ok()?)
+}
+
+fn process_rss_kib(pid: u32) -> Option<u64> {
+    fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
 }
 
 fn preset_dir(config: &config::RuntimeConfig) -> Result<PathBuf> {
@@ -227,7 +389,7 @@ fn show_log(state: &Path, count: Option<&String>) -> Result<()> {
 }
 
 fn usage() {
-    println!("Usage: shr [menu|list|status|doctor|start PRESET|stop|log [LINES]|ideas COMMAND|pads COMMAND|casio diagnostic|config init]\n\nController setup: shr pads ports|profiles|auto [PORT]|learn [PORT]|update\nWith no arguments, opens the terminal instrument browser.");
+    println!("Usage: shr [menu|list|status|doctor|start PRESET|stop|log [LINES]|ideas COMMAND|pads COMMAND|casio diagnostic|phase2-checkpoint PRESET [PROFILE] [SECONDS]|config init]\n\nController setup: shr pads ports|profiles|auto [PORT]|learn [PORT]|update\nWith no arguments, opens the terminal instrument browser.");
 }
 
 fn casio_command(args: &[String], config: &config::RuntimeConfig) -> Result<()> {
@@ -663,5 +825,27 @@ mod tests {
         let reconstructed = format!("{}:{}", selected.backend.label(), selected.name);
         assert_eq!(preset::resolve(&presets, &reconstructed), Some(&presets[0]));
         assert_eq!(daemon_args("preset_2"), ["daemon", "preset_2"]);
+    }
+
+    #[test]
+    fn phase_two_checkpoint_profiles_are_strict_and_full_uses_the_chain_bound() {
+        for profile in [
+            "dry",
+            "eq",
+            "compressor",
+            "soft-cubic",
+            "hard-clip",
+            "asymmetric",
+            "gate",
+            "filter-lp",
+            "filter-bp",
+            "filter-hp",
+            "crusher",
+            "full",
+        ] {
+            phase2_rack(profile).unwrap().validate().unwrap();
+        }
+        assert_eq!(phase2_rack("full").unwrap().order.len(), 8);
+        assert!(phase2_rack("future").is_err());
     }
 }

@@ -410,6 +410,16 @@ impl Engine {
         self.audio_graph.as_ref()?.effect_meter(effect_id)
     }
 
+    pub(crate) fn process_id(&self) -> u32 {
+        self.child.id()
+    }
+
+    pub(crate) fn finish_audio_graph_checkpoint(
+        &mut self,
+    ) -> Option<(CallbackTimingSnapshot, Result<()>)> {
+        self.stop_audio_graph()
+    }
+
     /// JACK shutdown notification is callback-safe; route recovery runs here
     /// on the UI/owner thread and touches only the exact managed direct links.
     pub fn poll_audio_graph(&mut self) -> Option<String> {
@@ -1496,7 +1506,7 @@ pub fn daemon(preset: Preset, state: PathBuf, config: RuntimeConfig) -> Result<(
     Ok(())
 }
 
-fn audio_graph_metrics(timing: &CallbackTimingSnapshot) -> String {
+pub(crate) fn audio_graph_metrics(timing: &CallbackTimingSnapshot) -> String {
     format!(
         "callbacks={} mean_us={:.3} p95_us={:.3} p99_us={:.3} max_us={:.3} missed_deadlines={} oversized_callbacks={}",
         timing.callbacks,
