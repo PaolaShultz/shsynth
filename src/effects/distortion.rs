@@ -257,6 +257,18 @@ mod tests {
         2.0 * (real * real + imaginary * imaginary).sqrt() / length
     }
 
+    fn spectral_bin(samples: &[f32], bin: usize) -> f32 {
+        let length = samples.len() as f32;
+        let mut real = 0.0;
+        let mut imaginary = 0.0;
+        for (index, sample) in samples.iter().copied().enumerate() {
+            let phase = 2.0 * PI * bin as f32 * index as f32 / length;
+            real += sample * phase.cos();
+            imaginary -= sample * phase.sin();
+        }
+        2.0 * (real * real + imaginary * imaginary).sqrt() / length
+    }
+
     #[test]
     fn named_transfer_curves_are_bounded_and_distinct() {
         for index in 0..=20_000 {
@@ -303,6 +315,27 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(harmonic(&asymmetric, 2) > 0.01);
+    }
+
+    #[test]
+    fn non_oversampled_high_frequency_alias_is_measured() {
+        let length = 4_096;
+        let fundamental_bin = 900;
+        let third_harmonic_alias_bin = length - fundamental_bin * 3;
+        let samples = (0..length)
+            .map(|index| {
+                let phase = 2.0 * PI * fundamental_bin as f32 * index as f32 / length as f32;
+                transfer(Mode::SoftCubic, phase.sin() * 0.8, 0.0)
+            })
+            .collect::<Vec<_>>();
+        let fundamental = spectral_bin(&samples, fundamental_bin);
+        let alias = spectral_bin(&samples, third_harmonic_alias_bin);
+        let alias_db = 20.0 * (alias / fundamental).log10();
+
+        // At 48 kHz this models a 10.55 kHz input whose 31.64 kHz third
+        // harmonic folds to 16.36 kHz. The explicit bound documents the
+        // product cost of using this inexpensive transfer without oversampling.
+        assert!((-24.1..=-23.8).contains(&alias_db), "{alias_db} dBc");
     }
 
     #[test]
