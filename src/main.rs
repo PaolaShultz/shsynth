@@ -1,3 +1,4 @@
+pub mod audio_graph;
 mod audio_recorder;
 mod chord;
 mod config;
