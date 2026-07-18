@@ -8,6 +8,8 @@ use crate::audio_graph::{EffectInstance, EffectKind};
 use std::collections::BTreeMap;
 use std::fmt;
 
+pub const COMPRESSOR_GAIN_TABLE_STEPS: usize = 2_048;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParameterType {
     Continuous,
@@ -279,6 +281,24 @@ pub fn defaults(kind: EffectKind) -> BTreeMap<String, f32> {
         .collect()
 }
 
+/// Minimum heap storage allocated by one Phase 2 runtime slot. This is derived
+/// from kind and callback capacity; persisted memory claims cannot reduce it.
+pub fn minimum_runtime_memory_bytes(kind: EffectKind, maximum_frames: usize) -> usize {
+    let metering = 2usize
+        .saturating_mul(maximum_frames)
+        .saturating_mul(std::mem::size_of::<crate::dsp::StereoFrame>());
+    let processor = if kind == EffectKind::Compressor {
+        (COMPRESSOR_GAIN_TABLE_STEPS + 1).saturating_mul(std::mem::size_of::<f32>())
+    } else {
+        0
+    };
+    if crate::audio_graph::is_phase_two_insert(kind) {
+        metering.saturating_add(processor)
+    } else {
+        0
+    }
+}
+
 pub fn parameter(effect: &EffectInstance, name: &str) -> Result<f32, SchemaError> {
     let spec = schema(effect.kind)
         .iter()
@@ -391,5 +411,17 @@ mod tests {
         assert!(validate(&phaser).is_err());
         phaser.parameters.insert("stages".into(), 6.0);
         validate(&phaser).unwrap();
+    }
+
+    #[test]
+    fn runtime_memory_is_derived_even_when_persisted_claim_is_zero() {
+        let frames = 128;
+        let meters = 2 * frames * std::mem::size_of::<crate::dsp::StereoFrame>();
+        assert_eq!(minimum_runtime_memory_bytes(EffectKind::Eq, frames), meters);
+        assert_eq!(
+            minimum_runtime_memory_bytes(EffectKind::Compressor, frames),
+            meters + (COMPRESSOR_GAIN_TABLE_STEPS + 1) * std::mem::size_of::<f32>()
+        );
+        assert_eq!(minimum_runtime_memory_bytes(EffectKind::Delay, frames), 0);
     }
 }

@@ -435,8 +435,13 @@ impl GraphDefinition {
             }
             crate::effect_schema::validate(effect)
                 .map_err(|error| GraphError::new(error.to_string()))?;
+            let required_memory = crate::effect_schema::minimum_runtime_memory_bytes(
+                effect.kind,
+                self.maximum_callback_frames as usize,
+            )
+            .max(effect.owned_memory_bytes);
             memory = memory
-                .checked_add(effect.owned_memory_bytes)
+                .checked_add(required_memory)
                 .ok_or_else(|| GraphError::new("effect memory overflow"))?;
             reverbs += usize::from(effect.kind == EffectKind::Reverb);
         }

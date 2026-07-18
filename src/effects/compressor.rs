@@ -2,12 +2,12 @@ use super::{smooth, EffectError, PARAMETER_SMOOTH_SAMPLES};
 use crate::audio_graph::EffectInstance;
 use crate::dsp::{db_to_gain, finite_or_zero, OnePole, OnePoleMode, SmoothedValue, StereoFrame};
 use crate::effect_schema;
+use crate::effect_schema::COMPRESSOR_GAIN_TABLE_STEPS;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 const MIN_DETECTOR_DB: f32 = -120.0;
 const MIN_GAIN_DB: f32 = -96.0;
-const GAIN_TABLE_STEPS: usize = 2_048;
 
 #[derive(Debug, Default)]
 pub struct AtomicGainReduction {
@@ -31,9 +31,9 @@ struct GainTable {
 
 impl GainTable {
     fn new() -> Result<Self, EffectError> {
-        let mut values = Vec::with_capacity(GAIN_TABLE_STEPS + 1);
-        for index in 0..=GAIN_TABLE_STEPS {
-            let db = MIN_GAIN_DB * (1.0 - index as f32 / GAIN_TABLE_STEPS as f32);
+        let mut values = Vec::with_capacity(COMPRESSOR_GAIN_TABLE_STEPS + 1);
+        for index in 0..=COMPRESSOR_GAIN_TABLE_STEPS {
+            let db = MIN_GAIN_DB * (1.0 - index as f32 / COMPRESSOR_GAIN_TABLE_STEPS as f32);
             values.push(db_to_gain(db)?);
         }
         Ok(Self {
@@ -43,10 +43,10 @@ impl GainTable {
 
     #[inline]
     fn gain(&self, db: f32) -> f32 {
-        let normalized =
-            ((db.clamp(MIN_GAIN_DB, 0.0) - MIN_GAIN_DB) / -MIN_GAIN_DB) * GAIN_TABLE_STEPS as f32;
+        let normalized = ((db.clamp(MIN_GAIN_DB, 0.0) - MIN_GAIN_DB) / -MIN_GAIN_DB)
+            * COMPRESSOR_GAIN_TABLE_STEPS as f32;
         let first = normalized.floor() as usize;
-        let second = (first + 1).min(GAIN_TABLE_STEPS);
+        let second = (first + 1).min(COMPRESSOR_GAIN_TABLE_STEPS);
         let fraction = normalized - first as f32;
         self.values[first] + (self.values[second] - self.values[first]) * fraction
     }
