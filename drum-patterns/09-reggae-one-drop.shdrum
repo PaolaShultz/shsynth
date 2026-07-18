@@ -1,0 +1,15 @@
+SHR-DRUM-PATTERN 1
+name=Reggae One Drop
+genre=Reggae
+meter=4
+rows=16
+cell=0|2|42|60|-|-|-
+cell=2|2|42|76|-|-|-
+cell=4|2|42|60|-|-|-
+cell=6|2|42|76|-|-|-
+cell=8|0|36|106|-|-|-
+cell=8|1|38|112|-|-|-
+cell=8|2|42|60|-|-|-
+cell=10|2|42|76|-|-|-
+cell=12|2|42|60|-|-|-
+cell=14|2|46|82|-|-|-

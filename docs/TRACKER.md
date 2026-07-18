@@ -46,8 +46,11 @@ are not deleted.
 ## Step editing
 
 Step entry accepts notes and chords from a MIDI controller. A chord fills up to
-four lanes, keeps its velocities, and moves the cursor to the next row. A
-computer keyboard can enter notes with `Z S X D C V G B H N J M`.
+four lanes and keeps its velocities. The **ADD** controller page chooses a
+persistent advance of 1, 2, 4, or 8 rows for note/chord entry, blank, erase,
+and note-off. This makes evenly spaced bass notes and drum hits quick to enter;
+the FT2 title shows `EDIT +n`. A computer keyboard can enter notes with
+`Z S X D C V G B H N J M` and choose advance with `1`, `2`, `4`, or `8`.
 
 The editor can add a note, note-off, or blank step. It can also change the page
 program and pattern master tempo, mute a lane, and move through rows, lanes,
@@ -154,6 +157,32 @@ cells. When source and destination row counts differ, only overlapping rows are
 pasted and the status line reports truncation. Page paste targets the selected
 destination page; missing destinations are not created implicitly.
 
+## Drum pattern library and transpose
+
+Open **FILES** → **PATTERN** → **DRUMS** for reusable rhythms stored separately
+from Projects. The bundled library has more than 70 authored grooves across
+Rock, Pop, House, Techno, Hip-Hop, Funk, Reggae, Breaks, Latin, and Jazz. The
+**FILTER** page selects genre, 3/4 or 4/4 meter, and phrase length. 4/4 offers
+32/64/128 rows (2/4/8 bars at the default four steps per beat); 3/4 offers the
+matching 24/48/96 rows. Longer choices add alternating-bar changes and
+genre-aware phrase-end fills rather than merely duplicating a filename.
+
+**LOAD** replaces only the current Pattern's first percussion page. Its
+destination, channels, bank/program setup, lane state, tempo, and arrangement
+remain unchanged. An empty melodic Pattern is resized to the selected meter and
+length for the quick load-drums-then-enter-bass workflow. If melodic cells
+already contain data, any load that would resize or change meter is refused.
+
+**SAVE** writes the current percussion page as a non-overwriting `.shdrum` file
+below `${XDG_DATA_HOME:-~/.local/share}/shsynth/drum-patterns/`. **DELETE**
+requires confirmation and applies only to user-saved files; bundled grooves
+are read-only.
+
+The Pattern **TRANS** page moves all note-ons on non-percussion pages by a
+semitone or octave up/down. Percussion pages and note-offs are never changed.
+If any melodic note would leave MIDI range 0–127, the whole transpose is
+refused without changing the Pattern.
+
 ## FT2 Arrangement
 
 Open **TOOLS**, then **ARR** to edit the FT2 Arrangement separately from
@@ -167,9 +196,9 @@ step.
 Patterns can use 8, 16, 32, 64, or 128 rows in 4/4. The matching 3/4 sizes are
 6, 12, 24, 48, or 96 rows.
 
-The Files screen saves, loads, previews, and deletes the whole Project. It also
-keeps compact pattern operations: create, clone, copy, paste, resize, or clear
-a pattern. New patterns are distinct records. Clone copies the selected
+The Files screen saves, loads, previews, and deletes the whole Project. Its
+**PATTERN** child keeps create, clone, copy, paste, resize, clear, transpose,
+and drum-library operations together. New patterns are distinct records. Clone copies the selected
 pattern. Arrangement repeat/duplicate adds another step that references the
 same pattern. **CLEAN** offers only Pattern records with zero Arrangement
 references, confirms deletion, preserves at least one Pattern, and never

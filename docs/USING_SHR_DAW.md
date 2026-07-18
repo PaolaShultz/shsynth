@@ -28,7 +28,9 @@ controls.
 - **Tools** opens page, file, arrangement, loop, and clipboard workflows.
 - **Pages/Tracks** adds four-lane pages, chooses one destination, and edits each
   column's channel, bank, master program, and profile-provided instrument name.
-- **Files** manages Projects and compact pattern operations.
+- **Files** manages Projects; its **Pattern** child groups pattern editing,
+  melody-only transpose, and the separate reusable drum-pattern library. Drum
+  filters choose genre, meter, and 2/4/8-bar phrase size.
 - **Arrange** edits the ordered pattern steps separately from pattern data.
 - **Loop** imports, trims, aligns, and plays a private WAV with the tracker;
   **Library** separately deletes only unreferenced regular WAV files.

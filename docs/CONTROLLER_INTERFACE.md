@@ -14,11 +14,13 @@ implemented.
 | Ideas | Previous/next/first/last idea (keyboard, wheel, encoder); inspect (keyboard/mouse/pad); load with replace confirmation (encoder); play take; delete with repeat confirmation; record/stop MIDI; save timestamped or numbered idea; back/cancel, tracker, audio, presets, panic. |
 | FT2 normal | Previous/next row (keyboard/encoder); order/lane movement; play here/from start; prominent Play/Rec/Edit/N00B MODE page; child Tools screen for pages, files, loop, mute, and page switching. |
 | FT2 record | Record quantized notes into only the current page/current pattern; route live notes only to that page's hardware MIDI target; stop record, stop, exit, and panic remain available. |
-| FT2 edit | All cursor and transport operations; musical keyboard or incoming MIDI note/chord gesture entry; blank/skip; erase; note off; leave edit; lane mute; program and tempo adjustment. Command notes are consumed for editing and never doubled through the synth. |
+| FT2 edit | All cursor and transport operations; musical keyboard or incoming MIDI note/chord gesture entry; blank/skip; erase; note off; 1/2/4/8-row entry advance; leave edit; lane mute. Command notes are consumed for editing and never doubled through the synth. |
 | FT2 N00B | Choose chromatic root plus major/natural minor; map live notes to the nearest scale tone with downward ties; preserve exact note ownership across releases and mode changes. |
 | FT2 loop | Select/import WAV; confirmed Project detach without deleting the private WAV; play here/from start/stop; source BPM and half/normal/double interpretation; start/length cuts in beat or bar units; align child screen for auto bar alignment and one-bar placement shifts. |
 | FT2 cell edit | Transactional note, gate, velocity, per-note program, single command type/parameter, clear-field, confirm/cancel, step-entry handoff, stop, and panic actions. Four-button encoder page selection remains available. |
-| Tracker files | Select saved Project; load; preview/stop; save with overwrite confirmation; create a confirmed blank Project; save a numbered non-overwriting copy; delete with repeat confirmation; new, clone, copy, paste-new, paste-over, clear, or resize FT2 patterns; back/cancel and panic. |
+| Tracker files | Select saved Project; load; preview/stop; save with overwrite confirmation; create a confirmed blank Project; save a numbered non-overwriting copy; delete with repeat confirmation; rename; open the Pattern child; back/cancel and panic. |
+| Pattern tools | New, clone, clear, copy, paste-new, paste-over, or clean unused Patterns; transpose melodic pages by semitone or octave; open reusable drum patterns. |
+| Drum patterns | Filter more than 70 bundled/user rhythms by genre, meter, and 2/4/8-bar size; load into the percussion page; save that page separately; confirmed deletion of user saves only; list navigation. Empty Patterns may adopt the selected shape, while existing melody blocks resizing. |
 | FT2 arrange | Select arrangement step; append/insert current pattern; duplicate/remove step; move step earlier/later; jump to referenced pattern; play from selected step; back and panic. |
 | Pattern setup | Choose 3/4 or 4/4 and pattern size; confirm new/destructive resize, cancel, or clear while retaining the current size. |
 | Page/track manager | Select previous/next page; add four-lane page; edit target; edit channel; confirm all changes; cancel and restore the original song; open files; mute current page. |
@@ -104,16 +106,23 @@ Blank physical positions and wholly empty pages are omitted.
 | FT2 record | Sys | Panic | Stop | Help | Exit |
 | FT2 step edit | Ops | Blank/skip | Erase | N-off | Done |
 | FT2 step edit | Move | Order− | Order+ | Lane− | Lane+ |
-| FT2 step edit | Adjust | Program− | Program+ | Tempo− | Tempo+ |
+| FT2 step edit | Add | 1 row | 2 rows | 4 rows | 8 rows |
 | FT2 step edit | Sys | Panic | Stop | Next page | Exit edit |
 | FT2 cell edit | Ops | Confirm | Step edit | Clear field | Effect type |
 | FT2 cell edit | Fields | Note | Gate | Vel | Program |
 | FT2 cell edit | Adjust | Effect parameter | Value− | Value+ | — |
 | FT2 cell edit | Sys | Panic | Stop | — | Exit/cancel |
 | Files | Ops | Load | Save | Preview/stop | Delete |
-| Files | Pattern | New | Clone | New Project | Save As |
-| Files | Edit | Paste over | Clear | Clean unused | Name/rename |
+| Files | Project | New Project | Save As | Name/rename | Pattern tools |
 | Files | Sys | Panic | Stop | Help | Exit |
+| Pattern tools | Ops | New | Clone | Clear | Drum patterns |
+| Pattern tools | Clip | Copy | Paste new | Paste over | Clean unused |
+| Pattern tools | Trans | Octave− | Semitone− | Semitone+ | Octave+ |
+| Pattern tools | Sys | Panic | Stop | Help | Exit |
+| Drum patterns | Ops | Load | Save | Delete user | — |
+| Drum patterns | Filter | Genre− | Genre+ | Meter | Size |
+| Drum patterns | Move | Page up | Page down | First | Last |
+| Drum patterns | Sys | Panic | Stop | Help | Exit |
 | Arrange | Ops | Play | Jump | Append | Insert |
 | Arrange | Step | Up | Down | Repeat | Remove |
 | Arrange | Sys | Panic | Stop | Help | Exit |

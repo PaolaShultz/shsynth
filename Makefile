@@ -31,6 +31,9 @@ install-files:
 	install -m644 midi-devices/*.json $(DESTDIR)$(PREFIX)/share/shsynth/midi-devices/
 	install -d $(DESTDIR)$(PREFIX)/share/shsynth/controller-profiles
 	install -m644 controller-profiles/*.json $(DESTDIR)$(PREFIX)/share/shsynth/controller-profiles/
+	install -d $(DESTDIR)$(PREFIX)/share/shsynth/drum-patterns
+	install -m644 drum-patterns/*.shdrum $(DESTDIR)$(PREFIX)/share/shsynth/drum-patterns/
+	install -m644 drum-patterns/*.shrdrums $(DESTDIR)$(PREFIX)/share/shsynth/drum-patterns/
 	install -d $(DESTDIR)$(PREFIX)/share/doc/shsynth/images
 	install -m644 LICENSE THIRD_PARTY.md README.md $(DESTDIR)$(PREFIX)/share/doc/shsynth/
 	install -m644 docs/*.md $(DESTDIR)$(PREFIX)/share/doc/shsynth/

@@ -33,7 +33,8 @@ Play, record, review, and save MIDI ideas.
 <img src="docs/images/shr-daw-ft2-pattern.png" alt="FT2 Pattern editor with four lanes of note data" width="100%">
 
 Edit notes, velocity, programs, gates, and commands. Every visible column has
-its own MIDI channel, bank, and master instrument.
+its own MIDI channel, bank, and master instrument. Step entry can advance by
+1, 2, 4, or 8 rows for fast rhythm and bass-line entry.
 
 ### Pattern Pages
 
@@ -47,6 +48,13 @@ setups, plus lanes and mutes, inside each Pattern.
 <img src="docs/images/shr-daw-ft2-arrangement.png" alt="FT2 Arrangement screen listing ordered pattern steps" width="100%">
 
 Chain Pattern IDs into the Project timeline.
+
+### Drum Pattern Library
+
+<img src="docs/images/shr-daw-drum-patterns.png" alt="FT2 drum pattern browser filtered by genre, meter, and phrase size" width="100%">
+
+Choose a genre, 3/4 or 4/4 meter, and a 2/4/8-bar phrase before loading the
+rhythm into the current Pattern's percussion page.
 
 ### Project Files
 
@@ -87,6 +95,9 @@ routes.
 - Routes one MIDI controller to software and hardware instruments.
 - Builds Projects with self-contained FT2 Patterns and an FT2 Arrangement.
 - Provides FT2 Play/Rec/Edit/N00B modes and scale-safe live MIDI input.
+- Filters more than 70 bundled drum grooves by genre, meter, and 2/4/8-bar
+  phrase size, saves drum pages separately, and transposes melodic Pattern
+  pages by semitone or octave.
 - Imports private WAV loops and synchronizes FT2 tempo to them through JACK.
 - Records free playing as reusable MIDI ideas.
 - Records a stereo JACK input as a 24-bit WAV file.
@@ -132,6 +143,8 @@ setup.
   the complete menu map.
 - [Physical connections](docs/CONNECTIONS.md) — simple and expanded hardware
   setups, MIDI paths, and audio paths.
+- [Future improvements](docs/FUTURE_IMPROVEMENTS.md) — intentionally deferred
+  routing extensions and their safety requirements.
 
 ### Install and customize it
 

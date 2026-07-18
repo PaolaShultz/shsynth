@@ -5,6 +5,7 @@ mod control;
 mod controller_learn;
 mod controller_profile;
 mod device_profile;
+mod drum_pattern;
 mod engine;
 mod fsutil;
 mod geometry;

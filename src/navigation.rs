@@ -117,6 +117,10 @@ pub enum Action {
     TrackerSkip,
     TrackerErase,
     TrackerNoteOff,
+    TrackerAdvance1,
+    TrackerAdvance2,
+    TrackerAdvance4,
+    TrackerAdvance8,
     OpenNoteEditor,
     NoteField,
     GateField,
@@ -169,8 +173,6 @@ pub enum Action {
     BankMsbUp,
     BankLsbDown,
     BankLsbUp,
-    TempoDown,
-    TempoUp,
     SaveSong,
     SaveSongAs,
     LoadSong,
@@ -184,6 +186,21 @@ pub enum Action {
     ClearPattern,
     ClearPatternNow,
     DeleteUnusedPattern,
+    OpenPatternTools,
+    OpenDrumPatterns,
+    CopyPattern,
+    PastePatternNew,
+    TransposeDownOctave,
+    TransposeDownSemitone,
+    TransposeUpSemitone,
+    TransposeUpOctave,
+    LoadDrumPattern,
+    SaveDrumPattern,
+    DeleteDrumPattern,
+    DrumGenreDown,
+    DrumGenreUp,
+    DrumMeter,
+    DrumSize,
     CopyLane,
     PasteLane,
     CopyPage,
@@ -279,6 +296,8 @@ pub enum MenuContext {
     PageChannel,
     PatternClear,
     LoopLibrary,
+    PatternTools,
+    DrumPatterns,
 }
 
 const PRESETS: [MenuPage; 4] = [
@@ -647,12 +666,12 @@ const TRACKER_EDIT: [MenuPage; 4] = [
         ],
     ),
     page(
-        "ADJUST",
+        "ADD",
         [
-            on("PROG-", Action::PreviousProgram),
-            on("PROG+", Action::NextProgram),
-            on("TEMPO-", Action::TempoDown),
-            on("TEMPO+", Action::TempoUp),
+            on("1", Action::TrackerAdvance1),
+            on("2", Action::TrackerAdvance2),
+            on("4", Action::TrackerAdvance4),
+            on("8", Action::TrackerAdvance8),
         ],
     ),
     page(
@@ -714,21 +733,89 @@ const FILES: [MenuPage; 4] = [
         ],
     ),
     page(
-        "PATTERN",
+        "PROJECT",
+        [
+            on("NEW PRJ", Action::NewProject),
+            on("SAVE AS", Action::SaveSongAs),
+            on("NAME", Action::RenameProject),
+            on("PATTERN", Action::OpenPatternTools),
+        ],
+    ),
+    page("", [off(""), off(""), off(""), off("")]),
+    page(
+        "SYS",
+        [
+            on("PANIC", Action::StopAll),
+            on("STOP", Action::TrackerStop),
+            on("HELP", Action::OpenHelp),
+            on("EXIT", Action::Back),
+        ],
+    ),
+];
+const PATTERN_TOOLS: [MenuPage; 4] = [
+    page(
+        "OPS",
         [
             on("NEW", Action::NewPattern),
             on("CLONE", Action::ClonePattern),
-            on("NEW PRJ", Action::NewProject),
-            on("SAVE AS", Action::SaveSongAs),
+            on("CLEAR", Action::ClearPattern),
+            on("DRUMS", Action::OpenDrumPatterns),
         ],
     ),
     page(
-        "EDIT",
+        "CLIP",
         [
+            on("COPY", Action::CopyPattern),
+            on("NEW", Action::PastePatternNew),
             on("OVER", Action::PastePatternOver),
-            on("CLEAR", Action::ClearPattern),
             on("CLEAN", Action::DeleteUnusedPattern),
-            on("NAME", Action::RenameProject),
+        ],
+    ),
+    page(
+        "TRANS",
+        [
+            on("OCT-", Action::TransposeDownOctave),
+            on("NOTE-", Action::TransposeDownSemitone),
+            on("NOTE+", Action::TransposeUpSemitone),
+            on("OCT+", Action::TransposeUpOctave),
+        ],
+    ),
+    page(
+        "SYS",
+        [
+            on("PANIC", Action::StopAll),
+            on("STOP", Action::TrackerStop),
+            on("HELP", Action::OpenHelp),
+            on("EXIT", Action::Back),
+        ],
+    ),
+];
+const DRUM_PATTERNS: [MenuPage; 4] = [
+    page(
+        "OPS",
+        [
+            on("LOAD", Action::LoadDrumPattern),
+            on("SAVE", Action::SaveDrumPattern),
+            on("DELETE", Action::DeleteDrumPattern),
+            off(""),
+        ],
+    ),
+    page(
+        "FILTER",
+        [
+            on("GENRE-", Action::DrumGenreDown),
+            on("GENRE+", Action::DrumGenreUp),
+            on("METER", Action::DrumMeter),
+            on("SIZE", Action::DrumSize),
+        ],
+    ),
+    page(
+        "MOVE",
+        [
+            on("PG UP", Action::PageUp),
+            on("PG DOWN", Action::PageDown),
+            on("FIRST", Action::Home),
+            on("LAST", Action::End),
         ],
     ),
     page(
@@ -891,6 +978,8 @@ pub fn pages(screen: Screen, context: MenuContext) -> &'static [MenuPage; 4] {
         (Screen::Tracker, MenuContext::TrackerEdit) => &TRACKER_EDIT,
         (Screen::Tracker, _) => &TRACKER,
         (Screen::TrackerFiles, MenuContext::PatternClear) => &PATTERN_CLEAR,
+        (Screen::TrackerFiles, MenuContext::PatternTools) => &PATTERN_TOOLS,
+        (Screen::TrackerFiles, MenuContext::DrumPatterns) => &DRUM_PATTERNS,
         (Screen::TrackerFiles, _) => &FILES,
         (Screen::TrackerArrange, _) => &ARRANGE,
         (Screen::TrackerPages, MenuContext::PageTarget | MenuContext::PageChannel) => &PAGE_FIELD,
@@ -925,6 +1014,8 @@ mod tests {
                 MenuContext::PageChannel,
                 MenuContext::PatternClear,
                 MenuContext::LoopLibrary,
+                MenuContext::PatternTools,
+                MenuContext::DrumPatterns,
             ] {
                 let menu = pages(screen, context);
                 assert_eq!(menu.len(), 4);
@@ -989,6 +1080,8 @@ mod tests {
             (Screen::Tracker, MenuContext::TrackerNoteEdit),
             (Screen::TrackerFiles, MenuContext::Normal),
             (Screen::TrackerFiles, MenuContext::PatternClear),
+            (Screen::TrackerFiles, MenuContext::PatternTools),
+            (Screen::TrackerFiles, MenuContext::DrumPatterns),
             (Screen::TrackerPages, MenuContext::Normal),
             (Screen::TrackerPages, MenuContext::PageTarget),
             (Screen::TrackerTools, MenuContext::Normal),
@@ -1110,6 +1203,8 @@ mod tests {
             (Screen::Tracker, MenuContext::TrackerNoteEdit),
             (Screen::TrackerFiles, MenuContext::Normal),
             (Screen::TrackerFiles, MenuContext::PatternClear),
+            (Screen::TrackerFiles, MenuContext::PatternTools),
+            (Screen::TrackerFiles, MenuContext::DrumPatterns),
             (Screen::TrackerPages, MenuContext::Normal),
             (Screen::TrackerPages, MenuContext::PageTarget),
             (Screen::TrackerPages, MenuContext::PageChannel),
@@ -1194,8 +1289,6 @@ mod tests {
             Action::BankMsbUp,
             Action::BankLsbDown,
             Action::BankLsbUp,
-            Action::TempoDown,
-            Action::TempoUp,
             Action::SaveSong,
             Action::SaveSongAs,
             Action::LoadSong,

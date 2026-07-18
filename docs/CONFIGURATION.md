@@ -169,6 +169,15 @@ repeat/remove operations live on the separate **ARRANGE** screen. **NAME**
 accepts a printable display name while deriving a safe filename; an existing
 Project is published under the new name without replacing a collision.
 
+Reusable drum patterns are independent `.shdrum` files. Bundled patterns are
+installed below `share/shsynth/drum-patterns/`; controller-created user saves
+go below `${XDG_DATA_HOME}/shsynth/drum-patterns/`. They store four lanes of
+cells plus meter and row count, but deliberately do not store MIDI destinations,
+channels, banks, or programs. Loading therefore keeps the current percussion
+page's hardware routing intact. The installed `.shrdrums` catalog is a compact
+authored collection used to build filtered 24/48/96-row 3/4 and 32/64/128-row
+4/4 phrase variations. It is read-only like the individual bundled grooves.
+
 ## FT2 WAV loop routing and storage
 
 Loop hardware and source locations are configured rather than compiled in:

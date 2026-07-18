@@ -3,6 +3,7 @@ use crate::chord::HeldNotes;
 use crate::config::{BankSelectMode, ExternalMidiConfig, RuntimeConfig};
 use crate::control::{parameter_color, CONTROLS};
 use crate::device_profile::{DeviceProfile, Registry as DeviceProfiles};
+use crate::drum_pattern::{self, DrumPattern};
 use crate::engine::{self, Engine, MidiEvent};
 use crate::geometry::{contains, rect, visible_index};
 use crate::help::{self, HelpKind};
@@ -14,7 +15,7 @@ use crate::scale::{Scale, ScaleKind};
 use crate::sequencer::{
     self, Cell, Command, GestureCapture, Note, PageTarget, Song, LANES_PER_PAGE,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, MouseButton, MouseEvent, MouseEventKind},
     execute,
@@ -165,6 +166,14 @@ enum TrackerMode {
     Noob,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum TrackerFilesMode {
+    #[default]
+    Projects,
+    Patterns,
+    Drums,
+}
+
 impl TrackerMode {
     const fn label(self) -> &'static str {
         match self {
@@ -223,6 +232,7 @@ struct App {
     tracker_row: usize,
     tracker_page: usize,
     tracker_track: usize,
+    tracker_advance: usize,
     tracker_mode: TrackerMode,
     tracker_recording: Option<TrackerRecording>,
     note_editor: Option<NoteEditor>,
@@ -258,6 +268,13 @@ struct App {
     page_clipboard: Option<PageClipboard>,
     confirm_pattern_paste_over: Option<u16>,
     confirm_pattern_delete: Option<u16>,
+    tracker_files_mode: TrackerFilesMode,
+    drum_patterns: Vec<drum_pattern::Entry>,
+    drum_pattern_selected: usize,
+    drum_genre_selected: usize,
+    drum_meter: u8,
+    drum_target_rows: usize,
+    confirm_drum_pattern_delete: Option<PathBuf>,
     loop_library_mode: bool,
     loop_library: Vec<crate::loop_player::LibraryEntry>,
     loop_library_selected: usize,
@@ -349,6 +366,7 @@ impl App {
             tracker_row: 0,
             tracker_page: 0,
             tracker_track: 0,
+            tracker_advance: 1,
             tracker_mode: TrackerMode::Play,
             tracker_recording: None,
             note_editor: None,
@@ -384,6 +402,13 @@ impl App {
             page_clipboard: None,
             confirm_pattern_paste_over: None,
             confirm_pattern_delete: None,
+            tracker_files_mode: TrackerFilesMode::Projects,
+            drum_patterns: drum_pattern::discover(),
+            drum_pattern_selected: 0,
+            drum_genre_selected: 0,
+            drum_meter: 4,
+            drum_target_rows: 32,
+            confirm_drum_pattern_delete: None,
             loop_library_mode: false,
             loop_library: Vec::new(),
             loop_library_selected: 0,
@@ -404,6 +429,12 @@ impl App {
             MenuContext::TrackerEdit
         } else if self.screen == Screen::TrackerFiles && self.confirm_pattern_clear {
             MenuContext::PatternClear
+        } else if self.screen == Screen::TrackerFiles {
+            match self.tracker_files_mode {
+                TrackerFilesMode::Projects => MenuContext::Normal,
+                TrackerFilesMode::Patterns => MenuContext::PatternTools,
+                TrackerFilesMode::Drums => MenuContext::DrumPatterns,
+            }
         } else if self.screen == Screen::TrackerLoop && self.loop_library_mode {
             MenuContext::LoopLibrary
         } else if self.screen == Screen::TrackerPages {
@@ -448,6 +479,9 @@ impl App {
         }
         if action != Action::DeleteUnusedPattern {
             self.confirm_pattern_delete = None;
+        }
+        if action != Action::DeleteDrumPattern {
+            self.confirm_drum_pattern_delete = None;
         }
         if action != Action::NewProject {
             self.confirm_new_project = false;
@@ -905,14 +939,18 @@ impl App {
     fn advance_tracker_row(&mut self) {
         let rows = self.tracker_rows();
         if rows > 0 {
-            self.tracker_row = (self.tracker_row + 1) % rows;
+            self.tracker_row = (self.tracker_row + self.tracker_advance) % rows;
         }
+    }
+    fn set_tracker_advance(&mut self, rows: usize) {
+        self.tracker_advance = rows;
+        self.status = format!("ADD {rows} · note entry and delete advance {rows} row(s)");
     }
     fn tracker_skip(&mut self) {
         if self.tracker_mode == TrackerMode::Edit {
             self.cancel_tracker_gesture();
             self.advance_tracker_row();
-            self.status = "BLANK/SKIP · row advanced".into();
+            self.status = format!("BLANK/SKIP · advanced {} row(s)", self.tracker_advance);
         }
     }
     fn tracker_erase(&mut self) {
@@ -923,7 +961,10 @@ impl App {
         if let Some(cell) = self.tracker_cell_mut() {
             *cell = Cell::default();
             self.advance_tracker_row();
-            self.status = "ERASE · cell cleared · row advanced".into();
+            self.status = format!(
+                "ERASE · cell cleared · advanced {} row(s)",
+                self.tracker_advance
+            );
         }
     }
     fn cancel_tracker_gesture(&mut self) {
@@ -992,7 +1033,7 @@ impl App {
         self.tracker_order = order;
         self.tracker_row = row_index;
         self.advance_tracker_row();
-        self.status = "gesture entered · row advanced".into();
+        self.status = format!("gesture entered · advanced {} row(s)", self.tracker_advance);
     }
     fn set_tracker_edit(&mut self, enabled: bool) {
         self.set_tracker_mode(if enabled {
@@ -2354,6 +2395,279 @@ impl App {
         self.confirm_pattern_paste_over = None;
         self.status = format!("copied pattern {number}");
     }
+    fn open_pattern_tools(&mut self) {
+        self.tracker_files_mode = TrackerFilesMode::Patterns;
+        self.reset_context_page();
+        self.status = format!("pattern {} tools", self.tracker_pattern_number());
+    }
+    fn open_drum_patterns(&mut self) {
+        self.drum_patterns = drum_pattern::discover();
+        self.drum_meter = self.current_meter();
+        let sizes = drum_sizes(self.drum_meter);
+        self.drum_target_rows = sizes
+            .into_iter()
+            .min_by_key(|rows| rows.abs_diff(self.tracker_rows()))
+            .unwrap_or(sizes[0]);
+        self.drum_genre_selected = 0;
+        self.clamp_drum_selection();
+        self.tracker_files_mode = TrackerFilesMode::Drums;
+        self.reset_context_page();
+        self.drum_filter_status();
+    }
+    fn drum_genres(&self) -> Vec<String> {
+        let mut genres = self
+            .drum_patterns
+            .iter()
+            .filter(|entry| entry.meter == self.drum_meter)
+            .map(|entry| entry.genre.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        genres.insert(0, "ALL".into());
+        genres
+    }
+    fn drum_genre(&self) -> String {
+        self.drum_genres()
+            .get(self.drum_genre_selected)
+            .cloned()
+            .unwrap_or_else(|| "ALL".into())
+    }
+    fn filtered_drum_indices(&self) -> Vec<usize> {
+        let genre = self.drum_genre();
+        self.drum_patterns
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                entry.meter == self.drum_meter
+                    && (genre == "ALL" || entry.genre == genre)
+                    && entry.rows <= self.drum_target_rows
+                    && self.drum_target_rows % entry.rows == 0
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+    fn clamp_drum_selection(&mut self) {
+        let filtered = self.filtered_drum_indices();
+        if !filtered.contains(&self.drum_pattern_selected) {
+            self.drum_pattern_selected = filtered.first().copied().unwrap_or(0);
+        }
+    }
+    fn move_drum_selection(&mut self, amount: isize) {
+        let filtered = self.filtered_drum_indices();
+        if filtered.is_empty() {
+            return;
+        }
+        let current = filtered
+            .iter()
+            .position(|index| *index == self.drum_pattern_selected)
+            .unwrap_or(0);
+        let next = current
+            .saturating_add_signed(amount)
+            .min(filtered.len().saturating_sub(1));
+        self.drum_pattern_selected = filtered[next];
+        self.confirm_drum_pattern_delete = None;
+    }
+    fn cycle_drum_genre(&mut self, direction: isize) {
+        let len = self.drum_genres().len();
+        self.drum_genre_selected = if direction < 0 {
+            (self.drum_genre_selected + len - 1) % len
+        } else {
+            (self.drum_genre_selected + 1) % len
+        };
+        self.clamp_drum_selection();
+        self.drum_filter_status();
+    }
+    fn toggle_drum_meter(&mut self) {
+        let old_sizes = drum_sizes(self.drum_meter);
+        let tier = old_sizes
+            .iter()
+            .position(|rows| *rows == self.drum_target_rows)
+            .unwrap_or(0);
+        self.drum_meter = if self.drum_meter == 4 { 3 } else { 4 };
+        self.drum_target_rows = drum_sizes(self.drum_meter)[tier];
+        self.drum_genre_selected = 0;
+        self.clamp_drum_selection();
+        self.drum_filter_status();
+    }
+    fn cycle_drum_size(&mut self) {
+        let sizes = drum_sizes(self.drum_meter);
+        let tier = sizes
+            .iter()
+            .position(|rows| *rows == self.drum_target_rows)
+            .unwrap_or(0);
+        self.drum_target_rows = sizes[(tier + 1) % sizes.len()];
+        self.drum_filter_status();
+    }
+    fn drum_filter_status(&mut self) {
+        self.status = format!(
+            "{} · {}/4 · {} rows · {} groove(s)",
+            self.drum_genre(),
+            self.drum_meter,
+            self.drum_target_rows,
+            self.filtered_drum_indices().len()
+        );
+    }
+    fn transpose_pattern(&mut self, semitones: i8) {
+        self.tracker_stop();
+        let number = self.tracker_pattern_number();
+        let result = self
+            .song
+            .patterns
+            .get_mut(&number)
+            .context("current pattern missing")
+            .and_then(|pattern| pattern.transpose_melodic(semitones));
+        match result {
+            Ok(0) => self.status = "transpose: no melodic notes in current pattern".into(),
+            Ok(notes) => {
+                self.status =
+                    format!("transposed {notes} melodic note(s) {semitones:+} · drums unchanged")
+            }
+            Err(error) => self.status = format!("transpose: {error}"),
+        }
+    }
+    fn percussion_page_index(&self) -> Option<usize> {
+        self.current_pages().iter().position(|page| page.percussion)
+    }
+    fn load_drum_pattern(&mut self) {
+        let Some(entry) = self.drum_patterns.get(self.drum_pattern_selected).cloned() else {
+            self.status = "no drum pattern selected".into();
+            return;
+        };
+        let pattern = match drum_pattern::load(&entry)
+            .and_then(|pattern| drum_pattern::arrange(&pattern, self.drum_target_rows))
+        {
+            Ok(pattern) => pattern,
+            Err(error) => {
+                self.status = format!("drum load: {error}");
+                return;
+            }
+        };
+        let Some(page) = self.percussion_page_index() else {
+            self.status = "drum load: current pattern has no percussion page".into();
+            return;
+        };
+        let number = self.tracker_pattern_number();
+        let target_rows = self.drum_target_rows;
+        let shape_changes =
+            self.current_meter() != pattern.meter || self.tracker_rows() != target_rows;
+        if shape_changes && self.current_pattern_has_other_page_data(page) {
+            self.status = format!(
+                "drum load: {}/4 {target_rows} rows would resize existing page data",
+                pattern.meter
+            );
+            return;
+        }
+        self.tracker_stop();
+        let start = page * LANES_PER_PAGE;
+        if let Some(target) = self.song.patterns.get_mut(&number) {
+            if shape_changes {
+                let lanes = target.total_lanes();
+                target
+                    .rows
+                    .resize(target_rows, vec![Cell::default(); lanes]);
+                target.meter = pattern.meter;
+            }
+            for (row, cells) in target.rows.iter_mut().enumerate() {
+                cells[start..start + LANES_PER_PAGE].copy_from_slice(&pattern.rows[row]);
+            }
+        }
+        self.tracker_page = page;
+        self.tracker_row = 0;
+        self.tracker_track = 0;
+        self.status = format!(
+            "loaded {} · {}/4 · {target_rows} rows · routing unchanged",
+            entry.name, pattern.meter
+        );
+    }
+    fn current_pattern_has_other_page_data(&self, drum_page: usize) -> bool {
+        let Some(pattern) = self.current_pattern() else {
+            return false;
+        };
+        pattern.pages.iter().enumerate().any(|(page, _)| {
+            page != drum_page
+                && pattern.rows.iter().any(|row| {
+                    let start = page * LANES_PER_PAGE;
+                    row[start..start + LANES_PER_PAGE]
+                        .iter()
+                        .any(|cell| *cell != Cell::default())
+                })
+        })
+    }
+    fn save_drum_pattern(&mut self) {
+        let Some(page) = self.percussion_page_index() else {
+            self.status = "drum save: current pattern has no percussion page".into();
+            return;
+        };
+        let start = page * LANES_PER_PAGE;
+        let Some(pattern) = self.current_pattern() else {
+            self.status = "drum save: current pattern missing".into();
+            return;
+        };
+        let existing = self
+            .drum_patterns
+            .iter()
+            .filter(|entry| entry.user)
+            .filter_map(|entry| entry.path.file_stem()?.to_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        let prefix = format!("{}-drums", sequencer::safe_name(&self.song.name));
+        let Some(stem) = next_numbered_song_name(&existing, &prefix) else {
+            self.status = "drum save: pattern numbers exhausted".into();
+            return;
+        };
+        let drum = DrumPattern {
+            name: stem.replace('-', " "),
+            genre: "User".into(),
+            meter: pattern.meter,
+            rows: pattern
+                .rows
+                .iter()
+                .map(|row| {
+                    let mut cells = [Cell::default(); LANES_PER_PAGE];
+                    cells.copy_from_slice(&row[start..start + LANES_PER_PAGE]);
+                    cells
+                })
+                .collect(),
+        };
+        match drum_pattern::save_user(&drum, &stem) {
+            Ok(path) => {
+                self.drum_patterns = drum_pattern::discover();
+                self.drum_pattern_selected = self
+                    .drum_patterns
+                    .iter()
+                    .position(|entry| entry.path == path)
+                    .unwrap_or(0);
+                if let Some(index) = self.drum_genres().iter().position(|genre| genre == "User") {
+                    self.drum_genre_selected = index;
+                }
+                self.status = format!("saved drum pattern {}", path.display());
+            }
+            Err(error) => self.status = format!("drum save: {error}"),
+        }
+    }
+    fn delete_drum_pattern(&mut self) {
+        let Some(entry) = self.drum_patterns.get(self.drum_pattern_selected).cloned() else {
+            self.status = "no drum pattern selected".into();
+            return;
+        };
+        if !entry.user {
+            self.status = "bundled drum patterns cannot be deleted".into();
+            return;
+        }
+        if self.confirm_drum_pattern_delete.as_ref() != Some(&entry.path) {
+            self.confirm_drum_pattern_delete = Some(entry.path);
+            self.status = format!("DELETE {} · press again to confirm", entry.name);
+            return;
+        }
+        match drum_pattern::delete_user(&entry) {
+            Ok(()) => {
+                self.drum_patterns = drum_pattern::discover();
+                self.clamp_drum_selection();
+                self.confirm_drum_pattern_delete = None;
+                self.status = format!("deleted drum pattern {}", entry.name);
+            }
+            Err(error) => self.status = format!("drum delete: {error}"),
+        }
+    }
     fn paste_pattern_new(&mut self) {
         let Some(pattern) = self.pattern_clipboard.clone() else {
             self.status = "pattern clipboard empty".into();
@@ -2689,7 +3003,7 @@ impl App {
                 cell.command = Command::None;
             }
             self.advance_tracker_row();
-            self.status = "NOTE OFF · row advanced".into();
+            self.status = format!("NOTE OFF · advanced {} row(s)", self.tracker_advance);
         }
     }
     fn change_program(&mut self, direction: i8) {
@@ -3542,8 +3856,16 @@ fn perform(
             if a.screen == Screen::Ideas {
                 a.idea_selected = a.idea_selected.saturating_sub(1);
             } else if a.screen == Screen::TrackerFiles {
-                a.song_selected = a.song_selected.saturating_sub(1);
-                a.confirm_song_delete = None;
+                match a.tracker_files_mode {
+                    TrackerFilesMode::Projects => {
+                        a.song_selected = a.song_selected.saturating_sub(1);
+                        a.confirm_song_delete = None;
+                    }
+                    TrackerFilesMode::Drums => {
+                        a.move_drum_selection(-1);
+                    }
+                    TrackerFilesMode::Patterns => {}
+                }
             } else if a.screen == Screen::TrackerArrange {
                 a.select_arrangement_step(-1);
             } else if a.screen == Screen::Tracker {
@@ -3565,8 +3887,17 @@ fn perform(
             if a.screen == Screen::Ideas {
                 a.idea_selected = (a.idea_selected + 1).min(a.ideas.len().saturating_sub(1));
             } else if a.screen == Screen::TrackerFiles {
-                a.song_selected = (a.song_selected + 1).min(a.song_list.len().saturating_sub(1));
-                a.confirm_song_delete = None;
+                match a.tracker_files_mode {
+                    TrackerFilesMode::Projects => {
+                        a.song_selected =
+                            (a.song_selected + 1).min(a.song_list.len().saturating_sub(1));
+                        a.confirm_song_delete = None;
+                    }
+                    TrackerFilesMode::Drums => {
+                        a.move_drum_selection(1);
+                    }
+                    TrackerFilesMode::Patterns => {}
+                }
             } else if a.screen == Screen::TrackerArrange {
                 a.select_arrangement_step(1);
             } else if a.screen == Screen::Tracker {
@@ -3589,6 +3920,10 @@ fn perform(
         Action::PageUp => {
             if a.screen == Screen::Presets {
                 a.selected = a.selected.saturating_sub(10);
+            } else if a.screen == Screen::TrackerFiles
+                && a.tracker_files_mode == TrackerFilesMode::Drums
+            {
+                a.move_drum_selection(-10);
             } else if a.screen == Screen::TrackerLoop && a.loop_library_mode {
                 a.loop_library_selected = a.loop_library_selected.saturating_sub(10);
             }
@@ -3596,6 +3931,10 @@ fn perform(
         Action::PageDown => {
             if a.screen == Screen::Presets {
                 a.selected = (a.selected + 10).min(a.presets.len().saturating_sub(1));
+            } else if a.screen == Screen::TrackerFiles
+                && a.tracker_files_mode == TrackerFilesMode::Drums
+            {
+                a.move_drum_selection(10);
             } else if a.screen == Screen::TrackerLoop && a.loop_library_mode {
                 a.loop_library_selected =
                     (a.loop_library_selected + 10).min(a.loop_library.len().saturating_sub(1));
@@ -3604,6 +3943,12 @@ fn perform(
         Action::Home => {
             if a.screen == Screen::Ideas {
                 a.idea_selected = 0;
+            } else if a.screen == Screen::TrackerFiles
+                && a.tracker_files_mode == TrackerFilesMode::Drums
+            {
+                if let Some(index) = a.filtered_drum_indices().first() {
+                    a.drum_pattern_selected = *index;
+                }
             } else {
                 a.selected = 0;
             }
@@ -3611,6 +3956,12 @@ fn perform(
         Action::End => {
             if a.screen == Screen::Ideas {
                 a.idea_selected = a.ideas.len().saturating_sub(1);
+            } else if a.screen == Screen::TrackerFiles
+                && a.tracker_files_mode == TrackerFilesMode::Drums
+            {
+                if let Some(index) = a.filtered_drum_indices().last() {
+                    a.drum_pattern_selected = *index;
+                }
             } else {
                 a.selected = a.presets.len().saturating_sub(1);
             }
@@ -3641,7 +3992,11 @@ fn perform(
             }
             Screen::Help => a.activate_help(),
             Screen::Tracker => a.tracker_skip(),
-            Screen::TrackerFiles => a.load_song(),
+            Screen::TrackerFiles => match a.tracker_files_mode {
+                TrackerFilesMode::Projects => a.load_song(),
+                TrackerFilesMode::Patterns => {}
+                TrackerFilesMode::Drums => a.load_drum_pattern(),
+            },
             Screen::TrackerArrange => a.arrangement_jump_to_pattern(),
             Screen::TrackerPages => a.confirm_page_manager(),
             Screen::TrackerTools
@@ -3680,6 +4035,7 @@ fn perform(
             a.song_selected = a.song_selected.min(a.song_list.len().saturating_sub(1));
             a.confirm_song_delete = None;
             a.confirm_pattern_clear = false;
+            a.tracker_files_mode = TrackerFilesMode::Projects;
             a.stop_song_preview();
             a.set_screen(Screen::TrackerFiles);
             a.status = "song files · select an action".into();
@@ -3709,6 +4065,24 @@ fn perform(
             a.status = "stereo audio recorder".into();
         }
         Action::Back => {
+            if a.screen == Screen::TrackerFiles {
+                match a.tracker_files_mode {
+                    TrackerFilesMode::Drums => {
+                        a.tracker_files_mode = TrackerFilesMode::Patterns;
+                        a.confirm_drum_pattern_delete = None;
+                        a.reset_context_page();
+                        a.status = format!("pattern {} tools", a.tracker_pattern_number());
+                        return false;
+                    }
+                    TrackerFilesMode::Patterns => {
+                        a.tracker_files_mode = TrackerFilesMode::Projects;
+                        a.reset_context_page();
+                        a.status = "Project files".into();
+                        return false;
+                    }
+                    TrackerFilesMode::Projects => {}
+                }
+            }
             if a.screen == Screen::TrackerLoop && a.loop_library_mode {
                 a.loop_library_mode = false;
                 a.confirm_loop_delete = None;
@@ -3849,6 +4223,8 @@ fn perform(
         Action::PreviewSong => a.preview_song(),
         Action::DeleteSong => a.delete_song(),
         Action::RenameProject => a.begin_project_rename(),
+        Action::OpenPatternTools => a.open_pattern_tools(),
+        Action::OpenDrumPatterns => a.open_drum_patterns(),
         Action::NewPattern => a.new_pattern(),
         Action::ClearPattern => a.choose_pattern_clear(),
         Action::ClearPatternNow => {
@@ -3856,8 +4232,21 @@ fn perform(
             a.clear_pattern_now();
         }
         Action::ClonePattern => a.clone_pattern(),
+        Action::CopyPattern => a.copy_pattern(),
+        Action::PastePatternNew => a.paste_pattern_new(),
         Action::PastePatternOver => a.paste_pattern_over(),
         Action::DeleteUnusedPattern => a.delete_unused_pattern(),
+        Action::TransposeDownOctave => a.transpose_pattern(-12),
+        Action::TransposeDownSemitone => a.transpose_pattern(-1),
+        Action::TransposeUpSemitone => a.transpose_pattern(1),
+        Action::TransposeUpOctave => a.transpose_pattern(12),
+        Action::LoadDrumPattern => a.load_drum_pattern(),
+        Action::SaveDrumPattern => a.save_drum_pattern(),
+        Action::DeleteDrumPattern => a.delete_drum_pattern(),
+        Action::DrumGenreDown => a.cycle_drum_genre(-1),
+        Action::DrumGenreUp => a.cycle_drum_genre(1),
+        Action::DrumMeter => a.toggle_drum_meter(),
+        Action::DrumSize => a.cycle_drum_size(),
         Action::CopyLane => a.copy_lane(),
         Action::PasteLane => a.paste_lane(),
         Action::CopyPage => a.copy_page_block(),
@@ -3880,6 +4269,10 @@ fn perform(
         Action::TrackerSkip => a.tracker_skip(),
         Action::TrackerErase => a.tracker_erase(),
         Action::TrackerNoteOff => a.tracker_note_off(),
+        Action::TrackerAdvance1 => a.set_tracker_advance(1),
+        Action::TrackerAdvance2 => a.set_tracker_advance(2),
+        Action::TrackerAdvance4 => a.set_tracker_advance(4),
+        Action::TrackerAdvance8 => a.set_tracker_advance(8),
         Action::OpenNoteEditor => a.open_note_editor(),
         Action::NoteField
         | Action::GateField
@@ -3914,8 +4307,6 @@ fn perform(
         Action::BankMsbUp => a.change_bank(true, 1),
         Action::BankLsbDown => a.change_bank(false, -1),
         Action::BankLsbUp => a.change_bank(false, 1),
-        Action::TempoDown => a.set_tracker_tempo(a.current_tempo().saturating_sub(1)),
-        Action::TempoUp => a.set_tracker_tempo(a.current_tempo().saturating_add(1)),
         Action::AddPage => a.add_tracker_page(),
         Action::EditPageTarget => a.edit_page_target(),
         Action::EditPageChannel => a.edit_page_channel(),
@@ -4142,6 +4533,17 @@ fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<Mi
             return false;
         }
         if a.tracker_mode == TrackerMode::Edit {
+            let advance = match code {
+                KeyCode::Char('1') => Some(1),
+                KeyCode::Char('2') => Some(2),
+                KeyCode::Char('4') => Some(4),
+                KeyCode::Char('8') => Some(8),
+                _ => None,
+            };
+            if let Some(advance) = advance {
+                a.set_tracker_advance(advance);
+                return false;
+            }
             if let Some(semitone) = tracker_key_note(code) {
                 a.tracker_single_note(a.tracker_keyboard_note(semitone), 96);
                 return false;
@@ -4421,6 +4823,14 @@ const fn pattern_sizes(beats: u8) -> [usize; 5] {
     }
 }
 
+const fn drum_sizes(meter: u8) -> [usize; 3] {
+    if meter == 3 {
+        [24, 48, 96]
+    } else {
+        [32, 64, 128]
+    }
+}
+
 fn nearest_pattern_rows(beats: u8, wanted: usize) -> usize {
     pattern_sizes(beats)
         .into_iter()
@@ -4500,12 +4910,26 @@ fn mouse(
                 }
             } else if a.screen == Screen::TrackerFiles && contains(a.hits.list, m.column, m.row) {
                 a.prepare_confirmation_action(Action::Noop);
-                let offset = a
-                    .song_selected
-                    .saturating_sub(a.hits.list.height.saturating_sub(1) as usize);
+                let filtered = a.filtered_drum_indices();
+                let (selected, len) = if a.tracker_files_mode == TrackerFilesMode::Drums {
+                    (
+                        filtered
+                            .iter()
+                            .position(|index| *index == a.drum_pattern_selected)
+                            .unwrap_or(0),
+                        filtered.len(),
+                    )
+                } else {
+                    (a.song_selected, a.song_list.len())
+                };
+                let offset = selected.saturating_sub(a.hits.list.height.saturating_sub(1) as usize);
                 let i = visible_index(a.hits.list, offset, m.column, m.row).unwrap();
-                if i < a.song_list.len() {
-                    a.song_selected = i;
+                if i < len {
+                    if a.tracker_files_mode == TrackerFilesMode::Drums {
+                        a.drum_pattern_selected = filtered[i];
+                    } else {
+                        a.song_selected = i;
+                    }
                 }
             } else if a.screen == Screen::TrackerLoop
                 && a.loop_library_mode
@@ -5265,15 +5689,17 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         return;
     };
     let state = if a.note_editor.is_some() {
-        "CELL"
+        "CELL".into()
     } else if a.tracker_recording.is_some() {
-        "REC"
+        "REC".into()
     } else if transport.playing {
-        "PLAY"
-    } else if matches!(a.tracker_mode, TrackerMode::Edit | TrackerMode::Noob) {
-        a.tracker_mode.label()
+        "PLAY".into()
+    } else if a.tracker_mode == TrackerMode::Edit {
+        format!("EDIT +{}", a.tracker_advance)
+    } else if a.tracker_mode == TrackerMode::Noob {
+        a.tracker_mode.label().into()
     } else {
-        "STOP"
+        "STOP".into()
     };
     f.render_widget(
         Paragraph::new(truncate(
@@ -5735,6 +6161,54 @@ fn draw_tracker_files<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         );
         return;
     }
+    if a.tracker_files_mode == TrackerFilesMode::Patterns {
+        let pattern = a.current_pattern();
+        let melodic_notes = pattern.map_or(0, |pattern| {
+            pattern
+                .rows
+                .iter()
+                .map(|row| {
+                    pattern
+                        .pages
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, page)| !page.percussion)
+                        .flat_map(|(page, _)| {
+                            let start = page * LANES_PER_PAGE;
+                            &row[start..start + LANES_PER_PAGE]
+                        })
+                        .filter(|cell| matches!(cell.note, Note::On(_)))
+                        .count()
+                })
+                .sum()
+        });
+        let lines = vec![
+            Spans::from(format!("PATTERN {}", a.tracker_pattern_number())),
+            Spans::from(""),
+            Spans::from(format!(
+                "{}/4 · {} rows · {} page(s)",
+                a.current_meter(),
+                a.tracker_rows(),
+                a.current_pages().len()
+            )),
+            Spans::from(format!("{melodic_notes} melodic notes")),
+            Spans::from(""),
+            Spans::from("DRUMS opens reusable rhythm files"),
+            Spans::from("TRANS changes melody, never drums"),
+        ];
+        f.render_widget(
+            Paragraph::new(lines)
+                .alignment(Alignment::Center)
+                .block(Block::default().borders(Borders::ALL)),
+            rect(z.x, z.y + 1, z.width, z.height.saturating_sub(5)),
+        );
+        f.render_widget(
+            Paragraph::new(truncate(&a.status, z.width as usize))
+                .style(Style::default().fg(Color::DarkGray)),
+            rect(z.x, z.y + z.height.saturating_sub(4), z.width, 1),
+        );
+        return;
+    }
     let list = rect(z.x, z.y + 1, z.width, z.height.saturating_sub(5));
     let inner = rect(
         list.x + 1,
@@ -5744,15 +6218,53 @@ fn draw_tracker_files<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     );
     a.hits.list = inner;
     let rows = inner.height as usize;
-    let offset = a.song_selected.saturating_sub(rows.saturating_sub(1));
-    let lines = a
-        .song_list
+    let (selected, names, title) = if a.tracker_files_mode == TrackerFilesMode::Drums {
+        let filtered = a.filtered_drum_indices();
+        let genre = a.drum_genre();
+        (
+            filtered
+                .iter()
+                .position(|index| *index == a.drum_pattern_selected)
+                .unwrap_or(0),
+            filtered
+                .iter()
+                .map(|index| &a.drum_patterns[*index])
+                .map(|entry| {
+                    format!(
+                        "{}{}{}",
+                        if genre == "ALL" {
+                            format!("{} · ", entry.genre)
+                        } else {
+                            String::new()
+                        },
+                        entry.name,
+                        if entry.user { " · USER" } else { "" }
+                    )
+                })
+                .collect::<Vec<_>>(),
+            format!(
+                " {} · {}/4 · {} · {} ",
+                genre,
+                a.drum_meter,
+                a.drum_target_rows,
+                filtered.len()
+            ),
+        )
+    } else {
+        (
+            a.song_selected,
+            a.song_list.clone(),
+            format!(" saved songs · {} ", a.song_list.len()),
+        )
+    };
+    let offset = selected.saturating_sub(rows.saturating_sub(1));
+    let lines = names
         .iter()
         .enumerate()
         .skip(offset)
         .take(rows)
         .map(|(index, name)| {
-            let selected = index == a.song_selected;
+            let selected = index == selected;
             Spans::from(Span::styled(
                 format!("{} {name}", if selected { "▶" } else { " " }),
                 if selected {
@@ -5769,7 +6281,7 @@ fn draw_tracker_files<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     f.render_widget(
         Paragraph::new(lines).block(
             Block::default()
-                .title(format!(" saved songs · {} ", a.song_list.len()))
+                .title(title)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Green)),
         ),
@@ -5777,7 +6289,10 @@ fn draw_tracker_files<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     );
     f.render_widget(
         Paragraph::new(truncate(&a.status, z.width as usize)).style(Style::default().fg(
-            if a.confirm_song_delete.is_some() || a.confirm_pattern_clear {
+            if a.confirm_song_delete.is_some()
+                || a.confirm_pattern_clear
+                || a.confirm_drum_pattern_delete.is_some()
+            {
                 Color::Yellow
             } else {
                 Color::DarkGray
@@ -5878,6 +6393,7 @@ pub fn readme_screenshots_json(config: &RuntimeConfig) -> Result<String> {
         ("shr-daw-ft2-arrangement.png", Screen::TrackerArrange),
         ("shr-daw-ft2-pages.png", Screen::TrackerPages),
         ("shr-daw-project-files.png", Screen::TrackerFiles),
+        ("shr-daw-drum-patterns.png", Screen::TrackerFiles),
         ("shr-daw-ft2-loop.png", Screen::TrackerLoop),
         ("shr-daw-audio-recorder.png", Screen::AudioRecorder),
     ];
@@ -5885,6 +6401,10 @@ pub fn readme_screenshots_json(config: &RuntimeConfig) -> Result<String> {
     for (name, screen) in screens {
         let mut app = screenshot_app(config.clone());
         configure_screenshot(&mut app, screen);
+        if name == "shr-daw-drum-patterns.png" {
+            app.open_pattern_tools();
+            app.open_drum_patterns();
+        }
         let backend = TestBackend::new(40, 20);
         let mut terminal = Terminal::new(backend)?;
         terminal.draw(|frame| draw(frame, &mut app))?;
@@ -7470,7 +7990,7 @@ mod tests {
 
         assert_eq!(a.song.patterns[&0].rows[0][0].note, Note::Empty);
         assert_eq!(a.tracker_row, 1);
-        assert_eq!(a.status, "ERASE · cell cleared · row advanced");
+        assert_eq!(a.status, "ERASE · cell cleared · advanced 1 row(s)");
     }
     #[test]
     fn tracker_file_screen_exposes_confirmed_pattern_clear() {
@@ -7544,6 +8064,88 @@ mod tests {
         assert_eq!(a.song.patterns[&1].rows[0][0].note, Note::On(61));
         a.paste_pattern_over();
         assert_eq!(a.song.patterns[&1].rows[0][0].note, Note::On(60));
+    }
+
+    #[test]
+    fn drum_library_load_repeats_into_percussion_page_and_preserves_routing() {
+        let p = presets();
+        let mut a = app(&p);
+        let path = std::env::temp_dir().join(format!(
+            "shr-drum-load-{}-{}.shdrum",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut drum = DrumPattern {
+            name: "Test groove".into(),
+            genre: "Test".into(),
+            meter: 4,
+            rows: vec![[Cell::default(); LANES_PER_PAGE]; 16],
+        };
+        drum.rows[0][0] = Cell {
+            note: Note::On(36),
+            velocity: Some(111),
+            ..Cell::default()
+        };
+        fs::write(&path, drum_pattern::encode(&drum).unwrap()).unwrap();
+        a.drum_patterns = vec![drum_pattern::Entry {
+            name: drum.name,
+            genre: drum.genre,
+            meter: drum.meter,
+            rows: drum.rows.len(),
+            path: path.clone(),
+            user: false,
+            bundled: None,
+        }];
+        a.drum_target_rows = a.tracker_rows();
+        let percussion = 1;
+        a.song.patterns.get_mut(&0).unwrap().pages[percussion].columns[0].program = 55;
+        a.song.patterns.get_mut(&0).unwrap().rows[3][0].note = Note::On(64);
+        let page_before = a.song.patterns[&0].pages[percussion].clone();
+
+        a.load_drum_pattern();
+
+        let pattern = &a.song.patterns[&0];
+        let lane = percussion * LANES_PER_PAGE;
+        assert_eq!(pattern.rows[0][lane].note, Note::On(36));
+        assert_eq!(pattern.rows[16][lane].note, Note::On(36));
+        assert_eq!(pattern.rows[3][0].note, Note::On(64));
+        assert_eq!(pattern.pages[percussion], page_before);
+        assert!(a.status.contains("routing unchanged"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn drum_filters_map_phrase_sizes_and_protect_existing_melody() {
+        let p = presets();
+        let mut a = app(&p);
+        a.screen = Screen::TrackerFiles;
+        a.open_drum_patterns();
+        assert_eq!((a.drum_meter, a.drum_target_rows), (4, 64));
+        assert!(a.filtered_drum_indices().len() >= 40);
+
+        a.toggle_drum_meter();
+        assert_eq!((a.drum_meter, a.drum_target_rows), (3, 48));
+        assert!(a.filtered_drum_indices().len() >= 20);
+        a.cycle_drum_size();
+        assert_eq!(a.drum_target_rows, 96);
+        a.toggle_drum_meter();
+        assert_eq!((a.drum_meter, a.drum_target_rows), (4, 128));
+
+        a.drum_target_rows = 32;
+        a.clamp_drum_selection();
+        a.load_drum_pattern();
+        assert_eq!(a.tracker_rows(), 32);
+        assert!(a.status.contains("32 rows"));
+
+        a.song.patterns.get_mut(&0).unwrap().rows[0][0].note = Note::On(60);
+        a.drum_target_rows = 64;
+        a.load_drum_pattern();
+        assert_eq!(a.tracker_rows(), 32);
+        assert_eq!(a.song.patterns[&0].rows[0][0].note, Note::On(60));
+        assert!(a.status.contains("would resize existing page data"));
     }
 
     #[test]
@@ -7746,7 +8348,7 @@ mod tests {
     }
 
     #[test]
-    fn encoder_skip_and_paged_erase_and_tempo_actions_remain_available() {
+    fn encoder_skip_and_paged_erase_and_add_actions_remain_available() {
         let p = presets();
         let mut a = app(&p);
         a.screen = Screen::Tracker;
@@ -7757,7 +8359,6 @@ mod tests {
         drain(&rx, &mut a, Path::new("/none"), &tx);
         assert_eq!(a.tracker_row, 1);
         let row = a.tracker_row;
-        let tempo = a.current_tempo();
         a.tracker_cell_mut().unwrap().note = Note::On(70);
         tx.send(MidiEvent::Pad(crate::pads::PadAction::Page1, true))
             .unwrap();
@@ -7768,9 +8369,12 @@ mod tests {
         tx.send(MidiEvent::Pad(crate::pads::PadAction::Item4, true))
             .unwrap();
         drain(&rx, &mut a, Path::new("/none"), &tx);
-        assert_eq!(a.current_tempo(), tempo + 1);
+        assert_eq!(a.tracker_advance, 8);
         assert_eq!(a.tracker_row, (row + 1) % a.tracker_rows());
         assert_eq!(a.song.patterns[&0].rows[row][0].note, Note::Empty);
+        let note_row = a.tracker_row;
+        a.tracker_single_note(60, 96);
+        assert_eq!(a.tracker_row, (note_row + 8) % a.tracker_rows());
         a.select_menu_page(0);
         let b = TestBackend::new(40, 20);
         let mut terminal = Terminal::new(b).unwrap();

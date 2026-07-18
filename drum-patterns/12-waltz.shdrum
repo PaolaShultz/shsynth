@@ -1,0 +1,11 @@
+SHR-DRUM-PATTERN 1
+name=Waltz 3/4
+genre=Jazz
+meter=3
+rows=12
+cell=0|0|36|112|-|-|-
+cell=0|2|42|68|-|-|-
+cell=4|1|38|92|-|-|-
+cell=4|2|42|72|-|-|-
+cell=8|1|38|88|-|-|-
+cell=8|2|46|78|-|-|-

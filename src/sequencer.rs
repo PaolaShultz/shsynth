@@ -182,7 +182,7 @@ impl Command {
 }
 
 impl Cell {
-    pub fn validate(self) -> Result<()> {
+    pub(crate) fn validate(self) -> Result<()> {
         if self.velocity.is_some_and(|value| value > 127)
             || self.program.is_some_and(|value| value > 127)
         {
@@ -585,6 +585,41 @@ impl Pattern {
 
     pub fn total_lanes(&self) -> usize {
         self.pages.len() * LANES_PER_PAGE
+    }
+
+    /// Transpose note-ons on melodic pages as one atomic edit. Percussion
+    /// pages and note-off/empty cells are deliberately unchanged.
+    pub fn transpose_melodic(&mut self, semitones: i8) -> Result<usize> {
+        let melodic_lanes = self
+            .pages
+            .iter()
+            .enumerate()
+            .filter(|(_, page)| !page.percussion)
+            .flat_map(|(page, _)| {
+                let start = page * LANES_PER_PAGE;
+                start..start + LANES_PER_PAGE
+            })
+            .collect::<Vec<_>>();
+        let mut changed = 0;
+        for lane in &melodic_lanes {
+            for cell in &self.rows {
+                if let Note::On(note) = cell[*lane].note {
+                    let shifted = i16::from(note) + i16::from(semitones);
+                    if !(0..=127).contains(&shifted) {
+                        bail!("transpose would move MIDI note {note} outside 0..=127");
+                    }
+                    changed += 1;
+                }
+            }
+        }
+        for lane in melodic_lanes {
+            for row in &mut self.rows {
+                if let Note::On(note) = row[lane].note {
+                    row[lane].note = Note::On((i16::from(note) + i16::from(semitones)) as u8);
+                }
+            }
+        }
+        Ok(changed)
     }
 
     fn validate(&self) -> Result<()> {
@@ -3364,6 +3399,24 @@ mod tests {
         song.delete_unused_pattern(orphan).unwrap();
         assert_eq!(song.order, order);
         assert!(!song.patterns.contains_key(&orphan));
+    }
+
+    #[test]
+    fn transpose_is_atomic_and_never_changes_percussion_pages() {
+        let mut song = Song::new(&config());
+        let pattern = song.patterns.get_mut(&0).unwrap();
+        pattern.rows[0][0].note = Note::On(60);
+        pattern.rows[1][1].note = Note::On(127);
+        pattern.rows[0][LANES_PER_PAGE].note = Note::On(36);
+        let before = pattern.clone();
+        assert!(pattern.transpose_melodic(1).is_err());
+        assert_eq!(pattern, &before);
+
+        pattern.rows[1][1].note = Note::On(72);
+        assert_eq!(pattern.transpose_melodic(12).unwrap(), 2);
+        assert_eq!(pattern.rows[0][0].note, Note::On(72));
+        assert_eq!(pattern.rows[1][1].note, Note::On(84));
+        assert_eq!(pattern.rows[0][LANES_PER_PAGE].note, Note::On(36));
     }
 
     #[test]

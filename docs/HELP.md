@@ -56,7 +56,9 @@ FT2 is a pattern sequencer. PLAY starts at the cursor, START plays from the
 song beginning, and STOP stops only the tracker transport.
 
 EDIT turns incoming notes into pattern data. Encoder press inserts a blank row.
-ERASE clears the selected cell and advances one row. N-OFF writes a note-off.
+The ADD page chooses whether note entry, blank, erase, and note-off advance by
+1, 2, 4, or 8 rows; the FT2 heading shows the active value. N-OFF writes a
+note-off.
 
 CELL edit is transactional. Confirm commits the draft cell; EXIT cancels and
 restores the original value. STOP stops transport without discarding the draft.
@@ -83,6 +85,12 @@ FILES NEW PRJ requires a second press, clears the current unsaved Project, and
 starts the next `project-001` style name. SAVE AS writes and switches to the
 next non-overwriting `<name>-copy-001` file. Pattern Repeat/Remove operations
 remain on the Arrange screen. FILES NAME accepts a display name and safely
+publishes a rename. FILES PATTERN groups pattern create/clone/clear, clipboard,
+and melody-only semitone/octave transpose actions. PATTERN DRUMS loads bundled
+grooves into the percussion page without changing its MIDI route. FILTER picks
+genre, meter, and 32/64/128-row length (24/48/96 in 3/4). Empty Patterns resize;
+existing melody is protected. Saved drum patterns are separate `.shdrum` files;
+only user saves can be deleted.
 renames a saved Project without overwriting another file. FILES CLEAN deletes
 only a zero-reference Pattern and never edits Arrangement steps.
 

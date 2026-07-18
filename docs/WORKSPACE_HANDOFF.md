@@ -53,6 +53,7 @@ Rust paths. The important local paths are:
 - `user/data/shsynth/songs/`: tracker songs;
 - `user/data/shsynth/recordings/`: stereo WAV recordings;
 - `user/data/shsynth/loops/`: privately imported FT2 WAV loops;
+- `user/data/shsynth/drum-patterns/`: user-saved reusable four-lane drum patterns;
 - `user/presets/synthv1/`: cleared copies plus local/legacy presets;
 - `user/downloads/`: private source archives.
 
@@ -113,6 +114,22 @@ interpreted WAV BPM; the WAV is not stretched or pitch-shifted to fit the old
 tempo. The loop player requires the JACK server sample rate to match the WAV
 sample rate, so use JACK setup/restart at 44100 Hz for 44.1 kHz loops when
 needed.
+
+FT2 Edit has a persistent 1/2/4/8-row ADD value used by note/chord entry,
+blank, erase, and note-off. Project Files has a Pattern child for lifecycle,
+clipboard, and atomic melody-only ±1/±12 transpose. Its Drums child loads the
+70-plus authored common-rhythm library into the first percussion page without
+changing routing, and saves user `.shdrum` files below the XDG user-data
+`drum-patterns/` directory. Filters select 10 genres, 3/4 or 4/4, and
+24/48/96 or 32/64/128 rows. Loading may resize an empty melodic Pattern, but
+refuses shape changes once melodic data exists. Bundled drum patterns and the
+compact `.shrdrums` catalog are read-only.
+
+Deferred external-MIDI routing ideas are recorded in
+`docs/FUTURE_IMPROVEMENTS.md`: opt-in multi-target live thru and stable aliases
+for otherwise indistinguishable USB-MIDI adapters. Current FT2 page playback
+already supports simultaneous distinct output targets, including the same MIDI
+channel on different ports; do not broaden normal live thru implicitly.
 
 External MIDI sound names are data-driven. JSON profiles live in
 `midi-devices/` (installed below `share/shsynth/midi-devices/`), while private
