@@ -10,6 +10,7 @@ mod controller_profile;
 mod device_profile;
 mod drum_pattern;
 pub mod dsp;
+pub mod effect_schema;
 mod engine;
 mod fsutil;
 mod geometry;

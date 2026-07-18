@@ -4,6 +4,7 @@ use crate::audio_graph::{
     EffectKind, GraphDefinition, NodeId, NodeKind, SourceKind, MAX_CALLBACK_FRAMES,
 };
 use crate::dsp::{db_to_gain, AtomicMeter, MeterAccumulator, SmoothedValue, StereoFrame};
+use crate::effect_schema;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -233,8 +234,10 @@ impl GraphPlan {
                             "creative effects are not enabled in the dry graph",
                         ));
                     }
-                    let trim = parameter(effect, "trim_db", 0.0, -60.0, 12.0)?;
-                    let pan = parameter(effect, "pan", 0.0, -1.0, 1.0)?;
+                    let trim = effect_schema::parameter(effect, "trim_db")
+                        .map_err(|error| PlanError::new(error.to_string()))?;
+                    let pan = effect_schema::parameter(effect, "pan")
+                        .map_err(|error| PlanError::new(error.to_string()))?;
                     let gain =
                         db_to_gain(trim).map_err(|error| PlanError::new(error.to_string()))?;
                     let (left, right) = stereo_pan_gains(pan);
@@ -399,20 +402,6 @@ fn mix_buffers(buffers: &mut [Box<[StereoFrame]>], source: usize, target: usize,
         output.left = crate::dsp::finite_or_zero(output.left + input.left);
         output.right = crate::dsp::finite_or_zero(output.right + input.right);
     }
-}
-
-fn parameter(
-    effect: &crate::audio_graph::EffectInstance,
-    name: &str,
-    default: f32,
-    minimum: f32,
-    maximum: f32,
-) -> Result<f32, PlanError> {
-    let value = effect.parameters.get(name).copied().unwrap_or(default);
-    if !value.is_finite() || !(minimum..=maximum).contains(&value) {
-        return Err(PlanError::new(format!("invalid utility parameter {name}")));
-    }
-    Ok(value)
 }
 
 fn stereo_pan_gains(pan: f32) -> (f32, f32) {

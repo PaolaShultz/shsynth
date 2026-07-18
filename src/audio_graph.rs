@@ -309,13 +309,8 @@ impl GraphDefinition {
             if effect.version != EFFECT_FORMAT_VERSION {
                 return Err(GraphError::new("unsupported effect version"));
             }
-            if effect.parameters.keys().any(|key| key.trim().is_empty())
-                || effect.parameters.values().any(|value| !value.is_finite())
-            {
-                return Err(GraphError::new(
-                    "effect parameters must be named and finite",
-                ));
-            }
+            crate::effect_schema::validate(effect)
+                .map_err(|error| GraphError::new(error.to_string()))?;
             memory = memory
                 .checked_add(effect.owned_memory_bytes)
                 .ok_or_else(|| GraphError::new("effect memory overflow"))?;
