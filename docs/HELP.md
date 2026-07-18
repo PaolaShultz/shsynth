@@ -2,6 +2,7 @@
 
 [Controller basics](#controller-basics)
 [Presets and playback](#presets-and-playback)
+[Insert effects](#insert-effects)
 [MIDI ideas](#midi-ideas)
 [FT2 tracker](#ft2-tracker)
 [Pages and hardware MIDI](#pages-and-hardware-midi)
@@ -33,6 +34,18 @@ jumps during live audio.
 
 The dots beside synthv1 values compare the current sound to the loaded preset:
 green is lower, yellow is near original, red is higher.
+
+## Insert effects
+
+Playback SOUND FX opens the current Project's ordered insert rack. KIND chooses
+what ADD creates. Select a row to EDIT it; BYPASS fades between processed and
+dry; ORDER moves the same stable instance; REMOVE deletes it.
+
+The editor selects named parameters and adjusts values in physical units. Its
+bottom rows show input/output peak and RMS, clip/non-finite counts, and
+compressor gain reduction when the owned graph is active. Stop transport and
+all recording before changing the rack. The rack is still saved when the
+opt-in audio graph is disabled, but direct playback will not process it.
 
 ## MIDI ideas
 

@@ -10,7 +10,7 @@ implemented.
 | Screen or mode | Existing user-facing operations and input paths |
 |---|---|
 | Presets | Select previous/next, page up/down, first/last (keyboard, wheel, encoder); previous/next engine (keyboard/pads); load selected sound (keyboard, mouse, encoder/pad); tracker, ideas, and audio screens (keyboard/pads); stop synth/panic. Application exit remains keyboard-only. |
-| Playback | Reset the 12 mapped parameters in place (encoder press); record/stop/finish-and-save MIDI, play/stop take, save idea (keyboard/pads/mouse); presets/back, ideas, tracker, audio (keyboard/pads/mouse); tap tempo; stop/panic. The 12 configured synthv1 CC controls continuously adjust parameters with pickup. |
+| Playback | Reset the 12 mapped parameters in place (encoder press); record/stop/finish-and-save MIDI, play/stop take, save idea (keyboard/pads/mouse); presets/back, ideas, tracker, audio, and FX rack; tap tempo; stop/panic. The 12 configured synthv1 CC controls continuously adjust parameters with pickup. |
 | Ideas | Previous/next/first/last idea (keyboard, wheel, encoder); inspect (keyboard/mouse/pad); load with replace confirmation (encoder); play take; delete with repeat confirmation; record/stop MIDI; save timestamped or numbered idea; back/cancel, tracker, audio, presets, panic. |
 | FT2 normal | Previous/next row (keyboard/encoder); order/lane movement; play here/from start; prominent Play/Rec/Edit/N00B MODE page; child Tools screen for pages, files, loop, mute, and page switching. |
 | FT2 record | Record quantized notes into only the current page/current pattern; route live notes only to that page's hardware MIDI target; stop record, stop, exit, and panic remain available. |
@@ -26,6 +26,7 @@ implemented.
 | Page/track manager | Select previous/next page; add four-lane page; edit target; edit channel; confirm all changes; cancel and restore the original song; open files; mute current page. |
 | Target/channel field mode | Previous/next choice, confirm field, cancel field. Encoder turn/press and menu items share these operations. |
 | Audio recorder | Start/toggle recording, stop/finalize, inspect status, back, open presets/ideas/FT2, and panic. |
+| FX rack/editor | Add one of seven Phase 2 insert kinds, select/remove/bypass/reorder stable instances, choose named parameters and adjust strict physical-unit values, inspect peak/RMS/clip/non-finite/gain-reduction meters, return one level, and panic. Structural publication requires stopped transport and no recording. |
 | Help | Compact Markdown user help, temporary LAN web help when port 80 is available, section links selected by the master encoder, page scrolling, top, and return to the previous screen. |
 | Global/safety | Stop MIDI playback, tracker transport, recorder, managed engine, and owned notes; All Notes Off; cancel or leave the current controller level. Application exit remains computer-keyboard-only. Help is also reachable from `?` or F1. Process termination remains limited to the engine owned by SHR-DAW. |
 
@@ -75,9 +76,17 @@ Blank physical positions and wholly empty pages are omitted.
 | Presets | Nav | — | Ideas | FT2 | Audio |
 | Presets | Sys | Panic | Help | — | — |
 | Playback | Ops | Record MIDI | Rec end | Take | Save |
-| Playback | Sound | Reset controls | Finish + save | Tap tempo | — |
+| Playback | Sound | Reset controls | Finish + save | Tap tempo | FX |
 | Playback | Nav | Presets | Ideas | FT2 | Audio |
 | Playback | Sys | Panic | Stop take | Help | Exit |
+| FX rack | Ops | Edit | Add | Bypass | Remove |
+| FX rack | Order | Up | Down | Kind− | Kind+ |
+| FX rack | Nav | Presets | Play/back | FT2 | Audio |
+| FX rack | Sys | Panic | — | Help | Exit |
+| FX editor | Ops | Parameter− | Parameter+ | Value− | Value+ |
+| FX editor | State | Bypass | — | — | — |
+| FX editor | Nav | Rack | — | — | — |
+| FX editor | Sys | Panic | — | Help | Exit |
 | Ideas | Ops | Inspect | Load | Play | Delete |
 | Ideas | Capture | Record | Rec end | Save | First |
 | Ideas | Nav | Presets | Help | FT2 | Audio |

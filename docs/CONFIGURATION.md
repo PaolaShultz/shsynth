@@ -22,11 +22,11 @@ backs up the boot command line, configures JACK affinity and the performance
 governor, and provides a matching `remove` operation. It never starts or
 restarts JACK. Reboot after installing or removing the isolation settings.
 
-## Owned dry audio graph
+## Owned audio graph
 
-Phase 1 includes an opt-in SHR-owned JACK client for one managed software
-instrument. It remains disabled by default after the authorized low-gain
-Raspberry Pi comparison:
+The opt-in SHR-owned JACK client processes one managed software instrument and
+its Project-persisted Phase 2 insert rack. It remains disabled by default after
+the authorized Phase 1 low-gain Raspberry Pi comparison:
 
 ```text
 audio.autoconnect=true
@@ -53,15 +53,18 @@ client releases its own ports. The callback is deactivated before those direct
 links are restored, preventing a final graph block from doubling the source;
 unrelated JACK clients and connections are not changed.
 
-For the authorized checkpoint, an orderly `shr stop` writes the owned graph's
+An orderly `shr stop` writes the owned graph's
 callback count, mean, p95, p99, maximum, missed-deadline count, and oversized
-callback count to the private `engine.log`. This measurement output is not a
-claim that an unmeasured graph or future effect rack is Raspberry Pi safe.
+callback count to the private `engine.log`. The Phase 2 rack/editor is available
+only when the graph is enabled; stopped transport and no active recording are
+required for rack publication. Projects still save their rack while the graph
+is disabled, but direct playback does not process it.
 
 Do not enable this merely to perform a routine setup check. The first
 authorized dry-path comparison is recorded in
-[Phase 1 dry audio graph measurement](PHASE1_AUDIO_GRAPH_MEASUREMENT.md); no
-creative effects are active in this phase.
+[Phase 1 dry audio graph measurement](PHASE1_AUDIO_GRAPH_MEASUREMENT.md). The
+Phase 2 software gate and pending Pi/listening checkpoint are recorded in
+[Phase 2 insert-effects measurement](PHASE2_AUDIO_GRAPH_MEASUREMENT.md).
 
 ## Controller menu layouts
 

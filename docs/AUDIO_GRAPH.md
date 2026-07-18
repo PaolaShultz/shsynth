@@ -2,8 +2,8 @@
 
 This document is the implementation contract for SHR-DAW's owned audio graph
 and lightweight effects rack. It records the stable model and real-time limits
-before the graph becomes responsible for playback. The Phase 1 owned dry client
-is implemented for one managed engine but disabled by default. Its first
+before the graph becomes responsible for playback. The owned client now compiles
+the Phase 2 managed-source insert rack but remains disabled by default. Its first
 authorized Raspberry Pi dry-path checkpoint passed; direct JACK routing remains
 the default and conservative fallback. See
 [Phase 1 dry audio graph measurement](PHASE1_AUDIO_GRAPH_MEASUREMENT.md).
@@ -70,6 +70,12 @@ Effect parameters use stable names and physical units rather than positional
 arrays. Interactive controls clamp to their visible range. Persisted
 parameters must already be finite and valid or the whole proposed graph is
 rejected.
+
+Project format 2 stores a managed-source `InsertRack` as strict JSON inside the
+versioned `.shsong` line format. Formats 0 and 1 migrate to an empty rack.
+Unknown current fields, malformed rack data, and newer Project/effect versions
+are refused on load and on overwrite. Rack order is a separate list of stable
+effect IDs, so moving an effect does not recreate its identity.
 
 ### Typed nodes
 
@@ -140,16 +146,15 @@ steps are calculated before callback use. Every processor guards non-finite
 input, output, and state; a poisoned processor resets and yields a bounded dry
 or silent fallback instead of propagating NaN/infinity.
 
-Structural publication uses a bounded fade down, a generation switch at a
-block boundary, and a fade up. The callback acknowledges the retired
-generation through an atomic value. It never drops an `Arc` or frees retired
-storage. Reorder initially remains stopped-only unless Raspberry Pi evidence
-justifies two-plan live crossfading.
-
-The Phase 1 dry client has only one plan and is activated while transport and
-recording are stopped, so its first publication is the simpler atomic muted-to-
-dry boundary switch. Creative effects and live structural reordering remain
-gated behind later publication/fade work.
+Phase 2 structural publication is intentionally stopped-only. The publish flag
+is cleared and JACK deactivation joins the callback before the control thread
+rebuilds the plan. Compatible kind plus stable instance ID moves the existing
+runtime slot into the replacement plan, retaining recursive DSP, smoothing,
+dither, and meter state. The same client is reactivated and its exact boundary
+transaction is rechecked before output is armed. A failure restores the direct
+fallback; no old and new callback plan can run together. Live two-plan
+crossfading remains future work and is not implied by the current stopped-only
+workflow.
 
 ## Shared DSP foundation
 
@@ -177,8 +182,13 @@ unknown names, non-finite values, invalid discrete choices, and values outside
 the declared physical range reject the complete graph. `src/effects/` provides
 fixed runtime slots with stable instance identity, finite dry fallback,
 click-conscious bypass, reset, and separate input/output peak/RMS, clip, and
-non-finite meters. Creative processors are enabled in that slot only after
-their own deterministic and response-measurement gate passes.
+non-finite meters. The Phase 2 EQ, compressor, distortion, crusher/reducer,
+gate, and multimode filter have passed their deterministic software response
+gates and are available in the managed insert rack. The compact rack/editor
+uses four controller pages, with `OPS` first and `EXIT` at page 4/item 4, and
+shows input and output peak/RMS, clipping, non-finite counts, and compressor
+gain reduction. Their Raspberry Pi whole-chain and human-curation gate remains
+documented in [Phase 2 audio graph measurement](PHASE2_AUDIO_GRAPH_MEASUREMENT.md).
 
 The dry client additionally publishes allocation-free callback count, total,
 mean, maximum, missed-deadline, and oversized-callback counters. One fixed

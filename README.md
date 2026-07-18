@@ -121,6 +121,9 @@ routes.
 - Imports private WAV loops and synchronizes FT2 tempo to them through JACK.
 - Records free playing as reusable MIDI ideas.
 - Records a stereo JACK input as a 24-bit WAV file.
+- Provides a project-persisted, ordered eight-slot insert rack with EQ,
+  compressor, distortion, gate, multimode filter, bitcrusher/sample-rate
+  reducer, and utility processing when the owned audio graph is enabled.
 - Works from a computer keyboard or a small physical controller.
 
 SHR-DAW is designed as a portable music box. It is not tied to one controller,
@@ -143,12 +146,14 @@ be running before loading a software instrument, playing a WAV loop, or
 recording audio. The setup wizard helps choose MIDI and audio ports, but it
 does not start or restart JACK.
 
-The new SHR-owned dry audio graph remains opt-in and disabled by default. Its
-authorized Raspberry Pi dry-path checkpoint passed with bit-exact stereo output
-and no callback deadline misses; creative effects are not enabled yet. Direct
-synth playback remains the fallback if graph validation, activation, or an
-exact JACK connection fails; see the [audio graph contract](docs/AUDIO_GRAPH.md)
-and [Phase 1 measurement](docs/PHASE1_AUDIO_GRAPH_MEASUREMENT.md).
+The SHR-owned audio graph remains opt-in and disabled by default. Its authorized
+Raspberry Pi dry-path checkpoint passed with bit-exact stereo output and no
+callback deadline misses. Phase 2's bounded insert processors and compact FX
+editors are implemented; their final Raspberry Pi performance/listening gate
+is still recorded separately. Direct synth playback remains the fallback if
+graph validation, activation, or an exact JACK connection fails; see the
+[audio graph contract](docs/AUDIO_GRAPH.md), [Phase 1 measurement](docs/PHASE1_AUDIO_GRAPH_MEASUREMENT.md),
+and [Phase 2 measurement](docs/PHASE2_AUDIO_GRAPH_MEASUREMENT.md).
 
 Read [Installation](docs/INSTALLATION.md) for supported systems and installer
 options. Then follow [First run](docs/FIRST_RUN.md) to configure and test your

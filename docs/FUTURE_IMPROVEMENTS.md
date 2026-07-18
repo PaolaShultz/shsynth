@@ -14,12 +14,62 @@ existing arbitrary row-count scheduler and a transactional Length editor, so a
 loaded drum groove can be cropped freely and committed once without repetitive
 confirmation dialogs.
 
+## Unreasonable but useful challenges
+
+These are moonshots, not release promises. They exist because a tiny music box
+should occasionally attempt something delightfully excessive, and because a
+good stunt can expose weaknesses that polite test material never finds.
+
+### The Space Shuttle challenge: decode a Danny Carey performance
+
+Privately import a short, legally obtained excerpt from a Tool recording that
+features Danny Carey, then ask SHR-DAW to analyze the full mix and build an
+editable drum track from what it hears. The name is intentionally unserious;
+the engineering challenge is not.
+
+The experiment should:
+
+1. detect likely drum transients without assuming a steady 4/4 grid;
+2. propose tempo regions, irregular phrase ends, and groupings such as
+   `2+2+3`, while showing uncertainty rather than inventing certainty;
+3. separate kick, snare, hat/cymbal, and other-percussion candidates into the
+   four tracker lanes;
+4. retain estimated velocity and early/late timing instead of flattening the
+   performance onto a rigid grid;
+5. let the user audition, correct, shorten, grow, regroup, and simplify the
+   result; and
+6. derive a new, playable SHR-DAW groove that demonstrates what the analysis
+   taught us without requiring the source recording during playback.
+
+This challenge depends on the arbitrary-length, microtiming, swing, groove,
+and expressive-capture work in the [post-competition rhythm
+plan](POST_COMPETITION_RHYTHM_PLAN.md). Offline analysis must remain separate
+from the real-time audio callback and must have bounded input length, memory,
+and CPU use. A mixed commercial master may prevent reliable instrument
+separation, so a useful partial transcription with visible confidence is a
+valid result; pretending it is exact is not.
+
+The imported audio and an exact derived transcription remain private below the
+user-data boundary unless their redistribution rights are established. They
+must not be committed, packaged, embedded in a demo, or presented as project
+content. A public result must use newly authored/cleared audio and a genuinely
+original groove rather than redistributing the Tool excerpt or a note-for-note
+copy of the performance.
+
+Success is not “replace Danny Carey.” Success is that SHR-DAW can inspect one
+famously demanding rhythmic performance, explain its best hypothesis in plain
+language, turn that hypothesis into editable tracker data, and help a musician
+make something new. If the little box survives the Space Shuttle challenge,
+ordinary drum loops should feel like a pleasant afternoon.
+
 ## Audio effects graph: inserts, sends, and returns
 
-Implementation has begun with the shared JACK boundary, pure DSP foundations,
-and durable model/limit contract in [Audio graph and DSP
-contract](AUDIO_GRAPH.md). The routing and listening behavior below remains
-deferred until its phase gates pass.
+Phase 2 now includes the managed-source ordered insert rack, its essential
+processors, strict Project persistence, stopped structural publication, compact
+editors, and meters. Its software evidence and still-pending Pi/listening gate
+are in [Phase 2 insert-effects measurement](PHASE2_AUDIO_GRAPH_MEASUREMENT.md).
+Master inserts, auxes, hardware loops, and Phase 3 time/modulation processors
+below remain deferred until their phase gates pass.
 
 ### Product idea
 
@@ -155,8 +205,11 @@ than attempt a whole suite. Candidates to compare are:
 - a filter or restrained drive insert with parameter smoothing; and
 - chorus or reverb only after the simpler graph is stable and measured.
 
-No static analysis can establish that an effect sounds good. Codex may propose
-algorithms and safe ranges; the human must perform low-gain musical evaluation.
+Objective DSP measurement can establish whether an effect meets its declared
+response, curve, timing, stability, artifact, and real-time targets. It cannot
+decide the remaining musical preference question. Codex provides a technical
+recommendation from those measurements; the human performs the final low-gain,
+level-matched musical curation.
 
 ### Raspberry Pi metric plan
 
