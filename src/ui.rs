@@ -1,3 +1,4 @@
+use crate::audio_graph::{EffectId, EffectKind, InsertRack};
 use crate::audio_recorder::{AudioRecorder, RecorderStatus};
 use crate::chord::HeldNotes;
 use crate::config::{BankSelectMode, ExternalMidiConfig, RuntimeConfig};
@@ -43,6 +44,28 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CPU_TEMPERATURE_REFRESH: Duration = Duration::from_secs(10);
 const HELP_TEXT_WIDTH: usize = 38;
+const PHASE_TWO_EFFECTS: [EffectKind; 7] = [
+    EffectKind::Eq,
+    EffectKind::Compressor,
+    EffectKind::Distortion,
+    EffectKind::Gate,
+    EffectKind::Filter,
+    EffectKind::Crusher,
+    EffectKind::Utility,
+];
+
+fn effect_kind_label(kind: EffectKind) -> &'static str {
+    match kind {
+        EffectKind::Utility => "UTILITY",
+        EffectKind::Eq => "EQ",
+        EffectKind::Compressor => "COMPRESSOR",
+        EffectKind::Distortion => "DISTORTION",
+        EffectKind::Filter => "FILTER",
+        EffectKind::Gate => "GATE",
+        EffectKind::Crusher => "CRUSHER",
+        _ => "UNAVAILABLE",
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 struct Hits {
@@ -283,6 +306,9 @@ struct App {
     menu_page_by_screen: [usize; Screen::COUNT],
     page_select_mode: bool,
     controller_layout: ControllerLayout,
+    fx_selected: usize,
+    fx_parameter: usize,
+    fx_add_kind: usize,
 }
 impl App {
     fn new(
@@ -417,6 +443,9 @@ impl App {
             menu_page_by_screen: [0; Screen::COUNT],
             page_select_mode: false,
             controller_layout: ControllerLayout::Eight,
+            fx_selected: 0,
+            fx_parameter: 0,
+            fx_add_kind: 0,
         }
     }
 
@@ -2039,6 +2068,11 @@ impl App {
         self.unload_loop_player();
         let mut song = Song::new(&self.config.external_midi);
         song.name = name.clone();
+        if let Err(status) = self.publish_insert_rack_runtime(&song.insert_rack) {
+            self.confirm_new_project = false;
+            self.status = status;
+            return;
+        }
         self.song = song;
         self.song_file_stem = None;
         self.tracker_order = 0;
@@ -2180,6 +2214,10 @@ impl App {
         self.tracker_stop();
         match sequencer::load(&sequencer::songs_dir(), &name) {
             Ok(song) => {
+                if let Err(status) = self.publish_insert_rack_runtime(&song.insert_rack) {
+                    self.status = status;
+                    return;
+                }
                 self.song = song;
                 self.song_file_stem = Some(name.clone());
                 self.tracker_order = 0;
@@ -3098,16 +3136,186 @@ impl App {
             return None;
         }
         if self.audio_recorder.status().recording || self.recorder.is_recording() {
-            return Some("stop recording before changing the dry graph route");
+            return Some("stop recording before changing the insert rack");
         }
         if self.playback.is_some()
             || self.sequencer.status().playing
             || self.loop_player.status().playing
             || self.song_previewing
         {
-            return Some("stop transport before changing the dry graph route");
+            return Some("stop transport before changing the insert rack");
         }
         None
+    }
+
+    fn selected_effect_id(&self) -> Option<EffectId> {
+        self.song.insert_rack.order.get(self.fx_selected).copied()
+    }
+
+    fn commit_insert_rack(&mut self, rack: InsertRack, success: String) -> bool {
+        if let Err(status) = self.publish_insert_rack_runtime(&rack) {
+            self.status = status;
+            return false;
+        }
+        self.song.insert_rack = rack;
+        self.fx_selected = self
+            .fx_selected
+            .min(self.song.insert_rack.order.len().saturating_sub(1));
+        self.status = success;
+        true
+    }
+
+    fn publish_insert_rack_runtime(
+        &mut self,
+        rack: &InsertRack,
+    ) -> std::result::Result<(), String> {
+        if let Some(reason) = self.audio_graph_edit_blocker() {
+            return Err(reason.into());
+        }
+        if let Err(error) = rack.validate() {
+            return Err(format!("FX rack: {error}"));
+        }
+        if let Some(engine) = self.engine.as_mut() {
+            match engine.publish_insert_rack(rack) {
+                Ok(_) => {}
+                Err(error) => {
+                    return Err(format!("FX publication: {error:#}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn add_effect(&mut self) {
+        let kind = PHASE_TWO_EFFECTS[self.fx_add_kind];
+        let mut rack = self.song.insert_rack.clone();
+        match rack.add(kind) {
+            Ok(id) => {
+                let index = rack.order.len() - 1;
+                if self.commit_insert_rack(rack, format!("added {} #{id}", effect_kind_label(kind)))
+                {
+                    self.fx_selected = index;
+                    self.fx_parameter = 0;
+                }
+            }
+            Err(error) => self.status = format!("FX add: {error}"),
+        }
+    }
+
+    fn remove_effect(&mut self) {
+        let Some(id) = self.selected_effect_id() else {
+            self.status = "FX rack is empty".into();
+            return;
+        };
+        let mut rack = self.song.insert_rack.clone();
+        match rack.remove(id) {
+            Ok(effect) => {
+                self.commit_insert_rack(
+                    rack,
+                    format!("removed {} #{id}", effect_kind_label(effect.kind)),
+                );
+            }
+            Err(error) => self.status = format!("FX remove: {error}"),
+        }
+    }
+
+    fn move_effect(&mut self, direction: i8) {
+        let Some(id) = self.selected_effect_id() else {
+            self.status = "FX rack is empty".into();
+            return;
+        };
+        let destination = if direction < 0 {
+            self.fx_selected.saturating_sub(1)
+        } else {
+            (self.fx_selected + 1).min(self.song.insert_rack.order.len() - 1)
+        };
+        if destination == self.fx_selected {
+            return;
+        }
+        let mut rack = self.song.insert_rack.clone();
+        if let Err(error) = rack.move_to(id, destination) {
+            self.status = format!("FX reorder: {error}");
+            return;
+        }
+        if self.commit_insert_rack(rack, format!("moved FX #{id}")) {
+            self.fx_selected = destination;
+        }
+    }
+
+    fn toggle_effect_bypass(&mut self) {
+        let Some(id) = self.selected_effect_id() else {
+            self.status = "FX rack is empty".into();
+            return;
+        };
+        let mut rack = self.song.insert_rack.clone();
+        let effect = rack.effect_mut(id).expect("rack order was validated");
+        effect.bypass = !effect.bypass;
+        let bypass = effect.bypass;
+        self.commit_insert_rack(
+            rack,
+            format!("FX #{id} {}", if bypass { "bypassed" } else { "active" }),
+        );
+    }
+
+    fn cycle_effect_kind(&mut self, direction: i8) {
+        self.fx_add_kind = if direction < 0 {
+            self.fx_add_kind
+                .checked_sub(1)
+                .unwrap_or(PHASE_TWO_EFFECTS.len() - 1)
+        } else {
+            (self.fx_add_kind + 1) % PHASE_TWO_EFFECTS.len()
+        };
+        self.status = format!(
+            "next FX to add · {}",
+            effect_kind_label(PHASE_TWO_EFFECTS[self.fx_add_kind])
+        );
+    }
+
+    fn adjust_effect_parameter(&mut self, direction: i8) {
+        let Some(id) = self.selected_effect_id() else {
+            self.status = "FX rack is empty".into();
+            return;
+        };
+        let mut rack = self.song.insert_rack.clone();
+        let effect = rack.effect_mut(id).expect("rack order was validated");
+        let schema = crate::effect_schema::schema(effect.kind);
+        self.fx_parameter = self.fx_parameter.min(schema.len().saturating_sub(1));
+        let spec = schema[self.fx_parameter];
+        let current = effect
+            .parameters
+            .get(spec.name)
+            .copied()
+            .unwrap_or(spec.default);
+        let value = match spec.value_type {
+            crate::effect_schema::ParameterType::Toggle => 1.0 - current,
+            crate::effect_schema::ParameterType::Integer => {
+                (current + f32::from(direction.signum())).clamp(spec.minimum, spec.maximum)
+            }
+            crate::effect_schema::ParameterType::Choices(choices) => {
+                let current_index = choices
+                    .iter()
+                    .position(|choice| f32::from(*choice) == current)
+                    .unwrap_or(0);
+                let index = if direction < 0 {
+                    current_index.saturating_sub(1)
+                } else {
+                    (current_index + 1).min(choices.len() - 1)
+                };
+                f32::from(choices[index])
+            }
+            crate::effect_schema::ParameterType::Continuous => {
+                let step = match spec.unit {
+                    "dB" | "dBFS" => 0.5,
+                    "%" => 1.0,
+                    "Hz" => (current * (2.0_f32.powf(1.0 / 24.0) - 1.0)).max(0.1),
+                    "ms" => ((spec.maximum - spec.minimum) / 200.0).max(0.1),
+                    _ => ((spec.maximum - spec.minimum) / 100.0).max(0.01),
+                };
+                (current + step * f32::from(direction.signum())).clamp(spec.minimum, spec.maximum)
+            }
+        };
+        effect.parameters.insert(spec.name.into(), value);
+        self.commit_insert_rack(rack, format!("{} · {value:.2} {}", spec.name, spec.unit));
     }
     fn load(&mut self, state: &Path, _tx: std::sync::mpsc::Sender<MidiEvent>) {
         if let Some(reason) = self.audio_graph_edit_blocker() {
@@ -3158,7 +3366,13 @@ impl App {
         self.playing = None;
         self.status = format!("starting JACK/{}…", p.backend.label());
         let backend_label = p.backend.label();
-        match Engine::start(&p, state, Arc::clone(&self.midi_output), &self.config) {
+        match Engine::start_with_rack(
+            &p,
+            state,
+            Arc::clone(&self.midi_output),
+            &self.config,
+            &self.song.insert_rack,
+        ) {
             Ok(e) => {
                 let audio_route = e.audio_route_status();
                 self.engine = Some(e);
@@ -3444,7 +3658,13 @@ impl App {
                 }
                 self.engine.take();
                 self.playing = None;
-                match Engine::start(&preset, state, Arc::clone(&self.midi_output), &self.config) {
+                match Engine::start_with_rack(
+                    &preset,
+                    state,
+                    Arc::clone(&self.midi_output),
+                    &self.config,
+                    &self.song.insert_rack,
+                ) {
                     Ok(engine) => {
                         let audio_route = engine.audio_route_status();
                         self.engine = Some(engine);
@@ -3942,6 +4162,10 @@ fn perform(
                 }
             } else if a.screen == Screen::Presets {
                 a.selected = a.selected.saturating_sub(1);
+            } else if a.screen == Screen::FxRack {
+                a.fx_selected = a.fx_selected.saturating_sub(1);
+            } else if a.screen == Screen::FxEditor {
+                a.adjust_effect_parameter(-1);
             }
         }
         Action::Down => {
@@ -3976,6 +4200,11 @@ fn perform(
                 }
             } else if a.screen == Screen::Presets {
                 a.selected = (a.selected + 1).min(a.presets.len().saturating_sub(1));
+            } else if a.screen == Screen::FxRack {
+                a.fx_selected =
+                    (a.fx_selected + 1).min(a.song.insert_rack.order.len().saturating_sub(1));
+            } else if a.screen == Screen::FxEditor {
+                a.adjust_effect_parameter(1);
             }
         }
         Action::PageUp => {
@@ -4065,6 +4294,16 @@ fn perform(
             | Screen::TrackerLoop
             | Screen::TrackerLoopAlign => {}
             Screen::AudioRecorder => a.toggle_audio_recording(),
+            Screen::FxRack => {
+                if a.selected_effect_id().is_some() {
+                    a.fx_parameter = 0;
+                    a.set_screen(Screen::FxEditor);
+                    a.status = "effect editor · turn to adjust".into();
+                } else {
+                    a.status = "FX rack is empty · choose a kind and ADD".into();
+                }
+            }
+            Screen::FxEditor => a.adjust_effect_parameter(1),
         },
         Action::Quit => unreachable!("quit is handled before contextual dispatch"),
         Action::StopAll => unreachable!("panic is handled before contextual dispatch"),
@@ -4125,7 +4364,31 @@ fn perform(
             a.set_screen(Screen::AudioRecorder);
             a.status = "stereo audio recorder".into();
         }
+        Action::OpenFxRack => {
+            a.fx_selected = a
+                .fx_selected
+                .min(a.song.insert_rack.order.len().saturating_sub(1));
+            a.set_screen(Screen::FxRack);
+            a.status = format!(
+                "insert rack · next {}",
+                effect_kind_label(PHASE_TWO_EFFECTS[a.fx_add_kind])
+            );
+        }
+        Action::OpenFxEditor => {
+            if a.selected_effect_id().is_some() {
+                a.fx_parameter = 0;
+                a.set_screen(Screen::FxEditor);
+                a.status = "effect editor · PARAM chooses · VALUE adjusts".into();
+            } else {
+                a.status = "FX rack is empty".into();
+            }
+        }
         Action::Back => {
+            if a.screen == Screen::FxEditor {
+                a.set_screen(Screen::FxRack);
+                a.status = "insert rack".into();
+                return false;
+            }
             if a.screen == Screen::TrackerFiles {
                 match a.tracker_files_mode {
                     TrackerFilesMode::Drums => {
@@ -4182,7 +4445,7 @@ fn perform(
                 }
             } else if matches!(
                 a.screen,
-                Screen::Playback | Screen::Tracker | Screen::AudioRecorder
+                Screen::Playback | Screen::Tracker | Screen::AudioRecorder | Screen::FxRack
             ) {
                 Screen::Presets
             } else if a.playing.is_some() {
@@ -4390,6 +4653,31 @@ fn perform(
             Ok(()) => a.status = "audio recording finalized".into(),
             Err(error) => a.status = format!("audio recorder: {error}"),
         },
+        Action::FxAdd => a.add_effect(),
+        Action::FxRemove => a.remove_effect(),
+        Action::FxMoveUp => a.move_effect(-1),
+        Action::FxMoveDown => a.move_effect(1),
+        Action::FxBypass => a.toggle_effect_bypass(),
+        Action::FxKindPrevious => a.cycle_effect_kind(-1),
+        Action::FxKindNext => a.cycle_effect_kind(1),
+        Action::FxParameterPrevious => {
+            let len = a
+                .selected_effect_id()
+                .and_then(|id| a.song.insert_rack.effect(id))
+                .map(|effect| crate::effect_schema::schema(effect.kind).len())
+                .unwrap_or(0);
+            a.fx_parameter = a.fx_parameter.saturating_sub(1).min(len.saturating_sub(1));
+        }
+        Action::FxParameterNext => {
+            let len = a
+                .selected_effect_id()
+                .and_then(|id| a.song.insert_rack.effect(id))
+                .map(|effect| crate::effect_schema::schema(effect.kind).len())
+                .unwrap_or(0);
+            a.fx_parameter = (a.fx_parameter + 1).min(len.saturating_sub(1));
+        }
+        Action::FxValueDecrease => a.adjust_effect_parameter(-1),
+        Action::FxValueIncrease => a.adjust_effect_parameter(1),
     }
     false
 }
@@ -5054,6 +5342,8 @@ fn draw<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         Screen::TrackerLoop => draw_tracker_loop(f, a),
         Screen::TrackerLoopAlign => draw_tracker_loop_align(f, a),
         Screen::AudioRecorder => draw_audio_recorder(f, a),
+        Screen::FxRack => draw_fx_rack(f, a),
+        Screen::FxEditor => draw_fx_editor(f, a),
     }
     draw_pad_lock(f, a);
     draw_pad_buttons(f, a);
@@ -5073,6 +5363,160 @@ fn draw<B: Backend>(f: &mut Frame<B>, a: &mut App) {
             area,
         );
     }
+}
+
+fn draw_fx_rack<B: Backend>(f: &mut Frame<B>, a: &mut App) {
+    let z = f.size();
+    let body = rect(z.x, z.y, z.width, z.height.saturating_sub(4));
+    a.hits.list = body;
+    let mut lines = vec![Spans::from(vec![
+        Span::styled(
+            "FX RACK",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(
+            "  ADD: {}  {}/8",
+            effect_kind_label(PHASE_TWO_EFFECTS[a.fx_add_kind]),
+            a.song.insert_rack.order.len()
+        )),
+    ])];
+    if a.song.insert_rack.order.is_empty() {
+        lines.push(Spans::from("  Empty · choose KIND then ADD"));
+    } else {
+        for (index, id) in a.song.insert_rack.order.iter().copied().enumerate() {
+            let effect = a.song.insert_rack.effect(id).expect("validated rack order");
+            let selected = index == a.fx_selected;
+            let marker = if selected { ">" } else { " " };
+            let state = if effect.bypass { "BYP" } else { "ON " };
+            let style = if selected {
+                Style::default().fg(Color::Black).bg(Color::Yellow)
+            } else if effect.bypass {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            lines.push(Spans::from(Span::styled(
+                format!(
+                    "{marker} {:>2}. {:<12} #{id:<3} {state}",
+                    index + 1,
+                    effect_kind_label(effect.kind)
+                ),
+                style,
+            )));
+        }
+    }
+    lines.push(Spans::from(""));
+    lines.push(Spans::from("Structural edits require stopped transport"));
+    f.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL)),
+        body,
+    );
+}
+
+fn meter_db(value: f32) -> f32 {
+    if value.is_finite() && value > 0.0 {
+        (20.0 * value.log10()).max(-120.0)
+    } else {
+        -120.0
+    }
+}
+
+fn draw_fx_editor<B: Backend>(f: &mut Frame<B>, a: &mut App) {
+    let z = f.size();
+    let body = rect(z.x, z.y, z.width, z.height.saturating_sub(4));
+    let Some(id) = a.selected_effect_id() else {
+        f.render_widget(
+            Paragraph::new("FX EDIT\nNo effect selected")
+                .block(Block::default().borders(Borders::ALL)),
+            body,
+        );
+        return;
+    };
+    let effect = a.song.insert_rack.effect(id).expect("validated rack order");
+    let schema = crate::effect_schema::schema(effect.kind);
+    a.fx_parameter = a.fx_parameter.min(schema.len().saturating_sub(1));
+    let visible_rows = body.height.saturating_sub(7) as usize;
+    let offset = a
+        .fx_parameter
+        .saturating_sub(visible_rows.saturating_sub(1) / 2)
+        .min(schema.len().saturating_sub(visible_rows));
+    let mut lines = vec![Spans::from(vec![
+        Span::styled(
+            format!("{} #{id}", effect_kind_label(effect.kind)),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(if effect.bypass {
+            "  BYPASSED"
+        } else {
+            "  ACTIVE"
+        }),
+    ])];
+    for (index, spec) in schema.iter().enumerate().skip(offset).take(visible_rows) {
+        let value = effect
+            .parameters
+            .get(spec.name)
+            .copied()
+            .unwrap_or(spec.default);
+        let style = if index == a.fx_parameter {
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Spans::from(Span::styled(
+            format!(
+                "{} {:<22} {:>8.2} {}",
+                if index == a.fx_parameter { ">" } else { " " },
+                spec.name,
+                value,
+                spec.unit
+            ),
+            style,
+        )));
+    }
+    let meter = a.engine.as_ref().and_then(|engine| engine.effect_meter(id));
+    lines.push(Spans::from(""));
+    if let Some(meter) = meter {
+        let input_peak = meter.input.peak.left.max(meter.input.peak.right);
+        let output_peak = meter.output.peak.left.max(meter.output.peak.right);
+        let input_rms = meter.input.rms.left.max(meter.input.rms.right);
+        let output_rms = meter.output.rms.left.max(meter.output.rms.right);
+        lines.push(Spans::from(format!(
+            "IN  pk {:>6.1} rms {:>6.1} dBFS",
+            meter_db(input_peak),
+            meter_db(input_rms)
+        )));
+        lines.push(Spans::from(format!(
+            "OUT pk {:>6.1} rms {:>6.1} dBFS",
+            meter_db(output_peak),
+            meter_db(output_rms)
+        )));
+        lines.push(Spans::from(Span::styled(
+            format!(
+                "CLIP {}  NONFINITE {}{}",
+                meter.output.clips,
+                meter.output.non_finite,
+                meter
+                    .gain_reduction_db
+                    .map(|value| format!("  GR {value:.1} dB"))
+                    .unwrap_or_default()
+            ),
+            if meter.output.clips > 0 || meter.output.non_finite > 0 {
+                Style::default().fg(Color::Red)
+            } else {
+                Style::default().fg(Color::Green)
+            },
+        )));
+    } else {
+        lines.push(Spans::from("Meters unavailable · graph inactive"));
+    }
+    f.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL)),
+        body,
+    );
 }
 fn draw_help<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     let z = f.size();
@@ -6811,6 +7255,8 @@ mod tests {
         render(40, 20, Screen::TrackerLoop);
         render(40, 20, Screen::TrackerLoopAlign);
         render(40, 20, Screen::AudioRecorder);
+        render(40, 20, Screen::FxRack);
+        render(40, 20, Screen::FxEditor);
     }
     #[test]
     fn owned_graph_route_changes_require_stopped_transport_and_recording() {
@@ -6821,13 +7267,13 @@ mod tests {
         a.recorder.start(Instant::now());
         assert_eq!(
             a.audio_graph_edit_blocker(),
-            Some("stop recording before changing the dry graph route")
+            Some("stop recording before changing the insert rack")
         );
         a.recorder.stop();
         a.song_previewing = true;
         assert_eq!(
             a.audio_graph_edit_blocker(),
-            Some("stop transport before changing the dry graph route")
+            Some("stop transport before changing the insert rack")
         );
     }
     #[test]
@@ -6845,8 +7291,32 @@ mod tests {
         render(38, 14, Screen::TrackerLoop);
         render(38, 14, Screen::TrackerLoopAlign);
         render(38, 14, Screen::AudioRecorder);
+        render(38, 14, Screen::FxRack);
+        render(38, 14, Screen::FxEditor);
         render(30, 8, Screen::Presets);
         render(30, 8, Screen::Tracker)
+    }
+
+    #[test]
+    fn fx_rack_actions_preserve_ids_order_bypass_and_strict_parameters() {
+        let p = presets();
+        let mut a = app(&p);
+        a.fx_add_kind = 0;
+        a.add_effect();
+        let eq = a.selected_effect_id().unwrap();
+        a.fx_add_kind = 1;
+        a.add_effect();
+        let compressor = a.selected_effect_id().unwrap();
+        assert_eq!(a.song.insert_rack.order, [eq, compressor]);
+        a.move_effect(-1);
+        assert_eq!(a.song.insert_rack.order, [compressor, eq]);
+        a.toggle_effect_bypass();
+        assert!(a.song.insert_rack.effect(compressor).unwrap().bypass);
+        a.fx_parameter = 0;
+        a.adjust_effect_parameter(-1);
+        let effect = a.song.insert_rack.effect(compressor).unwrap();
+        assert!(effect.parameters["threshold_db"].is_finite());
+        a.song.insert_rack.validate().unwrap();
     }
 
     #[test]
@@ -6865,12 +7335,12 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol.as_str())
             .collect::<String>();
-        for label in ["OPS", "SOUND", "NAV", "SYS", "RESET", "FINISH", "TAP"] {
+        for label in ["OPS", "SOUND", "NAV", "SYS", "RESET", "FINISH", "TAP", "FX"] {
             assert!(text.contains(label), "missing {label}: {text}");
         }
         assert!(text.contains("PLY"));
         assert_eq!(a.hits.menu_pages.len(), 4);
-        assert_eq!(a.hits.actions.len(), 3);
+        assert_eq!(a.hits.actions.len(), 4);
     }
 
     #[test]
@@ -7082,17 +7552,17 @@ mod tests {
     fn empty_controller_items_are_silent() {
         let p = presets();
         let mut a = app(&p);
-        a.screen = Screen::Playback;
-        a.select_menu_page(1);
+        a.screen = Screen::AudioRecorder;
+        a.select_menu_page(0);
         let before = a.status.clone();
         let (tx, rx) = mpsc::channel();
-        tx.send(MidiEvent::Pad(crate::pads::PadAction::Item4, true))
+        tx.send(MidiEvent::Pad(crate::pads::PadAction::Item2, true))
             .unwrap();
         drain(&rx, &mut a, Path::new("/none"), &tx);
         assert_eq!(a.status, before);
         assert!(a.playing.is_none());
-        a.screen = Screen::AudioRecorder;
-        a.select_menu_page(0);
+        a.screen = Screen::Help;
+        a.select_menu_page(1);
         let before = a.status.clone();
         tx.send(MidiEvent::Pad(crate::pads::PadAction::Item2, true))
             .unwrap();

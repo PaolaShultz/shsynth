@@ -18,12 +18,14 @@ pub enum Screen {
     TrackerLoop,
     TrackerLoopAlign,
     AudioRecorder,
+    FxRack,
+    FxEditor,
 }
 
 impl Screen {
-    pub const COUNT: usize = 13;
+    pub const COUNT: usize = 15;
     #[cfg(test)]
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 15] = [
         Self::Presets,
         Self::Playback,
         Self::Ideas,
@@ -37,6 +39,8 @@ impl Screen {
         Self::TrackerLoop,
         Self::TrackerLoopAlign,
         Self::AudioRecorder,
+        Self::FxRack,
+        Self::FxEditor,
     ];
 
     pub const fn index(self) -> usize {
@@ -54,6 +58,8 @@ impl Screen {
             Self::TrackerLoop => 10,
             Self::TrackerLoopAlign => 11,
             Self::AudioRecorder => 12,
+            Self::FxRack => 13,
+            Self::FxEditor => 14,
         }
     }
 
@@ -72,6 +78,8 @@ impl Screen {
             Self::TrackerLoop => "FT2 LOOP",
             Self::TrackerLoopAlign => "LOOP ALIGN",
             Self::AudioRecorder => "AUDIO",
+            Self::FxRack => "FX RACK",
+            Self::FxEditor => "FX EDIT",
         }
     }
 }
@@ -102,6 +110,19 @@ pub enum Action {
     OpenTrackerLoop,
     OpenTrackerLoopAlign,
     OpenAudioRecorder,
+    OpenFxRack,
+    OpenFxEditor,
+    FxAdd,
+    FxRemove,
+    FxMoveUp,
+    FxMoveDown,
+    FxBypass,
+    FxKindPrevious,
+    FxKindNext,
+    FxParameterPrevious,
+    FxParameterNext,
+    FxValueDecrease,
+    FxValueIncrease,
     TapTempo,
     ResetParameters,
     BeginRecord,
@@ -354,7 +375,7 @@ const PLAYBACK: [MenuPage; 4] = [
             on("RESET", Action::ResetParameters),
             on("FINISH", Action::FinishSaveRecord),
             on("TAP", Action::TapTempo),
-            off(""),
+            on("FX", Action::OpenFxRack),
         ],
     ),
     page(
@@ -944,6 +965,74 @@ const AUDIO: [MenuPage; 4] = [
     ),
 ];
 
+const FX_RACK: [MenuPage; 4] = [
+    page(
+        "OPS",
+        [
+            on("EDIT", Action::OpenFxEditor),
+            on("ADD", Action::FxAdd),
+            on("BYPASS", Action::FxBypass),
+            on("REMOVE", Action::FxRemove),
+        ],
+    ),
+    page(
+        "ORDER",
+        [
+            on("UP", Action::FxMoveUp),
+            on("DOWN", Action::FxMoveDown),
+            on("KIND-", Action::FxKindPrevious),
+            on("KIND+", Action::FxKindNext),
+        ],
+    ),
+    page(
+        "NAV",
+        [
+            on("PRESETS", Action::OpenPresets),
+            on("PLAY", Action::Back),
+            on("FT2", Action::OpenTracker),
+            on("AUDIO", Action::OpenAudioRecorder),
+        ],
+    ),
+    page(
+        "SYS",
+        [
+            on("PANIC", Action::StopAll),
+            off(""),
+            on("HELP", Action::OpenHelp),
+            on("EXIT", Action::Back),
+        ],
+    ),
+];
+
+const FX_EDITOR: [MenuPage; 4] = [
+    page(
+        "OPS",
+        [
+            on("PARAM-", Action::FxParameterPrevious),
+            on("PARAM+", Action::FxParameterNext),
+            on("VALUE-", Action::FxValueDecrease),
+            on("VALUE+", Action::FxValueIncrease),
+        ],
+    ),
+    page(
+        "STATE",
+        [on("BYPASS", Action::FxBypass), off(""), off(""), off("")],
+    ),
+    page(
+        "NAV",
+        [on("RACK", Action::OpenFxRack), off(""), off(""), off("")],
+    ),
+    page(
+        "SYS",
+        [
+            on("PANIC", Action::StopAll),
+            off(""),
+            on("HELP", Action::OpenHelp),
+            on("EXIT", Action::Back),
+        ],
+    ),
+];
+
 const HELP: [MenuPage; 4] = [
     page(
         "OPS",
@@ -990,6 +1079,8 @@ pub fn pages(screen: Screen, context: MenuContext) -> &'static [MenuPage; 4] {
         (Screen::TrackerLoop, _) => &TRACKER_LOOP,
         (Screen::TrackerLoopAlign, _) => &TRACKER_LOOP_ALIGN,
         (Screen::AudioRecorder, _) => &AUDIO,
+        (Screen::FxRack, _) => &FX_RACK,
+        (Screen::FxEditor, _) => &FX_EDITOR,
     }
 }
 
@@ -1030,7 +1121,7 @@ mod tests {
 
     #[test]
     fn empty_slots_and_pages_do_not_dispatch() {
-        let empty_slot = slot(Screen::Playback, MenuContext::Normal, 1, 3).unwrap();
+        let empty_slot = slot(Screen::AudioRecorder, MenuContext::Normal, 0, 1).unwrap();
         let empty_page = pages(Screen::AudioRecorder, MenuContext::Normal)[1];
         assert_eq!((empty_slot.label, empty_slot.dispatch()), ("", None));
         assert!(!empty_page.available());
