@@ -25,8 +25,8 @@ restarts JACK. Reboot after installing or removing the isolation settings.
 ## Owned dry audio graph
 
 Phase 1 includes an opt-in SHR-owned JACK client for one managed software
-instrument. It is disabled by default until the authorized low-gain Raspberry
-Pi comparison:
+instrument. It remains disabled by default after the authorized low-gain
+Raspberry Pi comparison:
 
 ```text
 audio.autoconnect=true
@@ -58,10 +58,10 @@ callback count, mean, p95, p99, maximum, missed-deadline count, and oversized
 callback count to the private `engine.log`. This measurement output is not a
 claim that an unmeasured graph or future effect rack is Raspberry Pi safe.
 
-Do not enable this merely to perform a routine setup check. The first live use
-is the authorized, level-matched dry-path comparison described in
-[Audio graph and DSP contract](AUDIO_GRAPH.md); no creative effects are active
-in this phase.
+Do not enable this merely to perform a routine setup check. The first
+authorized dry-path comparison is recorded in
+[Phase 1 dry audio graph measurement](PHASE1_AUDIO_GRAPH_MEASUREMENT.md); no
+creative effects are active in this phase.
 
 ## Controller menu layouts
 

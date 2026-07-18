@@ -3,8 +3,10 @@
 This document is the implementation contract for SHR-DAW's owned audio graph
 and lightweight effects rack. It records the stable model and real-time limits
 before the graph becomes responsible for playback. The Phase 1 owned dry client
-is implemented for one managed engine but disabled by default. Direct JACK
-routing remains the normal route until the authorized dry-path checkpoint.
+is implemented for one managed engine but disabled by default. Its first
+authorized Raspberry Pi dry-path checkpoint passed; direct JACK routing remains
+the default and conservative fallback. See
+[Phase 1 dry audio graph measurement](PHASE1_AUDIO_GRAPH_MEASUREMENT.md).
 
 ## Ownership boundary
 
@@ -186,6 +188,8 @@ loss behavior. Listening must be level matched. The creator marks each audible
 effect or type `KEEP`, `IMPROVE`, or `DROP`; only kept/improving choices remain
 visible as product effects.
 
-The first audible graph checkpoint is one dry source compared with the direct
-fallback, verifying that it is unchanged, not doubled, and shuts down cleanly.
-No such listening or performance result is implied by this document.
+The first authorized graph checkpoint compared one dry source with the direct
+fallback and verified bit-exact stereo output, one path, callback headroom, and
+clean fallback/ownership behavior. The exact Pi evidence is recorded in
+[Phase 1 dry audio graph measurement](PHASE1_AUDIO_GRAPH_MEASUREMENT.md). It
+does not imply that an unmeasured creative effect or later graph phase is safe.

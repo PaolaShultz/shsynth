@@ -70,16 +70,29 @@ set `audio.engine_cpu=3`. `/boot/firmware/cmdline.txt` has the tool-owned
 `isolcpus`, `nohz_full`, `rcu_nocbs`, and `irqaffinity` arguments; the
 `shr-audio-performance.service` governor service is enabled and active; and the
 JACK system service has a tool-owned CPU-affinity drop-in. The boot-time parts
-do not become active until the next reboot. The tuner did not restart JACK or
-reboot the Pi. Inspect with `shr-audio-tune status`; reverse only the managed
-settings with `sudo shr-audio-tune remove`, clear `audio.engine_cpu`, and
-reboot. The original boot command line is retained below
-`/var/lib/shr-audio-tune/`.
+are now active after a later reboot. Inspect with `shr-audio-tune status`;
+reverse only the managed settings with `sudo shr-audio-tune remove`, clear
+`audio.engine_cpu`, and reboot. The original boot command line is retained
+below `/var/lib/shr-audio-tune/`.
+
+The Phase 1 owned dry graph passed its first authorized Raspberry Pi checkpoint
+on 2026-07-18 at 48 kHz, 128 frames, and 3 periods. One managed `Compact Bass`
+source was bit exact through the graph for all 384,000 captured frames, with no
+direct-path doubling, missed callback deadlines, or oversized callbacks. The
+main run measured 8.246 us mean, 13 us p95, 28 us p99, and 151.907 us maximum
+over 29,039 callbacks. Normal shutdown exposed the exact direct fallback before
+the managed synth exited; an unrelated capture connection survived; full JACK
+loss left no stale owned resources; and a subsequent direct start succeeded.
+The ignored local `audio.graph.enabled` flag was returned to `false`. See
+`docs/PHASE1_AUDIO_GRAPH_MEASUREMENT.md`. Phase 2 has not begun, and no creative
+effect is approved by this dry-path result.
 
 At installation time the AudioBox USB 96 was disconnected. Consequently the
 pre-existing `jack.service` remained failed because ALSA could not resolve
 `hw:A96`; this is a hardware-availability issue, not a tuning failure. Do not
-start or restart JACK merely to validate the affinity profile.
+start or restart JACK merely to validate the affinity profile. At the
+2026-07-18 graph checkpoint the AudioBox was connected and JACK was active at
+48 kHz, 128 frames, and 3 periods.
 
 The product and Cargo package are named `shr-daw`. The regular installer
 provides `shr`, `shr-setup`, and `shr-audio-tune`; `shs` and `synth-player` are
@@ -226,6 +239,10 @@ validated, 133 Rust tests passed, the bundled MIDI-device JSON parsed and
 installed correctly, Clippy passed with warnings denied, formatting passed,
 and the release build succeeded. Run the checks again after changes;
 this statement is history, not a substitute for current verification.
+
+After the Phase 1 metrics/recovery changes on 2026-07-18, formatting, all 283
+Rust tests, warning-denied Clippy, and the optimized locked release build passed
+again with Rust 1.85.
 
 For docs, README, screenshot, or image-only changes, keep validation scoped to
 the files changed instead of running the Rust suite mechanically. Examples:
