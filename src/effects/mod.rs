@@ -1,5 +1,6 @@
 //! Preallocated, allocation-free insert-effect runtime slots.
 
+mod compressor;
 mod eq;
 
 use crate::audio_graph::{EffectId, EffectInstance, EffectKind};
@@ -8,6 +9,8 @@ use crate::effect_schema;
 use std::fmt;
 use std::sync::Arc;
 
+pub use compressor::AtomicGainReduction;
+use compressor::Compressor;
 use eq::Eq;
 
 const PARAMETER_SMOOTH_SAMPLES: u32 = 64;
@@ -34,11 +37,13 @@ impl std::error::Error for EffectError {}
 pub struct MeterHandles {
     pub input: Arc<AtomicMeter>,
     pub output: Arc<AtomicMeter>,
+    pub gain_reduction: Option<Arc<AtomicGainReduction>>,
 }
 
 enum Processor {
     Utility(Utility),
     Eq(Box<Eq>),
+    Compressor(Box<Compressor>),
 }
 
 impl Processor {
@@ -46,6 +51,10 @@ impl Processor {
         match effect.kind {
             EffectKind::Utility => Ok(Self::Utility(Utility::compile(effect)?)),
             EffectKind::Eq => Ok(Self::Eq(Box::new(Eq::compile(effect, sample_rate)?))),
+            EffectKind::Compressor => Ok(Self::Compressor(Box::new(Compressor::compile(
+                effect,
+                sample_rate,
+            )?))),
             _ => Err(EffectError::new(format!(
                 "{:?} processing is not implemented",
                 effect.kind
@@ -58,6 +67,7 @@ impl Processor {
         match self {
             Self::Utility(effect) => effect.process(frame),
             Self::Eq(effect) => effect.process(frame),
+            Self::Compressor(effect) => effect.process(frame),
         }
     }
 
@@ -65,6 +75,7 @@ impl Processor {
         match self {
             Self::Utility(effect) => effect.set_parameter(name, value),
             Self::Eq(effect) => effect.set_parameter(name, value),
+            Self::Compressor(effect) => effect.set_parameter(name, value),
         }
     }
 
@@ -72,6 +83,20 @@ impl Processor {
         match self {
             Self::Utility(effect) => effect.reset(),
             Self::Eq(effect) => effect.reset(),
+            Self::Compressor(effect) => effect.reset(),
+        }
+    }
+
+    fn gain_reduction(&self) -> Option<Arc<AtomicGainReduction>> {
+        match self {
+            Self::Compressor(effect) => Some(effect.gain_reduction()),
+            Self::Utility(_) | Self::Eq(_) => None,
+        }
+    }
+
+    fn publish(&self) {
+        if let Self::Compressor(effect) = self {
+            effect.publish();
         }
     }
 }
@@ -128,6 +153,7 @@ impl EffectSlot {
         MeterHandles {
             input: Arc::clone(&self.published_input),
             output: Arc::clone(&self.published_output),
+            gain_reduction: self.processor.gain_reduction(),
         }
     }
 
@@ -175,6 +201,7 @@ impl EffectSlot {
             .publish(self.input_meter.snapshot_and_clear_peak());
         self.published_output
             .publish(self.output_meter.snapshot_and_clear_peak());
+        self.processor.publish();
     }
 
     pub fn reset(&mut self) {
@@ -308,7 +335,7 @@ mod tests {
         assert_eq!(slot.id(), 7);
         assert_eq!(slot.kind(), EffectKind::Utility);
         let mut effect = utility(BTreeMap::new(), false);
-        effect.kind = EffectKind::Compressor;
+        effect.kind = EffectKind::Distortion;
         assert!(EffectSlot::compile(&effect, 48_000, 128).is_err());
     }
 
