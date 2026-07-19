@@ -70,6 +70,15 @@ pub struct StereoInputConfig {
     pub right_port: String,
 }
 
+/// A machine-owned stereo playback route. Projects never persist these JACK
+/// names; portable pages resolve through the active runtime configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StereoOutputConfig {
+    pub name: String,
+    pub left_port: String,
+    pub right_port: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct AudioCaptureConfig {
     pub client_name: String,
@@ -107,6 +116,10 @@ pub struct RuntimeConfig {
     pub midi_input_matches: Vec<String>,
     pub audio_autoconnect: bool,
     pub audio_outputs: Vec<String>,
+    /// Ordered internal-device fallbacks used only when `audio_outputs` is not
+    /// currently visible. The analogue route remains a separate final choice.
+    pub audio_internal_outputs: Vec<StereoOutputConfig>,
+    pub audio_headphone_output: Option<StereoOutputConfig>,
     pub audio_graph: AudioGraphConfig,
     /// Optional zero-based CPU reserved by system setup for the managed engine.
     pub audio_engine_cpu: Option<usize>,
@@ -114,6 +127,94 @@ pub struct RuntimeConfig {
     pub external_midi: ExternalMidiConfig,
     pub capture: AudioCaptureConfig,
     pub loop_player: LoopPlayerConfig,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AudioRouteState {
+    Preferred,
+    InternalFallback { name: String },
+    HeadphoneFallback { name: String },
+    Unavailable,
+    Disabled,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedAudioRoute {
+    pub outputs: Vec<String>,
+    pub state: AudioRouteState,
+    /// Present only when a preferred route is unavailable. This is runtime
+    /// presentation data and must never be written back into configuration.
+    pub notice: Option<String>,
+}
+
+impl RuntimeConfig {
+    /// Select a currently visible stereo pair without mutating remembered
+    /// machine configuration. Explicit internal routes are tried in order and
+    /// the analogue headphone route is deliberately last.
+    pub fn resolve_audio_route(&self, available_ports: &[String]) -> ResolvedAudioRoute {
+        if !self.audio_autoconnect {
+            return ResolvedAudioRoute {
+                outputs: Vec::new(),
+                state: AudioRouteState::Disabled,
+                notice: None,
+            };
+        }
+        let available = |left: &str, right: &str| {
+            left != right
+                && available_ports.iter().any(|port| port == left)
+                && available_ports.iter().any(|port| port == right)
+        };
+        if let [left, right] = self.audio_outputs.as_slice() {
+            if available(left, right) {
+                return ResolvedAudioRoute {
+                    outputs: self.audio_outputs.clone(),
+                    state: AudioRouteState::Preferred,
+                    notice: None,
+                };
+            }
+        }
+        let preferred = if self.audio_outputs.is_empty() {
+            "unconfigured preferred audio route".to_owned()
+        } else {
+            self.audio_outputs.join(" + ")
+        };
+        for route in &self.audio_internal_outputs {
+            if available(&route.left_port, &route.right_port) {
+                return ResolvedAudioRoute {
+                    outputs: vec![route.left_port.clone(), route.right_port.clone()],
+                    state: AudioRouteState::InternalFallback {
+                        name: route.name.clone(),
+                    },
+                    notice: Some(format!(
+                        "audio fallback: {} · missing {preferred}",
+                        route.name
+                    )),
+                };
+            }
+        }
+        if let Some(route) = &self.audio_headphone_output {
+            if available(&route.left_port, &route.right_port) {
+                return ResolvedAudioRoute {
+                    outputs: vec![route.left_port.clone(), route.right_port.clone()],
+                    state: AudioRouteState::HeadphoneFallback {
+                        name: route.name.clone(),
+                    },
+                    notice: Some(format!(
+                        "headphone fallback: {} · missing {preferred}",
+                        route.name
+                    )),
+                };
+            }
+        }
+        ResolvedAudioRoute {
+            // Retain the preferred pair for diagnostics and a later safe
+            // activation; connection attempts may fail but configuration is
+            // never replaced by the absence of hardware.
+            outputs: self.audio_outputs.clone(),
+            state: AudioRouteState::Unavailable,
+            notice: Some(format!("audio unavailable · missing {preferred}")),
+        }
+    }
 }
 
 impl Default for RuntimeConfig {
@@ -139,6 +240,8 @@ impl Default for RuntimeConfig {
             midi_input_matches: Vec::new(),
             audio_autoconnect: false,
             audio_outputs: Vec::new(),
+            audio_internal_outputs: Vec::new(),
+            audio_headphone_output: None,
             audio_graph: AudioGraphConfig {
                 enabled: false,
                 client_name: "shr-graph".into(),
@@ -204,6 +307,7 @@ impl RuntimeConfig {
     fn merge(&mut self, text: &str, path: &Path) -> Result<()> {
         let mut saw_midi_input = false;
         let mut saw_audio_output = false;
+        let mut saw_audio_internal_output = false;
         let mut saw_yoshimi_roots = false;
         let mut saw_categories = false;
         let mut saw_soundfonts = false;
@@ -314,6 +418,22 @@ impl RuntimeConfig {
                     replace_list_once(&mut self.audio_outputs, &mut saw_audio_output);
                     if !value.is_empty() {
                         self.audio_outputs.push(value.to_owned());
+                    }
+                }
+                "audio.internal_output" => {
+                    replace_list_once(
+                        &mut self.audio_internal_outputs,
+                        &mut saw_audio_internal_output,
+                    );
+                    if !value.is_empty() {
+                        self.audio_internal_outputs.push(stereo_output(key, value)?);
+                    }
+                }
+                "audio.headphone_output" => {
+                    self.audio_headphone_output = if value.is_empty() {
+                        None
+                    } else {
+                        Some(stereo_output(key, value)?)
                     }
                 }
                 "audio.graph.enabled" => self.audio_graph.enabled = boolean(key, value)?,
@@ -460,6 +580,18 @@ impl RuntimeConfig {
         if self.audio_graph.enabled && (!self.audio_autoconnect || self.audio_outputs.len() != 2) {
             bail!("audio.graph.enabled requires audio.autoconnect and two audio.output entries");
         }
+        for route in self
+            .audio_internal_outputs
+            .iter()
+            .chain(self.audio_headphone_output.iter())
+        {
+            if route.left_port == route.right_port {
+                bail!(
+                    "stereo audio route {:?} must use distinct ports",
+                    route.name
+                );
+            }
+        }
         if self.external_midi.enabled && self.external_midi.output_match.is_empty() {
             bail!("external_midi.enabled requires external_midi.output");
         }
@@ -497,7 +629,7 @@ impl RuntimeConfig {
             fs::create_dir_all(parent)?;
         }
         let mut text = format!(
-            "# SHR-DAW runtime and routing configuration v3\n\
+            "# SHR-DAW runtime and routing configuration v4\n\
              synthv1.command={}\n\
              synthv1.client={}\n\
              synth.startup_timeout_ms={}\n\
@@ -556,6 +688,23 @@ impl RuntimeConfig {
         }
         if self.audio_outputs.is_empty() {
             text.push_str("audio.output=\n");
+        }
+        for output in &self.audio_internal_outputs {
+            text.push_str(&format!(
+                "audio.internal_output={}|{}|{}\n",
+                output.name, output.left_port, output.right_port
+            ));
+        }
+        if self.audio_internal_outputs.is_empty() {
+            text.push_str("audio.internal_output=\n");
+        }
+        if let Some(output) = &self.audio_headphone_output {
+            text.push_str(&format!(
+                "audio.headphone_output={}|{}|{}\n",
+                output.name, output.left_port, output.right_port
+            ));
+        } else {
+            text.push_str("audio.headphone_output=\n");
         }
         text.push_str(&format!(
             "audio.graph.enabled={}\naudio.graph.client={}\naudio.graph.maximum_callback_frames={}\n",
@@ -652,6 +801,19 @@ fn replace_list_once<T>(list: &mut Vec<T>, seen: &mut bool) {
 fn display_path(path: Option<&PathBuf>) -> String {
     path.map(|path| path.display().to_string())
         .unwrap_or_default()
+}
+
+fn stereo_output(key: &str, value: &str) -> Result<StereoOutputConfig> {
+    let mut fields = value.split('|').map(str::trim);
+    let output = StereoOutputConfig {
+        name: required(key, fields.next().unwrap_or(""))?.into(),
+        left_port: required(key, fields.next().unwrap_or(""))?.into(),
+        right_port: required(key, fields.next().unwrap_or(""))?.into(),
+    };
+    if fields.next().is_some() {
+        bail!("{key} must be NAME|LEFT_JACK_PORT|RIGHT_JACK_PORT");
+    }
+    Ok(output)
 }
 
 fn required<'a>(key: &str, value: &'a str) -> Result<&'a str> {
@@ -862,6 +1024,63 @@ mod tests {
     }
 
     #[test]
+    fn audio_fallback_priority_is_runtime_only_and_headphones_are_last() {
+        let mut config = RuntimeConfig::default();
+        config.audio_outputs = vec!["usb:l".into(), "usb:r".into()];
+        config.audio_internal_outputs = vec![StereoOutputConfig {
+            name: "Pi HDMI".into(),
+            left_port: "hdmi:l".into(),
+            right_port: "hdmi:r".into(),
+        }];
+        config.audio_headphone_output = Some(StereoOutputConfig {
+            name: "Pi analogue".into(),
+            left_port: "phones:l".into(),
+            right_port: "phones:r".into(),
+        });
+
+        let all = ["usb:l", "usb:r", "hdmi:l", "hdmi:r", "phones:l", "phones:r"].map(str::to_owned);
+        assert_eq!(
+            config.resolve_audio_route(&all).state,
+            AudioRouteState::Preferred
+        );
+        let internal = ["hdmi:l", "hdmi:r", "phones:l", "phones:r"].map(str::to_owned);
+        assert_eq!(
+            config.resolve_audio_route(&internal).state,
+            AudioRouteState::InternalFallback {
+                name: "Pi HDMI".into()
+            }
+        );
+        let phones = ["phones:l", "phones:r"].map(str::to_owned);
+        assert_eq!(
+            config.resolve_audio_route(&phones).state,
+            AudioRouteState::HeadphoneFallback {
+                name: "Pi analogue".into()
+            }
+        );
+        assert_eq!(config.audio_outputs, ["usb:l", "usb:r"]);
+    }
+
+    #[test]
+    fn audio_routes_round_trip_and_no_hardware_keeps_preference() {
+        let path =
+            std::env::temp_dir().join(format!("shsynth-audio-routes-{}.conf", std::process::id()));
+        fs::write(
+            &path,
+            "audio.output=usb:l\naudio.output=usb:r\naudio.internal_output=Built in|soc:l|soc:r\naudio.headphone_output=Analogue|hp:l|hp:r\n",
+        )
+        .unwrap();
+        let config = RuntimeConfig::load(&path).unwrap();
+        let none = config.resolve_audio_route(&[]);
+        assert_eq!(none.state, AudioRouteState::Unavailable);
+        assert_eq!(none.outputs, ["usb:l", "usb:r"]);
+        config.save(&path).unwrap();
+        let loaded = RuntimeConfig::load(&path).unwrap();
+        assert_eq!(loaded.audio_internal_outputs, config.audio_internal_outputs);
+        assert_eq!(loaded.audio_headphone_output, config.audio_headphone_output);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn explicitly_empty_optional_lists_survive_save_and_reload() {
         let path =
             std::env::temp_dir().join(format!("shsynth-empty-lists-{}.conf", std::process::id()));
@@ -873,6 +1092,8 @@ mod tests {
         config.fluidsynth.soundfonts.clear();
         config.midi_input_matches.clear();
         config.audio_outputs.clear();
+        config.audio_internal_outputs.clear();
+        config.audio_headphone_output = None;
         config.external_midi.percussion_notes.clear();
         config.capture.inputs.clear();
         config.loop_player.outputs.clear();
@@ -884,6 +1105,8 @@ mod tests {
         assert!(loaded.fluidsynth.soundfonts.is_empty());
         assert!(loaded.midi_input_matches.is_empty());
         assert!(loaded.audio_outputs.is_empty());
+        assert!(loaded.audio_internal_outputs.is_empty());
+        assert!(loaded.audio_headphone_output.is_none());
         assert!(loaded.external_midi.percussion_notes.is_empty());
         assert!(loaded.capture.inputs.is_empty());
         assert!(loaded.loop_player.outputs.is_empty());

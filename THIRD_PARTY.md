@@ -118,6 +118,23 @@ authoritative cultural transcription. The structural and naming audit is in
 `docs/DRUM_PATTERN_AUDIT.md`; groove, feel, and final curation still require
 human listening.
 
+## Public-domain demo compositions
+
+The ten demo arrangements in `demos/` are newly programmed for SHR-DAW and are
+released under MIT. The underlying compositions are traditional or old enough
+to be public domain; no MIDI file, harmony, production, or orchestration was
+copied from a modern recording. `demos/cleared-demos.json` is the explicit
+packaging manifest and records separate public-domain reasoning, institutional
+source links, musical metadata, filenames, and SHA-256 hashes for House of the
+Rising Sun, Whiskey in the Jar, Cotton-Eyed Joe, Scarborough Fair, Greensleeves,
+Amazing Grace, Drunken Sailor, Wellerman, Auld Lang Syne, and Danny Boy.
+
+`scripts/generate_demo_songs.py` is the deterministic authorship recipe. Its
+normal mode validates every byte and refuses extra files; the Makefile installs
+only its manifest-derived output after that check. Adding a composition
+requires source-backed clearance in the manifest, an original arrangement,
+both MIDI and current native Project forms, and matching structural tests.
+
 ## Bundled and private-download WAV loops
 
 The four WAVs named in `loops/cleared-loops.txt` are redistributable under CC0

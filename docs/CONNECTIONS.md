@@ -61,9 +61,11 @@ channels/banks/programs. Several pages can
 play several hardware instruments at the same time. A page can also target the
 currently active SHR-DAW software instrument.
 
-Projects save exact output port names. If a saved device is disconnected, the
-page is shown as `OFFLINE`. Its notes and route are kept. Connect the device or
-choose a different page target; SHR-DAW does not silently rewrite the Project.
+Portable `AUTO` pages save no output or channel and follow the machine default.
+Explicit pages remember their preferred port. If it is disconnected, the page
+shows `FALLBACK` while the configured output or loaded instrument is usable,
+otherwise `OFFLINE`. Its notes and preference are kept; reconnecting it makes
+the original mapping usable on the next play without rewriting the Project.
 
 Named sound lists for supported external instruments come from
 [MIDI device profiles](MIDI_DEVICE_PROFILES.md). Instruments without a profile

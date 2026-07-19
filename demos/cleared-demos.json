@@ -1,0 +1,343 @@
+{
+  "schema": 1,
+  "policy": "Only files named here may be installed as demos.",
+  "demos": [
+    {
+      "id": "house-of-the-rising-sun",
+      "title": "House of the Rising Sun",
+      "composition": "traditional/public-domain source",
+      "arrangement_license": "MIT",
+      "bpm": 84,
+      "time_signature": "6/8",
+      "key": "A minor",
+      "tracks": [
+        "Drums",
+        "Bass",
+        "Pad",
+        "Lead",
+        "Counter"
+      ],
+      "description": "A restrained 6/8 folk pulse with melody, block pad, bass, sparse drums, and a new high answer line.",
+      "style_ideas": [
+        "folk rock",
+        "dark synthwave",
+        "ambient"
+      ],
+      "native_project_meter": "3/4 tracker grid representing the two compound beats of 6/8",
+      "public_domain_reasoning": "Traditional Appalachian song. Library of Congress documentation traces circulation before the 1933 commercial recording and a 1937 field recording. This is a new block-chord arrangement and does not reproduce the Animals or another modern arrangement.",
+      "sources": [
+        "https://www.loc.gov/static/events/concerts-from-the-library-of-congress/documents/programs/2324-Kronos-Quartet-April18-program.pdf",
+        "https://blogs.loc.gov/folklife/2015/10/lomax-kentucky-recordings-go-online/"
+      ],
+      "midi": "house-of-the-rising-sun.mid",
+      "project": "house-of-the-rising-sun.shsong",
+      "sha256": {
+        "midi": "b332d520cacab301bc7abed44bbc7bee90991eaaefe3616037ffb9183680a189",
+        "project": "2780be14e15ba220ebb78bd3b45076189448c5b929b7a1e9dd816d275b8152cb"
+      }
+    },
+    {
+      "id": "whiskey-in-the-jar",
+      "title": "Whiskey in the Jar",
+      "composition": "traditional/public-domain source",
+      "arrangement_license": "MIT",
+      "bpm": 108,
+      "time_signature": "4/4",
+      "key": "D major",
+      "tracks": [
+        "Drums",
+        "Bass",
+        "Pad",
+        "Lead",
+        "Counter"
+      ],
+      "description": "Straight four-beat folk groove with singable lead, open-fifth bass, chord pad, drums, and a fiddle-like response.",
+      "style_ideas": [
+        "Celtic rock",
+        "acoustic",
+        "festival EDM"
+      ],
+      "native_project_meter": "4/4 tracker grid",
+      "public_domain_reasoning": "Traditional Irish song represented in P. W. Joyce's Old Irish Folk Music and Songs. The melody and story predate modern commercial versions; this arrangement was authored from the traditional tune without copying a recording.",
+      "sources": [
+        "https://www.itma.ie/scores/pw-joyce-oifms-686/"
+      ],
+      "midi": "whiskey-in-the-jar.mid",
+      "project": "whiskey-in-the-jar.shsong",
+      "sha256": {
+        "midi": "ab8a3c65c42fa92ae0cc40d145cf479be396e34c09848dcb5cac23809fbaac52",
+        "project": "8d4dec9eecc20e7da38114c55b2d4fc5357046d23e51f81ffbc414c2e8b56d27"
+      }
+    },
+    {
+      "id": "cotton-eyed-joe",
+      "title": "Cotton-Eyed Joe",
+      "composition": "traditional/public-domain source",
+      "arrangement_license": "MIT",
+      "bpm": 126,
+      "time_signature": "4/4",
+      "key": "G major",
+      "tracks": [
+        "Drums",
+        "Bass",
+        "Pad",
+        "Lead",
+        "Counter"
+      ],
+      "description": "Compact hoedown melody over bass, offbeat pad, four-lane dance drums, and a fresh octave counterline.",
+      "style_ideas": [
+        "country dance",
+        "chiptune",
+        "electro-folk"
+      ],
+      "native_project_meter": "4/4 tracker grid",
+      "public_domain_reasoning": "Traditional American fiddle/dance song. The Library of Congress catalogs a 1939 Lomax field recording and states that Cotton-Eyed Joe is not among the restricted titles in that collection. This is a newly programmed arrangement, not the 1990s dance production.",
+      "sources": [
+        "https://www.loc.gov/item/lomaxbib000040/",
+        "https://citizen-dj.labs.loc.gov/items/loc-musicbox/20100917222547/"
+      ],
+      "midi": "cotton-eyed-joe.mid",
+      "project": "cotton-eyed-joe.shsong",
+      "sha256": {
+        "midi": "802c81aaa2a712840ae4b93347ab7fb3f15364243fac3dbd7cbe61a1091829c8",
+        "project": "34fff465d8c138f6ba005fbbcc4d4f8a279638a5e964f9db14c0537362ff5b3a"
+      }
+    },
+    {
+      "id": "scarborough-fair",
+      "title": "Scarborough Fair",
+      "composition": "traditional/public-domain source",
+      "arrangement_license": "MIT",
+      "bpm": 92,
+      "time_signature": "3/4",
+      "key": "D Dorian",
+      "tracks": [
+        "Drums",
+        "Bass",
+        "Pad",
+        "Lead",
+        "Counter"
+      ],
+      "description": "Modal 3/4 melody with drone-like bass, slow pad, frame-drum pattern, and an independently written descending answer.",
+      "style_ideas": [
+        "medieval ambient",
+        "trip-hop",
+        "orchestral"
+      ],
+      "native_project_meter": "3/4 tracker grid",
+      "public_domain_reasoning": "Traditional English ballad. Library of Congress describes Scarborough Fair as traditional and documents its oral-revival transmission. No harmony or counterpoint from a modern recording is used here.",
+      "sources": [
+        "https://www.loc.gov/collections/songs-of-america/articles-and-essays/musical-styles/traditional/traditional-ballads/",
+        "https://blogs.loc.gov/folklife/2023/04/homegrown-plus-martin-carthy-master-folksinger-and-guitarist-from-england/"
+      ],
+      "midi": "scarborough-fair.mid",
+      "project": "scarborough-fair.shsong",
+      "sha256": {
+        "midi": "7ac2917efacfdb9a60bf432fc08d797c2032fa9084551e7ddbc2314963d7ba42",
+        "project": "75e163c7976f0827384528468c4d18f7d5f697e6fc92a499fc76dfa33ebb714a"
+      }
+    },
+    {
+      "id": "greensleeves",
+      "title": "Greensleeves",
+      "composition": "traditional/public-domain source",
+      "arrangement_license": "MIT",
+      "bpm": 96,
+      "time_signature": "3/4",
+      "key": "A minor",
+      "tracks": [
+        "Drums",
+        "Bass",
+        "Pad",
+        "Lead",
+        "Counter"
+      ],
+      "description": "Three-beat Renaissance melody, grounded bass, soft triads, restrained percussion, and a new bell response.",
+      "style_ideas": [
+        "Renaissance",
+        "dream pop",
+        "cinematic"
+      ],
+      "native_project_meter": "3/4 tracker grid",
+      "public_domain_reasoning": "Anonymous Renaissance tune; a Library of Congress concert note identifies an extant English print naming it in 1588. The arrangement uses a newly authored pulse and countermelody over the old romanesca-derived ground.",
+      "sources": [
+        "https://www.loc.gov/static/events/concerts-from-the-library-of-congress/documents/programs/2324-Jordi-Savall-Hesperion-Apr2-program.pdf"
+      ],
+      "midi": "greensleeves.mid",
+      "project": "greensleeves.shsong",
+      "sha256": {
+        "midi": "273c7815ba95f8311bd01b9d38289efb0886b146535d973da0fbe8ab293ac579",
+        "project": "73fb9c89c3d163ffa406c7770c78537ea375f82af9d307e2b4ca2ea38300e3fa"
+      }
+    },
+    {
+      "id": "amazing-grace",
+      "title": "Amazing Grace",
+      "composition": "traditional/public-domain source",
+      "arrangement_license": "MIT",
+      "bpm": 76,
+      "time_signature": "3/4",
+      "key": "G major",
+      "tracks": [
+        "Drums",
+        "Bass",
+        "Pad",
+        "Lead",
+        "Counter"
+      ],
+      "description": "Spacious hymn melody with root bass, warm pad, gentle 3/4 percussion, and an original upper echo.",
+      "style_ideas": [
+        "gospel",
+        "ambient",
+        "orchestral build"
+      ],
+      "native_project_meter": "3/4 tracker grid",
+      "public_domain_reasoning": "John Newton's text appeared in 1779; the Library of Congress documents William Walker's 1835 publication of the associated New Britain tune. Both are long out of copyright; this instrumental setting is newly arranged.",
+      "sources": [
+        "https://www.loc.gov/collections/amazing-grace/articles-and-essays/dissemination-of-amazing-grace.html/"
+      ],
+      "midi": "amazing-grace.mid",
+      "project": "amazing-grace.shsong",
+      "sha256": {
+        "midi": "7bfcf6aa79ac30bc16c8c8b262859702f4415d5a296cac698cef8e605c8e386a",
+        "project": "fb5bcbf950356560c358ee4f760c8befe0a554ee7ec264db65acadff3ca4a203"
+      }
+    },
+    {
+      "id": "drunken-sailor",
+      "title": "Drunken Sailor",
+      "composition": "traditional/public-domain source",
+      "arrangement_license": "MIT",
+      "bpm": 116,
+      "time_signature": "4/4",
+      "key": "D minor",
+      "tracks": [
+        "Drums",
+        "Bass",
+        "Pad",
+        "Lead",
+        "Counter"
+      ],
+      "description": "Call-and-response lead with stomping bass, minor pad, deck-like drums, and a newly written response line.",
+      "style_ideas": [
+        "punk shanty",
+        "industrial",
+        "festival folk"
+      ],
+      "native_project_meter": "4/4 tracker grid",
+      "public_domain_reasoning": "Traditional sailor work song from the nineteenth-century shanty tradition. Library of Congress sources document the early-to-mid-nineteenth-century genre and archival traditional material. This new syncopated arrangement does not copy a revival recording.",
+      "sources": [
+        "https://blogs.loc.gov/folklife/2021/01/a-deep-dive-into-sea-shanties/",
+        "https://www.loc.gov/collections/traditional-music-and-spoken-word/about-this-collection/rights-and-access/"
+      ],
+      "midi": "drunken-sailor.mid",
+      "project": "drunken-sailor.shsong",
+      "sha256": {
+        "midi": "2f6238f91026cd18bde8a2b342253804fe6324fe8529c51cadf5d7c2fef22abd",
+        "project": "a5ea0e44feea787c7b5853e4de51adf06c252567cfcef13c191a824871c7355f"
+      }
+    },
+    {
+      "id": "wellerman",
+      "title": "Wellerman",
+      "composition": "traditional/public-domain source",
+      "arrangement_license": "MIT",
+      "bpm": 104,
+      "time_signature": "4/4",
+      "key": "E minor",
+      "tracks": [
+        "Drums",
+        "Bass",
+        "Pad",
+        "Lead",
+        "Counter"
+      ],
+      "description": "Firm bass and communal melody over dry drums and pad, with an original offbeat upper response.",
+      "style_ideas": [
+        "sea folk",
+        "synth-pop",
+        "drum and bass halftime"
+      ],
+      "native_project_meter": "4/4 tracker grid",
+      "public_domain_reasoning": "Anonymous New Zealand whaling song. The National Library of New Zealand records an unknown composer and likely 1830s Otago whaling origin; the Library of Congress distinguishes it as an occupational sea song. This arrangement predates no modern performance and copies none.",
+      "sources": [
+        "https://natlib.govt.nz/records/45059227",
+        "https://blogs.loc.gov/folklife/2021/01/a-deep-dive-into-sea-shanties/"
+      ],
+      "midi": "wellerman.mid",
+      "project": "wellerman.shsong",
+      "sha256": {
+        "midi": "27aa38b6c52288a13727f68a2bc702c5e725a0134c5daff46f08177d996b6d5e",
+        "project": "ec3eb9fbb732692e163c384922e8cf2deb3e8a65b8cc109d3a57e5b902f861be"
+      }
+    },
+    {
+      "id": "auld-lang-syne",
+      "title": "Auld Lang Syne",
+      "composition": "traditional/public-domain source",
+      "arrangement_license": "MIT",
+      "bpm": 88,
+      "time_signature": "4/4",
+      "key": "D major",
+      "tracks": [
+        "Drums",
+        "Bass",
+        "Pad",
+        "Lead",
+        "Counter"
+      ],
+      "description": "Clear communal melody with simple bass, broad pad, understated drums, and an original farewell counterline.",
+      "style_ideas": [
+        "piano ballad",
+        "post-rock",
+        "New Year synthwave"
+      ],
+      "native_project_meter": "4/4 tracker grid",
+      "public_domain_reasoning": "Robert Burns adapted older traditional words in the late eighteenth century; the National Library of Scotland documents publication in the Scots Musical Museum and the traditional tune history. Burns died in 1796 and the source material is public domain.",
+      "sources": [
+        "https://www.nls.uk/collections/stories/literature-and-poetry/robert-burns-and-his-history-of-myself/",
+        "https://wee-windaes.nls.uk/the-scots-musical-museum/"
+      ],
+      "midi": "auld-lang-syne.mid",
+      "project": "auld-lang-syne.shsong",
+      "sha256": {
+        "midi": "d012c4ff3c09ffcf2cba59bdc0b2b947481bbd273c1ef3f03fac64a152442b93",
+        "project": "9cd1da467fed9d77eab3dc9f23371840dbd9816b6b3e533151514689f849c3a0"
+      }
+    },
+    {
+      "id": "danny-boy",
+      "title": "Danny Boy",
+      "composition": "traditional/public-domain source",
+      "arrangement_license": "MIT",
+      "bpm": 72,
+      "time_signature": "4/4",
+      "key": "D major",
+      "tracks": [
+        "Drums",
+        "Bass",
+        "Pad",
+        "Lead",
+        "Counter"
+      ],
+      "description": "Long lyrical lead with slow bass, sustained pad, brushes-style drums, and a newly composed answering voice.",
+      "style_ideas": [
+        "cinematic",
+        "ambient",
+        "slow rock"
+      ],
+      "native_project_meter": "4/4 tracker grid",
+      "public_domain_reasoning": "Frederic Weatherly's song was published in 1913 over the traditional Londonderry Air; library catalogs identify the 1913 score and Weatherly's 1848–1929 life dates. Publication-age and life-plus-70 terms have expired. This new instrumental arrangement uses no later orchestration.",
+      "sources": [
+        "https://digitalcommons.library.umaine.edu/mmb-vp/267/",
+        "https://scholarsjunction.msstate.edu/cht-sheet-music/12024/"
+      ],
+      "midi": "danny-boy.mid",
+      "project": "danny-boy.shsong",
+      "sha256": {
+        "midi": "293c574b041de974b5a6b76315351a34a731fcb7080d4c48941aace874c5e603",
+        "project": "367166d9cf2ed5434f1713fb4216216b8d1a2483c0c9bce85f917c3c894a4ab8"
+      }
+    }
+  ]
+}

@@ -292,6 +292,9 @@ struct App {
     original_values: HashMap<u8, f32>,
     held_notes: HeldNotes,
     status: String,
+    controller_fallback: Option<String>,
+    audio_fallback: Option<String>,
+    tracker_fallback: Option<String>,
     hits: Hits,
     recorder: Recorder,
     last: Vec<TimedEvent>,
@@ -385,15 +388,21 @@ struct App {
     loop_meter: PerformanceMeter,
     last_mapped_volume: Option<f32>,
 }
+
+struct TrackerIo {
+    route: engine::SharedTrackerRoute,
+    input: engine::SharedTrackerInput,
+}
+
 impl App {
     fn new(
         catalogs: &[Catalog],
         midi_output: engine::SharedOutput,
         pickup: engine::SharedPickup,
         midi_backend: engine::SharedBackend,
-        tracker_route: engine::SharedTrackerRoute,
-        tracker_input: engine::SharedTrackerInput,
+        tracker_io: TrackerIo,
         mut config: RuntimeConfig,
+        available_audio_ports: &[String],
     ) -> Self {
         let backend_index = catalogs
             .iter()
@@ -415,11 +424,16 @@ impl App {
             Arc::clone(&transport_clock),
         );
         let tracker_live_input = sequencer.live_input();
-        if let Ok(mut input) = tracker_input.lock() {
+        if let Ok(mut input) = tracker_io.input.lock() {
             *input = Some(tracker_live_input.clone());
         }
         let audio_recorder = AudioRecorder::new(config.capture.clone());
-        let loop_player = crate::loop_player::LoopPlayer::new(&config.loop_player, transport_clock);
+        let resolved_audio = config.resolve_audio_route(available_audio_ports);
+        let mut loop_config = config.loop_player.clone();
+        if resolved_audio.outputs.len() == 2 {
+            loop_config.outputs = resolved_audio.outputs.clone();
+        }
+        let loop_player = crate::loop_player::LoopPlayer::new(&loop_config, transport_clock);
         Self {
             catalogs: catalogs.to_vec(),
             backend_index,
@@ -433,6 +447,9 @@ impl App {
             original_values: HashMap::new(),
             held_notes: HeldNotes::default(),
             status: "Ready".into(),
+            controller_fallback: None,
+            audio_fallback: resolved_audio.notice,
+            tracker_fallback: None,
             hits: Hits::default(),
             recorder: Recorder::default(),
             last: vec![],
@@ -452,7 +469,7 @@ impl App {
             midi_output,
             pickup,
             midi_backend,
-            tracker_route,
+            tracker_route: tracker_io.route,
             device_profiles,
             config,
             cpu_temperature: None,
@@ -526,6 +543,17 @@ impl App {
             loop_meter: PerformanceMeter::default(),
             last_mapped_volume: None,
         }
+    }
+
+    fn fallback_notice(&self) -> Option<String> {
+        let notices = self
+            .controller_fallback
+            .iter()
+            .chain(self.audio_fallback.iter())
+            .chain(self.tracker_fallback.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        (!notices.is_empty()).then(|| notices.join(" · "))
     }
 
     fn menu_context(&self) -> MenuContext {
@@ -808,6 +836,15 @@ impl App {
         self.status = "CELL EDIT · NOTE selected · Confirm commits, Cancel restores".into();
     }
     fn select_note_editor_field(&mut self, field: NoteEditorField) {
+        if field == NoteEditorField::Program
+            && self
+                .current_page()
+                .is_some_and(|page| page.target == PageTarget::Default)
+        {
+            self.status =
+                "PROGRAM is AUTO on a portable page · choose an explicit target first".into();
+            return;
+        }
         let program = if let Some(editor) = self.note_editor.as_mut() {
             editor.field = field;
             self.status = format!("CELL EDIT · {} selected", field.label());
@@ -1220,9 +1257,10 @@ impl App {
             .note_editor
             .and_then(|editor| editor.draft.program)
             .unwrap_or(column.program);
-        let mut columns = page.columns.map(|setup| {
+        let mut columns = std::array::from_fn(|index| {
+            let setup = page.columns[index];
             (
-                setup.channel,
+                page.runtime_channel(index, &self.config.external_midi),
                 (setup.program, setup.bank_msb, setup.bank_lsb),
             )
         });
@@ -1254,7 +1292,7 @@ impl App {
     fn tracker_device_profile(&self) -> Option<&DeviceProfile> {
         let page = self.current_page()?;
         match &page.target {
-            PageTarget::ConfiguredExternal => self
+            PageTarget::Default | PageTarget::ConfiguredExternal => self
                 .device_profiles
                 .by_id(&self.config.external_midi.profile),
             PageTarget::Midi(port) => self.device_profiles.matching_port(port),
@@ -1326,7 +1364,7 @@ impl App {
             .map_or_else(|| "no page".into(), |page| format!("{} page", page.name));
     }
     fn refresh_page_targets(&mut self) {
-        let mut targets = vec![PageTarget::ActiveInstrument];
+        let mut targets = vec![PageTarget::Default, PageTarget::ActiveInstrument];
         if !self.config.external_midi.output_match.is_empty() {
             targets.push(PageTarget::ConfiguredExternal);
         }
@@ -1365,8 +1403,44 @@ impl App {
     }
     fn target_online(&self, target: &PageTarget) -> bool {
         match target {
+            PageTarget::Default => {
+                self.engine.is_some()
+                    || (self.config.external_midi.enabled
+                        && sequencer::matching_output_index(
+                            &self.available_page_outputs,
+                            &self.config.external_midi.output_match,
+                            true,
+                        )
+                        .is_ok())
+            }
             PageTarget::ActiveInstrument => self.engine.is_some(),
             PageTarget::ConfiguredExternal => {
+                self.engine.is_some()
+                    || (self.config.external_midi.enabled
+                        && sequencer::matching_output_index(
+                            &self.available_page_outputs,
+                            &self.config.external_midi.output_match,
+                            true,
+                        )
+                        .is_ok())
+            }
+            PageTarget::Midi(name) => {
+                sequencer::matching_output_index(&self.available_page_outputs, name, false).is_ok()
+                    || self.engine.is_some()
+                    || (self.config.external_midi.enabled
+                        && sequencer::matching_output_index(
+                            &self.available_page_outputs,
+                            &self.config.external_midi.output_match,
+                            true,
+                        )
+                        .is_ok())
+            }
+        }
+    }
+    fn target_has_hardware_route(&self, target: &PageTarget) -> bool {
+        match target {
+            PageTarget::ActiveInstrument => false,
+            PageTarget::Default | PageTarget::ConfiguredExternal => {
                 self.config.external_midi.enabled
                     && sequencer::matching_output_index(
                         &self.available_page_outputs,
@@ -1377,6 +1451,45 @@ impl App {
             }
             PageTarget::Midi(name) => {
                 sequencer::matching_output_index(&self.available_page_outputs, name, false).is_ok()
+                    || (self.config.external_midi.enabled
+                        && sequencer::matching_output_index(
+                            &self.available_page_outputs,
+                            &self.config.external_midi.output_match,
+                            true,
+                        )
+                        .is_ok())
+            }
+        }
+    }
+    fn target_route_label(&self, target: &PageTarget) -> &'static str {
+        if !self.target_online(target) {
+            return "OFFLINE";
+        }
+        match target {
+            PageTarget::Default => "AUTO",
+            PageTarget::ActiveInstrument => "ONLINE",
+            PageTarget::ConfiguredExternal => {
+                if self.config.external_midi.enabled
+                    && sequencer::matching_output_index(
+                        &self.available_page_outputs,
+                        &self.config.external_midi.output_match,
+                        true,
+                    )
+                    .is_ok()
+                {
+                    "ONLINE"
+                } else {
+                    "FALLBACK"
+                }
+            }
+            PageTarget::Midi(name) => {
+                if sequencer::matching_output_index(&self.available_page_outputs, name, false)
+                    .is_ok()
+                {
+                    "ONLINE"
+                } else {
+                    "FALLBACK"
+                }
             }
         }
     }
@@ -1472,6 +1585,13 @@ impl App {
         if self.page_manager_mode != PageManagerMode::Pages {
             return;
         }
+        if self
+            .current_page()
+            .is_some_and(|page| page.target == PageTarget::Default)
+        {
+            self.status = "channel AUTO · choose an explicit target before assigning 1–16".into();
+            return;
+        }
         self.page_channel_draft = self.current_column().map_or(0, |column| column.channel);
         self.page_manager_mode = PageManagerMode::Channel;
         self.reset_context_page();
@@ -1493,6 +1613,12 @@ impl App {
                 PageManagerMode::Target => {
                     if let Some(target) = selected_target {
                         page.target = target;
+                        if page.target == PageTarget::Default {
+                            for column in &mut page.columns {
+                                *column = sequencer::ColumnSetup::default();
+                            }
+                            page.setup.clear();
+                        }
                     }
                 }
                 PageManagerMode::Channel => page.column_mut(track).channel = channel,
@@ -1663,8 +1789,10 @@ impl App {
             self.status = "REC unavailable · current page is missing".into();
             return;
         };
-        if matches!(page.target, PageTarget::ActiveInstrument) {
-            self.status = "REC needs a MIDI output page · loaded synth stays isolated".into();
+        if !self.target_has_hardware_route(&page.target) {
+            self.status =
+                "REC needs an available MIDI hardware output · synth/keyboard fallback stays isolated"
+                    .into();
             return;
         }
         self.cancel_note_editor();
@@ -3162,6 +3290,14 @@ impl App {
         }
     }
     fn change_program(&mut self, direction: i8) {
+        if self
+            .current_page()
+            .is_some_and(|page| page.target == PageTarget::Default)
+        {
+            self.status =
+                "program AUTO · choose an explicit target before assigning a program".into();
+            return;
+        }
         let track = self.tracker_track;
         if let Some(page) = self.current_page_mut() {
             let name = page.name.clone();
@@ -3176,6 +3312,13 @@ impl App {
         }
     }
     fn change_bank(&mut self, msb: bool, direction: i8) {
+        if self
+            .current_page()
+            .is_some_and(|page| page.target == PageTarget::Default)
+        {
+            self.status = "bank AUTO · choose an explicit target before assigning a bank".into();
+            return;
+        }
         let track = self.tracker_track;
         if let Some(column) = self.current_column_mut() {
             let value = if msb {
@@ -3729,6 +3872,10 @@ impl App {
         ) {
             Ok(e) => {
                 let audio_route = e.audio_route_status();
+                self.audio_fallback = audio_route
+                    .as_ref()
+                    .filter(|route| route.contains("fallback") || route.contains("unavailable"))
+                    .cloned();
                 self.engine = Some(e);
                 if let Ok(mut backend) = self.midi_backend.lock() {
                     *backend = p.backend;
@@ -4024,6 +4171,12 @@ impl App {
                 ) {
                     Ok(engine) => {
                         let audio_route = engine.audio_route_status();
+                        self.audio_fallback = audio_route
+                            .as_ref()
+                            .filter(|route| {
+                                route.contains("fallback") || route.contains("unavailable")
+                            })
+                            .cloned();
                         self.engine = Some(engine);
                         if let Ok(mut backend) = self.midi_backend.lock() {
                             *backend = preset.backend;
@@ -4134,6 +4287,10 @@ impl App {
                     self.status = format!("tracker target unavailable: {error}");
                 }
             }
+            self.tracker_fallback = tracker
+                .playing
+                .then(|| tracker.fallbacks.values().next().cloned())
+                .flatten();
         }
         if let Some(status) = self.engine.as_mut().and_then(Engine::poll_audio_graph) {
             self.performance_meter
@@ -4249,20 +4406,30 @@ fn app_loop(
         .as_ref()
         .map(engine::MidiRouter::tracker_input)
         .unwrap_or_else(|_| Arc::new(std::sync::Mutex::new(None)));
+    let available_audio_ports = engine::jack_ports();
     let mut app = App::new(
         catalogs,
         output,
         pickup,
         midi_backend,
-        tracker_route,
-        tracker_input,
+        TrackerIo {
+            route: tracker_route,
+            input: tracker_input,
+        },
         config.clone(),
+        &available_audio_ports,
     );
     app.controller_layout = crate::pads::PadConfig::load(&state.join("controller.conf"))
         .unwrap_or_default()
         .layout;
     if let Err(e) = &router {
-        app.status = format!("MIDI: {e:#}");
+        let notice = if config.midi_autoconnect {
+            format!("keyboard fallback · preferred MIDI input missing: {e:#}")
+        } else {
+            "keyboard input · MIDI controller routing disabled".into()
+        };
+        app.status = notice.clone();
+        app.controller_fallback = Some(notice);
     }
     let _router = router.ok();
     let mut quit = false;
@@ -5759,6 +5926,7 @@ fn draw<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         Screen::Meter => draw_performance_meter(f, a),
     }
     draw_pad_lock(f, a);
+    draw_fallback_badge(f, a);
     draw_pad_buttons(f, a);
     if a.screen != Screen::Playback {
         draw_status_bar(f, a);
@@ -6518,6 +6686,20 @@ fn draw_pad_lock<B: Backend>(f: &mut Frame<B>, a: &App) {
         rect(z.x + z.width.saturating_sub(3), z.y, z.width.min(3), 1),
     );
 }
+fn draw_fallback_badge<B: Backend>(f: &mut Frame<B>, a: &App) {
+    if a.fallback_notice().is_none() || a.screen != Screen::Playback {
+        return;
+    }
+    let z = f.size();
+    f.render_widget(
+        Paragraph::new("FLT").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        rect(z.x, z.y, z.width.min(3), 1),
+    );
+}
 // Screen layouts still calculate these rectangles for mouse hit tests. The
 // visible controls are rendered by the
 // canonical paged menu below.
@@ -6647,6 +6829,18 @@ fn draw_status_bar<B: Backend>(f: &mut Frame<B>, a: &mut App) {
             .unwrap_or_else(|| "CPU --°C".into())
     });
     let area = rect(z.x, z.y + z.height - 1, z.width, 1);
+    if let Some(notice) = a.fallback_notice() {
+        f.render_widget(
+            Paragraph::new(truncate(&format!(" FALLBACK · {notice}"), z.width as usize)).style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .bg(Color::Rgb(32, 32, 32))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            area,
+        );
+        return;
+    }
     let style = Style::default().fg(Color::Gray).bg(Color::Rgb(32, 32, 32));
     let left = format!(
         " {} P{} {engine} {rec}",
@@ -7077,7 +7271,7 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         rect(z.x, z.y, z.width, 1),
     );
     let page_online = a.target_online(&page.target);
-    let available = if page_online { "ONLINE" } else { "OFFLINE" };
+    let available = a.target_route_label(&page.target);
     f.render_widget(
         Paragraph::new(truncate(
             &format!(
@@ -7088,11 +7282,13 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
             ),
             z.width as usize,
         ))
-        .style(Style::default().fg(if page_online {
-            Color::DarkGray
-        } else {
-            Color::Yellow
-        })),
+        .style(
+            Style::default().fg(if page_online && available != "FALLBACK" {
+                Color::DarkGray
+            } else {
+                Color::Yellow
+            }),
+        ),
         rect(z.x, z.y + 1, z.width, 1),
     );
     let grid = rect(z.x, z.y + 2, z.width, z.height.saturating_sub(6));
@@ -7110,12 +7306,12 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         let mut header = String::from("ROW");
         for (index, lane) in page.lanes.iter().enumerate() {
             let setup = page.column(index);
-            let compact = format!(
-                "{}:{:02}/{:03}",
-                index + 1,
-                setup.channel + 1,
-                setup.program
-            );
+            let channel = if page.target == PageTarget::Default {
+                "AU".to_owned()
+            } else {
+                format!("{:02}", setup.channel + 1)
+            };
+            let compact = format!("{}:{}/{:03}", index + 1, channel, setup.program);
             header.push_str(&format!(
                 "{:^w$}",
                 truncate(
@@ -7301,10 +7497,18 @@ fn draw_tracker_pages<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     let setup_label = a
         .current_column()
         .map(|column| {
+            let channel = if a
+                .current_page()
+                .is_some_and(|page| page.target == PageTarget::Default)
+            {
+                "AUTO".to_owned()
+            } else {
+                (column.channel + 1).to_string()
+            };
             format!(
                 "C{} ch{} b{}/{} {}",
                 a.tracker_track + 1,
-                column.channel + 1,
+                channel,
                 column.bank_msb,
                 column.bank_lsb,
                 a.tracker_program_label(column.program)
@@ -7336,14 +7540,20 @@ fn draw_tracker_pages<B: Backend>(f: &mut Frame<B>, a: &mut App) {
                 .take(rows)
                 .map(|(index, page)| {
                     let online = a.target_online(&page.target);
+                    let route = a.target_route_label(&page.target);
+                    let channel = if page.target == PageTarget::Default {
+                        "AU".to_owned()
+                    } else {
+                        format!("{:02}", page.column(a.tracker_track).channel + 1)
+                    };
                     let text = format!(
-                        "{}{:02} {} {:<6} C{} ch{:02} p{:03} {}",
+                        "{}{:02} {} {:<6} C{} ch{} p{:03} {}",
                         if index == a.tracker_page { "▶" } else { " " },
                         index + 1,
-                        if online { "ON" } else { "OFFLINE" },
+                        route,
                         truncate(&page.name, 6),
                         a.tracker_track + 1,
-                        page.column(a.tracker_track).channel + 1,
+                        channel,
                         page.column(a.tracker_track).program,
                         truncate(page.target.label(), 7),
                     );
@@ -7379,6 +7589,11 @@ fn draw_tracker_pages<B: Backend>(f: &mut Frame<B>, a: &mut App) {
                 .page_target_candidates
                 .get(a.page_target_selected)
                 .is_some_and(|target| a.target_online(target));
+            let route = a
+                .page_target_candidates
+                .get(a.page_target_selected)
+                .map(|target| a.target_route_label(target))
+                .unwrap_or("OFFLINE");
             f.render_widget(
                 Paragraph::new(vec![
                     Spans::from("TARGET DEVICE"),
@@ -7391,7 +7606,7 @@ fn draw_tracker_pages<B: Backend>(f: &mut Frame<B>, a: &mut App) {
                         Style::default().fg(Color::Black).bg(Color::Yellow),
                     )),
                     Spans::from(if online {
-                        "ONLINE"
+                        route
                     } else {
                         "OFFLINE · data is kept"
                     }),
@@ -7971,14 +8186,18 @@ fn screenshot_app(mut config: RuntimeConfig) -> App {
         .collect(),
         unavailable: None,
     }];
+    let available_audio_ports = config.audio_outputs.clone();
     let mut app = App::new(
         &catalogs,
         Arc::new(std::sync::Mutex::new(None)),
         Arc::new(std::sync::Mutex::new(crate::midi::Pickup::default())),
         Arc::new(std::sync::Mutex::new(BackendKind::Synthv1)),
-        Arc::new(std::sync::Mutex::new(engine::TrackerRoute::default())),
-        Arc::new(std::sync::Mutex::new(None)),
+        TrackerIo {
+            route: Arc::new(std::sync::Mutex::new(engine::TrackerRoute::default())),
+            input: Arc::new(std::sync::Mutex::new(None)),
+        },
         config,
+        &available_audio_ports,
     );
     app.web_help_enabled = false;
     app.playing = app.presets.first().cloned();
@@ -8459,17 +8678,30 @@ mod tests {
             presets: presets.to_vec(),
             unavailable: None,
         }];
+        let config = RuntimeConfig::default();
+        let available_audio_ports = config.audio_outputs.clone();
         let mut app = App::new(
             &catalogs,
             Arc::new(std::sync::Mutex::new(None)),
             Arc::new(std::sync::Mutex::new(crate::midi::Pickup::default())),
             Arc::new(std::sync::Mutex::new(BackendKind::Synthv1)),
-            Arc::new(std::sync::Mutex::new(engine::TrackerRoute::default())),
-            Arc::new(std::sync::Mutex::new(None)),
-            RuntimeConfig::default(),
+            TrackerIo {
+                route: Arc::new(std::sync::Mutex::new(engine::TrackerRoute::default())),
+                input: Arc::new(std::sync::Mutex::new(None)),
+            },
+            config,
+            &available_audio_ports,
         );
         app.web_help_enabled = false;
+        if !app.config.external_midi.output_match.is_empty() {
+            app.available_page_outputs = vec![app.config.external_midi.output_match.clone()];
+        }
         app
+    }
+    fn connect_test_midi_hardware(app: &mut App) {
+        app.config.external_midi.enabled = true;
+        app.config.external_midi.output_match = "Test MIDI output".into();
+        app.available_page_outputs = vec!["Test MIDI output".into()];
     }
     fn render(w: u16, h: u16, screen: Screen) {
         let p = presets();
@@ -9010,6 +9242,7 @@ mod tests {
     fn tracker_record_exit_stops_capture_without_leaving_tracker() {
         let p = presets();
         let mut a = app(&p);
+        connect_test_midi_hardware(&mut a);
         a.set_screen(Screen::Tracker);
         a.current_page_mut().unwrap().target = PageTarget::ConfiguredExternal;
         a.begin_tracker_recording();
@@ -9026,6 +9259,7 @@ mod tests {
     fn opening_help_stops_tracker_recording_before_disabling_its_route() {
         let p = presets();
         let mut a = app(&p);
+        connect_test_midi_hardware(&mut a);
         a.set_screen(Screen::Tracker);
         a.current_page_mut().unwrap().target = PageTarget::ConfiguredExternal;
         a.begin_tracker_recording();
@@ -9137,10 +9371,6 @@ mod tests {
         perform(Action::NextTrack, &mut a, Path::new("/none"), None);
         assert_eq!(a.tracker_page, 2);
         assert_eq!(a.tracker_track, 1);
-        perform(Action::ConfirmPageManager, &mut a, Path::new("/none"), None);
-        assert_eq!(a.screen, Screen::TrackerPages);
-        assert!(a.status.contains("conflict"));
-        a.current_page_mut().unwrap().column_mut(0).program = 9;
         perform(Action::ConfirmPageManager, &mut a, Path::new("/none"), None);
         assert_eq!(a.screen, Screen::Tracker);
         assert!(a.page_manager_original.is_none());
@@ -9280,6 +9510,7 @@ mod tests {
         let p = presets();
         let mut a = app(&p);
         a.screen = Screen::Tracker;
+        a.current_page_mut().unwrap().target = PageTarget::ConfiguredExternal;
         a.open_note_editor();
         let exit = navigation::slot(a.screen, a.menu_context(), 3, 3)
             .and_then(|slot| slot.dispatch())
@@ -9370,14 +9601,19 @@ mod tests {
                 unavailable: Some("not installed".into()),
             },
         ];
+        let config = RuntimeConfig::default();
+        let available_audio_ports = config.audio_outputs.clone();
         let mut a = App::new(
             &catalogs,
             Arc::new(std::sync::Mutex::new(None)),
             Arc::new(std::sync::Mutex::new(crate::midi::Pickup::default())),
             Arc::new(std::sync::Mutex::new(BackendKind::Synthv1)),
-            Arc::new(std::sync::Mutex::new(engine::TrackerRoute::default())),
-            Arc::new(std::sync::Mutex::new(None)),
-            RuntimeConfig::default(),
+            TrackerIo {
+                route: Arc::new(std::sync::Mutex::new(engine::TrackerRoute::default())),
+                input: Arc::new(std::sync::Mutex::new(None)),
+            },
+            config,
+            &available_audio_ports,
         );
         a.selected = 7;
         perform(Action::NextEngine, &mut a, Path::new("/none"), None);
@@ -9576,6 +9812,7 @@ mod tests {
         let p = presets();
         let mut a = app(&p);
         a.screen = Screen::Tracker;
+        connect_test_midi_hardware(&mut a);
         a.tracker_play(true);
         assert!(a.status.contains("no notes"));
         perform(Action::NextTrack, &mut a, Path::new("/none"), None);
@@ -10029,6 +10266,7 @@ mod tests {
         let p = presets();
         let mut a = app(&p);
         a.screen = Screen::Tracker;
+        a.current_page_mut().unwrap().target = PageTarget::ConfiguredExternal;
         a.open_note_editor();
         a.select_menu_page(1);
         let (tx, rx) = mpsc::channel();
@@ -10503,10 +10741,16 @@ mod tests {
         let p = presets();
         let mut a = app(&p);
         a.screen = Screen::Tracker;
+        a.available_page_outputs.clear();
+        a.begin_tracker_recording();
+        assert!(a.tracker_recording.is_none());
+        assert!(a.status.contains("available MIDI hardware output"));
+
+        connect_test_midi_hardware(&mut a);
         a.current_page_mut().unwrap().target = PageTarget::ActiveInstrument;
         a.begin_tracker_recording();
         assert!(a.tracker_recording.is_none());
-        assert!(a.status.contains("loaded synth stays isolated"));
+        assert!(a.status.contains("fallback stays isolated"));
 
         a.current_page_mut().unwrap().target = PageTarget::ConfiguredExternal;
         let setup = a.current_pattern().unwrap().clone();
@@ -10540,6 +10784,7 @@ mod tests {
         let p = presets();
         let mut a = app(&p);
         a.screen = Screen::Tracker;
+        connect_test_midi_hardware(&mut a);
         a.current_page_mut().unwrap().target = PageTarget::ConfiguredExternal;
         a.begin_tracker_recording();
 

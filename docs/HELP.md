@@ -129,17 +129,17 @@ source note that created them.
 
 ## Pages and hardware MIDI
 
-Each tracker page has four lanes and one destination. Every column independently
-stores MIDI channel 1–16, bank MSB/LSB, and master program. Pages can target the
-active software instrument, the configured external output, or a named MIDI
-port. Sharing a destination/channel is allowed only when the columns select the
-same master instrument.
+Each tracker page has four lanes and one destination. AUTO is portable: it saves
+no device/channel route and uses this machine's defaults. Explicit columns store
+MIDI channel 1–16, bank MSB/LSB, and master program. Pages can also target the
+active software instrument, configured external output, or a named MIDI port.
+Sharing a destination/channel requires the same master instrument.
 
 Real-time REC is hardware-output only. It refuses Active Instrument so a loaded
 software synth is not doubled or rewritten by live capture.
 
-Offline targets keep their data. If hardware is unplugged, fix the page target
-or reconnect the device; the Project does not discard the route.
+Missing preferred targets keep their data and show FALLBACK or OFFLINE. A
+runtime substitute never replaces the saved route; reconnect and play again.
 
 FILES NEW PRJ requires a second press, clears the current unsaved Project, and
 starts the next `project-001` style name. SAVE AS writes and switches to the

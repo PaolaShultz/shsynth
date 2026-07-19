@@ -7,6 +7,8 @@ mod config;
 mod control;
 mod controller_learn;
 mod controller_profile;
+#[cfg(test)]
+mod demo;
 mod device_profile;
 mod drum_pattern;
 pub mod dsp;

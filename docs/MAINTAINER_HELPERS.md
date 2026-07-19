@@ -15,11 +15,12 @@ assumptions.
 |---|---|---|
 | `setup-local.sh` | Configure this checkout inside ignored private storage | Writes below `user/` by default; may run the interactive hardware wizard |
 | `local.sh` | Run the checkout without using normal home-directory state | Writes runtime data below `user/` by default |
-| `setup.sh` / installed `shr-setup` | Seed loops and configure display/MIDI/JACK choices | Backs up and rewrites owned configuration; optionally downloads private loops, writes `~/.jackdrc`, and installs CPU tuning after confirmation |
+| `setup.sh` / installed `shr-setup` | Seed loops/demos and configure display/MIDI/JACK choices | Backs up and rewrites owned configuration; optionally downloads private loops, writes `~/.jackdrc`, and installs CPU tuning after confirmation |
 | `install.sh` | Install dependencies and SHR-DAW on Debian/Raspberry Pi OS | May use `sudo apt-get`, rustup, `sudo make install-files`, and the setup wizard |
 | `audio-performance.sh` / installed `shr-audio-tune` | Reversibly reserve one CPU for audio | Manages specific boot, systemd, governor, and JACK-affinity settings; requires reboot for isolation |
 | `render-readme-screenshots.py` | Regenerate or validate real TUI documentation images | Writes tracked PNGs below `docs/images/` only |
 | `generate_cleared_presets.sh` | Reproduce the authored public synthv1 bank | Creates named preset files only when they do not already exist |
+| `generate_demo_songs.py` | Reproduce or validate cleared public-domain demos | `--write` replaces only tracked demo outputs; normal mode is read-only and rejects changes/extras |
 
 None of the setup, tuning, preset, or screenshot helpers starts JACK, a synth
 engine, MIDI playback, or an audible test. `local.sh` is the exception only in
@@ -52,7 +53,8 @@ The wrapper exports:
 It requires an executable SHR-DAW binary, creates the private preset directory,
 copies only missing public presets into it, and then replaces itself with
 `setup.sh --state-dir "$XDG_STATE_HOME/shsynth"`. The shared wizard seeds only
-the missing WAV names in `loops/cleared-loops.txt` into the private inbox.
+the missing WAV names in `loops/cleared-loops.txt` and missing cleared demo
+Projects. Matching demo MIDI/manifest files live in the private XDG demo tree.
 
 ### Why it exists
 
@@ -91,9 +93,9 @@ ownership, and clean shutdown therefore reach the application directly instead
 of passing through a redundant shell parent. This matters for All Notes Off and
 owned engine shutdown.
 
-The launcher does not recopy or reset the whole private tree. It creates only
-required directories and missing public preset/loop seeds, preserving all user
-work.
+The launcher does not recopy or reset the whole private tree. It validates the
+demo corpus and creates only required directories and missing public preset,
+loop, and demo seeds, preserving all user work.
 
 ## Hardware setup wizard: `setup.sh` / `shr-setup`
 
@@ -122,13 +124,17 @@ Environment:
   import inbox.
 
 The source-tree form reads templates from `config/`, MIDI-device profiles from
-`midi-devices/`, and allowlisted starter WAVs from `loops/`. The installed form
-resolves all three beneath `share/shsynth/`. If configuration is missing in the
+`midi-devices/`, allowlisted starter WAVs from `loops/`, and the cleared demo
+manifest/files from `demos/`. The installed form resolves all four beneath
+`share/shsynth/`. If configuration is missing in the
 normal state directory it uses `shr config init`; for an explicit state
 directory it copies only missing template files.
 
 Setup always creates or preserves configuration, selects the active XDG/private
-loop inbox for new configuration, and copies missing allowlisted starter loops.
+loop inbox for new configuration, copies missing allowlisted starter loops,
+copies missing demo Projects to `songs/`, and mirrors the cleared demo corpus
+under `demos/`. The manifest itself may be refreshed; user Projects are never
+replaced.
 If standard input is not a terminal it then stops; it never guesses display,
 download, or hardware choices in automation.
 
@@ -141,11 +147,12 @@ both `shsynth.conf` and `controller.conf`. It then:
 2. optionally selects an ALSA interface and writes a backed-up `~/.jackdrc` for
    the user's next manual JACK restart;
 3. selects the controller input and writes the same exact match to runtime and
-   controller configuration;
+   controller configuration, or explicitly keeps keyboard-only operation;
 4. runs non-audible `shr pads auto`, optionally followed by `shr pads learn` if
    no reviewed profile matches;
-5. discovers physical JACK playback ports, writes the same stereo pair for
-   synth and loop playback, or accepts a manual exact name when JACK is offline;
+5. discovers physical JACK playback ports, writes the same preferred stereo
+   pair for synth and loop playback, then optionally records a named internal
+   fallback and a distinct final analogue-headphone fallback;
 6. optionally downloads four MusicRadar 80s drum beats, converts them to the
    chosen WAV rate with SoX, and records their source/redistribution terms;
 7. optionally configures a distinct stereo capture pair and label;
@@ -172,8 +179,12 @@ both `shsynth.conf` and `controller.conf`. It then:
   interrupt or produce audible output.
 - Controller learning is non-audible: learned MIDI is not forwarded to a synth.
 - Existing configuration is backed up rather than silently discarded.
+- Hardware discovery never overwrites a remembered route merely because that
+  hardware is absent. The user must explicitly choose a changed/disabled route.
 - Public and downloaded-private loop seeds never replace a same-named inbox
   file. Public packaging is constrained by `loops/cleared-loops.txt`.
+- Cleared demo Projects never replace same-named user songs. Demo source
+  packaging is constrained by `cleared-demos.json` and deterministic validation.
 - The optional 78 MB archive is fetched directly from MusicRadar into a
   temporary directory and deleted after extracting four tempo-labelled beats.
   Those raw WAVs remain private because MusicRadar forbids redistribution.
@@ -197,7 +208,8 @@ Options:
 
 With dependencies enabled, it requires a Debian-style `apt-get` system and uses
 `sudo` to install the build toolchain, ALSA/JACK utilities and headers, SoX and
-unzip for optional loop installation, the three supported software instruments,
+unzip for optional loop installation, Python 3 for demo validation/seeding, the
+three supported software instruments,
 and their packaged data. It requires
 Rust 1.85 or newer; when necessary it installs the official minimal rustup
 toolchain for the current user and runs Cargo as `cargo +1.85.0`.
@@ -387,6 +399,38 @@ a public preset still requires schema/XML validation, listening review when
 authorized, an entry in `cleared-presets.txt`, and provenance in
 `THIRD_PARTY.md` as described by `docs/NEW_PATCHES.md`.
 
+## Cleared demo generator: `generate_demo_songs.py`
+
+### Invocation
+
+```sh
+./scripts/generate_demo_songs.py
+./scripts/generate_demo_songs.py --files
+./scripts/generate_demo_songs.py --write
+```
+
+Normal mode regenerates all expected bytes in memory and validates the exact
+`demos/` directory. It fails for a missing, changed, or extra regular file.
+`--files` performs the same validation and then prints the manifest-cleared
+repository paths used by `make install-files`. `--write` is the only mutating
+mode: it creates `demos/` if needed and replaces the 10 MIDI files, 10 current
+`.shsong` Projects, and `cleared-demos.json` with deterministic output. It does
+not touch user/XDG song data.
+
+The script uses only Python's standard library. Each format-1 MIDI contains a
+conductor track and five named musical parts; each Project contains the same
+parts with canonical format-4 `default` routes. The JSON manifest owns title,
+tempo, meter, key, parts, description, style ideas, original-arrangement
+licence, public-domain reasoning, institutional source URLs, filenames, and
+SHA-256 hashes. `src/demo.rs` validates that manifest, MIDI chunk structure,
+native Project loading/routing, metadata, and exact directory membership.
+
+The generator's melody/harmony/event data are the original SHR-DAW
+arrangements. Do not replace them with downloaded MIDI or a transcription of a
+modern recording. Any new title needs its own public-domain analysis and source
+record before `--write`; changing the source requires rerunning validation and
+reviewing the regenerated hashes. No JACK client or MIDI output is opened.
+
 ## Related Make targets
 
 The Makefile is not a script, but the installer delegates its final file layout
@@ -395,6 +439,7 @@ to it:
 ```sh
 make build
 make test
+make check-demos
 sudo make install
 sudo make install-files
 sudo make uninstall
@@ -406,7 +451,8 @@ Variables:
 - `PREFIX` defaults to `/usr/local`;
 - `DESTDIR` prefixes the install tree for packaging or a non-root fixture.
 
-`install-files` installs only presets named by the cleared manifest, the
+`install-files` first runs `check-demos`, then installs only presets and demos
+named by their cleared manifests, the
 configuration and device/profile data, drum patterns, documentation, nested
 menu chapters, and nested menu images. The public `shr` binary receives the
 compatibility aliases `shs` and `synth-player`; no separate process binary is
@@ -435,6 +481,9 @@ Match validation to the helper's effects:
 - Documentation: check local links/image references and run `git diff --check`.
 - Preset generator or output: validate every affected `.synthv1` with
   `xmllint`, confirm parameter names, manifest membership, and provenance.
+- Demo generator or output: compile the Python helper, run its normal check,
+  run the Rust structural test, inspect manifest provenance, and verify the
+  staged package contains only `--files` output.
 - Installer, setup, runtime, Makefile, Rust fixture, Cargo, or application
   behavior: run the complete pinned Rust format, test, warning-denied Clippy,
   and locked release-build suite required by `AGENTS.md`.

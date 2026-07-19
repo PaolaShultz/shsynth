@@ -6,8 +6,9 @@
 SHR-DAW's FT2 screen is a compact vertical MIDI Pattern sequencer inspired by
 tracker workflow. It is not an XM editor or a clone of FastTracker II. A
 Project owns several Patterns and an Arrangement order. Each Pattern has one or
-more four-lane pages; a page selects a MIDI destination, while each of its four
-columns retains a channel, bank, and program.
+more four-lane pages. Portable `AUTO` pages defer destination and channels to
+the active machine; explicit pages retain a destination plus each column's
+channel, bank, and program.
 
 The screenshots use a populated demonstration Project. External routes are
 shown as offline where no actual device was opened for documentation.

@@ -54,6 +54,8 @@ this with hardcoded Rust paths. The important local paths are:
   state, and generated engine configuration;
 - `user/data/shsynth/ideas/`: recorded MIDI ideas;
 - `user/data/shsynth/songs/`: tracker Projects (`.shsong`);
+- `user/data/shsynth/demos/`: missing-only cleared MIDI/Project demo copies and
+  their public manifest;
 - `user/data/shsynth/recordings/`: stereo WAV recordings;
 - `user/data/shsynth/loop-inbox/`: missing-only public starter seeds and any
   private source loops offered for import;
@@ -69,6 +71,14 @@ optional 80s drum download is royalty-free for music but forbids raw-sample
 redistribution. It must remain below user data and must never be committed or
 packaged; setup downloads it directly and keeps a source/terms note beside the
 four extracted tempo examples.
+
+The tracked `demos/cleared-demos.json` is the only public demo-song packaging
+manifest. It records title/BPM/meter/key/parts, descriptions and restyle ideas,
+per-composition public-domain reasoning and institutional links, arrangement
+licence, exact filenames, and hashes. `scripts/generate_demo_songs.py` owns the
+deterministic 10 MIDI plus 10 format-4 Project outputs and rejects changes or
+extras by default. Setup copies demo Projects into `songs/` without replacing
+user files and keeps the matching corpus below `demos/`.
 
 The local setup currently selects the MiniLab3 MIDI controller, JACK
 `system:playback_1`/`system:playback_2`, AudioBox USB 96 stereo capture through
@@ -266,15 +276,28 @@ External MIDI sound names are data-driven. JSON profiles live in
 `midi-devices/` (installed below `share/shsynth/midi-devices/`), while private
 overrides can live below `${XDG_DATA_HOME}/shsynth/midi-devices/` or
 `SHSYNTH_DEVICE_PROFILE_DIR`. `roland-d-50` is the first bundled profile, not a
-hardcoded tracker mode. Each FT2 page has one destination and four persisted
-column channel/bank/program setups. Project format 3 stores those setups plus
-the source insert rack, two aux routes, and master rack. Formats 0 and 1 migrate
+hardcoded tracker mode. Each FT2 page has one destination and four columns.
+Project format 4 adds the canonical portable `default` target, whose
+device/channel/bank/program route is blank and resolved from active machine
+configuration. Explicit pages still persist their four setups. Format 3 loads
+with every route remaining explicit and stores the source insert rack, two aux
+routes, and master rack. Formats 0 and 1 migrate
 with empty effects routing; format 2 retains its source rack and gains empty
 aux/master routing; format 0 page-wide setups also migrate into four identical
 columns. Unknown newer formats and invalid fields are refused. Compatible
 shared channels require identical master selections. FT2 Program cell editing
 uses the selected column for named live audition; devices without a profile
 retain numeric 0–127 access.
+
+Preferred routing and resolved runtime routing are separate. MIDI targets are
+re-resolved for every transport start: an unavailable exact target tries the
+configured external output and then the loaded internal instrument without
+mutating the Project, so a returned target is used on a later play. Controller
+open failure leaves keyboard navigation/entry active. Audio activation tries
+the preferred pair, ordered named internal pairs, and the separately configured
+analogue headphone pair last; the status identifies both fallback and missing
+preference. The in-memory loop player uses the same resolved pair. No fallback
+is written back to `shsynth.conf`.
 
 Project display names are editable and saved renames publish without replacing
 collisions. Pattern cleanup deletes only zero-reference records and never
@@ -395,6 +418,17 @@ exercised end to end at 48 kHz for its 85/110/120/140 BPM selections. Shellcheck
 formatting, all 394 Rust tests, warning-denied Clippy, and the optimized locked
 release build passed. No JACK client, synth engine, MIDI transmission, playback,
 recording, or audible test was started.
+
+After the portable-routing, non-destructive-fallback, and cleared-demo work on
+2026-07-19, Rust 1.85 formatting, all 401 tests, warning-denied Clippy, and the
+optimized locked release build passed. The deterministic generator validated
+10 format-1 MIDI files, 10 loadable format-4 portable Projects, their metadata,
+provenance links, hashes, and exact manifest membership. A non-interactive XDG
+fixture verified missing-only Project seeding, and an isolated `DESTDIR`
+contained exactly the 21 manifest-cleared demo files. Shellcheck/bash syntax,
+Python compilation, all 36 Markdown files' local targets, `git diff --check`,
+and the no-tracked-`user/` boundary passed. No JACK start/restart, synth engine,
+MIDI transmission, playback, recording, or audible test was used.
 
 For docs, README, screenshot, or image-only changes, keep validation scoped to
 the files changed instead of running the Rust suite mechanically. Examples:

@@ -12,6 +12,8 @@ export SHSYNTH_LOOP_INBOX="$USER_DIR/data/shsynth/loop-inbox"
 mkdir -p \
   "$XDG_STATE_HOME/shsynth" \
   "$XDG_DATA_HOME/shsynth" \
+  "$XDG_DATA_HOME/shsynth/demos" \
+  "$XDG_DATA_HOME/shsynth/songs" \
   "$SHSYNTH_LOOP_INBOX" \
   "$SHSYNTH_PRESET_DIR"
 
@@ -31,6 +33,18 @@ while IFS= read -r loop_name || [[ -n "$loop_name" ]]; do
   [[ -f "$source" ]] || { printf 'Starter loop not found: %s\n' "$source" >&2; exit 1; }
   [[ -e "$destination" ]] || install -m644 "$source" "$destination"
 done <"$ROOT/loops/cleared-loops.txt"
+
+"$ROOT/scripts/generate_demo_songs.py"
+while IFS= read -r demo; do
+  filename="${demo##*/}"
+  source="$ROOT/$demo"
+  destination="$XDG_DATA_HOME/shsynth/demos/$filename"
+  [[ -e "$destination" ]] || install -m644 "$source" "$destination"
+  if [[ "$filename" == *.shsong ]]; then
+    destination="$XDG_DATA_HOME/shsynth/songs/$filename"
+    [[ -e "$destination" ]] || install -m644 "$source" "$destination"
+  fi
+done < <("$ROOT/scripts/generate_demo_songs.py" --files)
 
 if [[ -x "$ROOT/target/release/shr" ]]; then
   SHSYNTH_BIN="$ROOT/target/release/shr"

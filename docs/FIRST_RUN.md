@@ -16,11 +16,16 @@ shr
 ```
 
 The setup wizard selects English or German note spelling, installs four starter
-loops in the import inbox, and finds ALSA MIDI and JACK audio ports. It can also
+loops and ten cleared demo Projects, and finds ALSA MIDI and JACK audio ports. It can also
 download four private MusicRadar drum loops after showing the redistribution
 restriction. You can enter an exact port name if automatic detection is not
 enough. Run `shr-setup` again after changing a controller, MIDI interface,
 sound card, or JACK port layout.
+
+The preferred playback pair is followed by optional named internal-device and
+analogue-headphone fallbacks. The headphone pair is always tried last. These
+are remembered machine choices: disconnecting hardware never replaces them,
+and the fallback banner names both the active substitute and missing preference.
 
 `shr doctor` checks the complete audio/MIDI setup, so it reports missing JACK
 as a problem. The preset browser and external-MIDI tracker can still open
@@ -45,6 +50,8 @@ master rack. The WAV Loop screen meters that independent WAV path as
 - Add a MIDI keyboard to play velocity, chords, and live recordings.
 - If the controller is not ready yet, use the computer keyboard fallback to
   navigate setup and enter tracker notes with `Z S X D C V G B H N J M`.
+- Open **FILES** in FT2 to load one of the seeded demo Projects; its `AUTO`
+  pages use whatever MIDI destination and channels this machine currently has.
 - Add external MIDI instruments and audio hardware only when useful.
 
 Computer-keyboard step entry is available, but it is not the primary hardware

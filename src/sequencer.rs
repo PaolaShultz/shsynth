@@ -13,7 +13,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-pub const SONG_VERSION: u8 = 3;
+pub const SONG_VERSION: u8 = 4;
 pub const LANES_PER_PAGE: usize = 4;
 const MAX_PROJECT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PROJECT_PATTERNS: usize = 256;
@@ -110,6 +110,9 @@ pub struct ColumnSetup {
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum PageTarget {
+    /// Portable/unassigned route. The saved Project contains no device name or
+    /// MIDI channel; runtime uses this machine's active configured defaults.
+    Default,
     /// The one software instrument currently owned and monitored by SHR-DAW.
     ActiveInstrument,
     /// An exact ALSA MIDI output port name selected by the user.
@@ -121,6 +124,7 @@ pub enum PageTarget {
 impl PageTarget {
     pub fn label(&self) -> &str {
         match self {
+            Self::Default => "AUTO · machine default",
             Self::ActiveInstrument => "SHR-DAW instrument",
             Self::Midi(name) => name,
             Self::ConfiguredExternal => "Configured MIDI output",
@@ -460,17 +464,10 @@ impl Song {
     }
 }
 
-fn default_pages(config: &ExternalMidiConfig) -> Vec<Page> {
-    let melody_channel = config.melody_channel;
-    let drum_channel = config.percussion_channel.unwrap_or(1);
+fn default_pages(_config: &ExternalMidiConfig) -> Vec<Page> {
     vec![
-        Page::new("MELODY", melody_channel, false, 0),
-        Page::new(
-            "DRUMS",
-            drum_channel,
-            true,
-            config.percussion_program.unwrap_or(0),
-        ),
+        Page::new_portable("MELODY", false),
+        Page::new_portable("DRUMS", true),
     ]
 }
 
@@ -498,12 +495,33 @@ impl Page {
         }
     }
 
+    pub fn new_portable(name: &str, percussion: bool) -> Self {
+        let mut page = Self::new(name, 0, percussion, 0);
+        page.target = PageTarget::Default;
+        page
+    }
+
     pub fn column(&self, lane: usize) -> &ColumnSetup {
         &self.columns[lane.min(LANES_PER_PAGE - 1)]
     }
 
     pub fn column_mut(&mut self, lane: usize) -> &mut ColumnSetup {
         &mut self.columns[lane.min(LANES_PER_PAGE - 1)]
+    }
+
+    pub fn runtime_channel(&self, lane: usize, config: &ExternalMidiConfig) -> u8 {
+        if self.target != PageTarget::Default {
+            return self.column(lane).channel;
+        }
+        if self.percussion {
+            config.percussion_channel.unwrap_or(config.melody_channel)
+        } else {
+            config
+                .channels
+                .get(lane % config.channels.len().max(1))
+                .copied()
+                .unwrap_or(config.melody_channel)
+        }
     }
 }
 
@@ -548,8 +566,13 @@ impl Song {
             .get_mut(&pattern_number)
             .context("pattern missing")?;
         let number = pattern.pages.len() + 1;
-        let mut page = Page::new(&format!("PAGE {number}"), channel, false, 0);
-        page.target = target;
+        let page = if target == PageTarget::Default {
+            Page::new_portable(&format!("PAGE {number}"), false)
+        } else {
+            let mut page = Page::new(&format!("PAGE {number}"), channel, false, 0);
+            page.target = target;
+            page
+        };
         pattern.pages.push(page);
         for row in &mut pattern.rows {
             row.extend(std::iter::repeat(Cell::default()).take(LANES_PER_PAGE));
@@ -663,9 +686,24 @@ impl Pattern {
             {
                 bail!("pattern page MIDI value out of range");
             }
+            if page.target == PageTarget::Default
+                && (page
+                    .columns
+                    .iter()
+                    .any(|column| *column != ColumnSetup::default())
+                    || !page.setup.is_empty())
+            {
+                bail!("portable page routing must keep channel, bank, program, and setup blank");
+            }
             if page.enabled {
                 for (lane, column) in page.columns.iter().enumerate() {
                     if !page.lanes[lane].enabled {
+                        continue;
+                    }
+                    // A portable page intentionally defers its channels to the
+                    // loading machine, so cross-page conflicts cannot be
+                    // judged from the Project alone.
+                    if page.target == PageTarget::Default {
                         continue;
                     }
                     let key = (page.target.clone(), column.channel);
@@ -834,12 +872,23 @@ pub fn encode(song: &Song) -> Result<String> {
                 target_text(&page.target)
             ));
             for (column_index, column) in page.columns.iter().enumerate() {
+                let (channel, bank_msb, bank_lsb, program) = if page.target == PageTarget::Default {
+                    (
+                        "default".to_owned(),
+                        "default".to_owned(),
+                        "default".to_owned(),
+                        "default".to_owned(),
+                    )
+                } else {
+                    (
+                        (column.channel + 1).to_string(),
+                        column.bank_msb.to_string(),
+                        column.bank_lsb.to_string(),
+                        column.program.to_string(),
+                    )
+                };
                 out.push_str(&format!(
-                    "pattern_column={number}|{page_index}|{column_index}|{}|{}|{}|{}\n",
-                    column.channel + 1,
-                    column.bank_msb,
-                    column.bank_lsb,
-                    column.program
+                    "pattern_column={number}|{page_index}|{column_index}|{channel}|{bank_msb}|{bank_lsb}|{program}\n"
                 ));
             }
             for (lane_index, lane) in page.lanes.iter().enumerate() {
@@ -940,7 +989,7 @@ pub fn decode(text: &str) -> Result<Song> {
                 serde_json::from_str::<InsertRack>(&unescape(value)?)?,
                 "insert_rack",
             )?,
-            "aux_routing" if version == 3 => set_once(
+            "aux_routing" if version >= 3 => set_once(
                 &mut aux_routing,
                 serde_json::from_str::<ProjectAuxRouting>(&unescape(value)?)?,
                 "aux_routing",
@@ -1003,20 +1052,20 @@ pub fn decode(text: &str) -> Result<Song> {
                             }; LANES_PER_PAGE],
                             velocity: midi_value(velocity)?,
                             percussion: binary_flag(percussion, "pattern page percussion")?,
-                            target: parse_target(target)?,
+                            target: parse_target(target, version)?,
                             setup: Vec::new(),
                             lanes: Vec::new(),
                         },
                         true,
                     ),
-                    (1..=3, [_, _, name, enabled, velocity, percussion, target]) => (
+                    (1..=4, [_, _, name, enabled, velocity, percussion, target]) => (
                         Page {
                             name: unescape(name)?,
                             enabled: binary_flag(enabled, "pattern page enabled")?,
                             columns: [ColumnSetup::default(); LANES_PER_PAGE],
                             velocity: midi_value(velocity)?,
                             percussion: binary_flag(percussion, "pattern page percussion")?,
-                            target: parse_target(target)?,
+                            target: parse_target(target, version)?,
                             setup: Vec::new(),
                             lanes: Vec::new(),
                         },
@@ -1050,7 +1099,7 @@ pub fn decode(text: &str) -> Result<Song> {
     }
     attach_pattern_lanes(&mut patterns, pattern_lanes)?;
     if version >= 1 {
-        attach_pattern_columns(&mut patterns, pattern_columns)?;
+        attach_pattern_columns(&mut patterns, pattern_columns, version)?;
     }
     attach_pattern_setup(&mut patterns, pattern_setup)?;
     let total_cells = patterns.values().try_fold(0usize, |total, pattern| {
@@ -1110,7 +1159,7 @@ pub fn decode(text: &str) -> Result<Song> {
         } else {
             InsertRack::default()
         },
-        aux_routing: if version == 3 {
+        aux_routing: if version >= 3 {
             aux_routing.context("missing aux routing")?
         } else {
             ProjectAuxRouting::default()
@@ -1150,6 +1199,7 @@ fn attach_pattern_lanes(patterns: &mut BTreeMap<u16, Pattern>, lanes: Vec<String
 fn attach_pattern_columns(
     patterns: &mut BTreeMap<u16, Pattern>,
     columns: Vec<String>,
+    version: u8,
 ) -> Result<()> {
     let expected = patterns
         .values()
@@ -1176,11 +1226,20 @@ fn attach_pattern_columns(
             .get_mut(&pattern_number)
             .and_then(|pattern| pattern.pages.get_mut(page_index))
             .context("column page missing")?;
+        let portable = version >= 4 && page.target == PageTarget::Default;
+        let all_default = f[3..].iter().all(|field| *field == "default");
+        if portable != all_default {
+            bail!("portable page columns require four default routing markers");
+        }
         page.columns[column_index] = ColumnSetup {
-            channel: one_based_channel(f[3])?,
-            bank_msb: midi_value(f[4])?,
-            bank_lsb: midi_value(f[5])?,
-            program: midi_value(f[6])?,
+            channel: if portable {
+                0
+            } else {
+                one_based_channel(f[3])?
+            },
+            bank_msb: if portable { 0 } else { midi_value(f[4])? },
+            bank_lsb: if portable { 0 } else { midi_value(f[5])? },
+            program: if portable { 0 } else { midi_value(f[6])? },
         };
     }
     Ok(())
@@ -1385,7 +1444,9 @@ pub fn schedule(
                 let page = &pattern.pages[page_index];
                 let column_index = lane_index % LANES_PER_PAGE;
                 let lane = &page.lanes[column_index];
-                let column = page.column(column_index);
+                let mut runtime_column = *page.column(column_index);
+                runtime_column.channel = page.runtime_channel(column_index, config);
+                let column = &runtime_column;
                 if !page.enabled || !lane.enabled {
                     continue;
                 }
@@ -1564,13 +1625,25 @@ fn append_program(
     position: SchedulePosition,
     page: &Page,
     column: &ColumnSetup,
-    program: u8,
+    mut program: u8,
     config: &ExternalMidiConfig,
     device_profiles: &DeviceProfiles,
 ) {
     let mut selection = config.clone();
+    if page.target == PageTarget::Default {
+        let Some(machine_program) = page
+            .percussion
+            .then_some(config.percussion_program)
+            .flatten()
+        else {
+            return;
+        };
+        program = machine_program;
+    }
     let profile = match &page.target {
-        PageTarget::ConfiguredExternal => device_profiles.by_id(&config.profile),
+        PageTarget::Default | PageTarget::ConfiguredExternal => {
+            device_profiles.by_id(&config.profile)
+        }
         PageTarget::Midi(port) => device_profiles.matching_port(port),
         PageTarget::ActiveInstrument => None,
     };
@@ -1683,6 +1756,7 @@ pub struct SequencerStatus {
     pub error: Option<String>,
     pub generation: u64,
     pub targets: BTreeMap<PageTarget, Option<String>>,
+    pub fallbacks: BTreeMap<PageTarget, String>,
 }
 enum Transport {
     Play(Song, usize, usize),
@@ -2061,7 +2135,18 @@ fn update_active_notes(
 struct DestinationPool {
     config: ExternalMidiConfig,
     instrument: crate::engine::SharedOutput,
-    hardware: BTreeMap<PageTarget, std::result::Result<MidiOutputConnection, String>>,
+    destinations: BTreeMap<PageTarget, RuntimeDestination>,
+}
+
+enum RuntimeDestination {
+    Instrument {
+        notice: Option<String>,
+    },
+    Hardware {
+        connection: MidiOutputConnection,
+        notice: Option<String>,
+    },
+    Unavailable(String),
 }
 
 impl DestinationPool {
@@ -2069,59 +2154,68 @@ impl DestinationPool {
         Self {
             config,
             instrument,
-            hardware: BTreeMap::new(),
+            destinations: BTreeMap::new(),
         }
     }
 
     fn ensure(&mut self, target: &PageTarget) {
-        if matches!(target, PageTarget::ActiveInstrument) || self.hardware.contains_key(target) {
+        if self.destinations.contains_key(target) {
             return;
         }
-        let connection = connect_target(&self.config, target).map_err(|error| error.to_string());
-        self.hardware.insert(target.clone(), connection);
+        let instrument_online = self.instrument.lock().is_ok_and(|output| output.is_some());
+        let destination = open_runtime_destination(&self.config, target, instrument_online)
+            .unwrap_or_else(|error| RuntimeDestination::Unavailable(error.to_string()));
+        self.destinations.insert(target.clone(), destination);
     }
 
     fn refresh(&mut self, target: &PageTarget) {
-        if target != &PageTarget::ActiveInstrument {
-            self.hardware.remove(target);
-        }
+        self.destinations.remove(target);
         self.ensure(target);
     }
 
     fn send(&mut self, target: &PageTarget, bytes: &[u8]) -> std::result::Result<(), String> {
-        if target == &PageTarget::ActiveInstrument {
-            return self
+        self.ensure(target);
+        let output = self
+            .destinations
+            .get_mut(target)
+            .expect("target was ensured");
+        let result = match output {
+            RuntimeDestination::Instrument { .. } => self
                 .instrument
                 .lock()
                 .map_err(|_| "active instrument route lock failed".to_string())?
                 .as_mut()
                 .ok_or_else(|| "active SHR-DAW instrument is offline".to_string())?
                 .send(bytes)
-                .map_err(|error| error.to_string());
-        }
-        self.ensure(target);
-        let output = self.hardware.get_mut(target).expect("target was ensured");
-        let result = match output {
-            Ok(output) => output.send(bytes).map_err(|error| error.to_string()),
-            Err(error) => return Err(error.clone()),
+                .map_err(|error| error.to_string()),
+            RuntimeDestination::Hardware { connection, .. } => {
+                connection.send(bytes).map_err(|error| error.to_string())
+            }
+            RuntimeDestination::Unavailable(error) => return Err(error.clone()),
         };
         if let Err(error) = &result {
-            *output = Err(error.clone());
+            *output = RuntimeDestination::Unavailable(error.clone());
         }
         result
     }
 
     fn error(&self, target: &PageTarget) -> Option<String> {
-        if target == &PageTarget::ActiveInstrument {
-            return self
-                .instrument
-                .lock()
-                .ok()
-                .and_then(|output| output.is_none().then(|| "instrument offline".into()));
-        }
-        self.hardware
+        self.destinations
             .get(target)
-            .and_then(|output| output.as_ref().err().cloned())
+            .and_then(|output| match output {
+                RuntimeDestination::Unavailable(error) => Some(error.clone()),
+                _ => None,
+            })
+    }
+
+    fn fallback(&self, target: &PageTarget) -> Option<String> {
+        self.destinations
+            .get(target)
+            .and_then(|output| match output {
+                RuntimeDestination::Instrument { notice }
+                | RuntimeDestination::Hardware { notice, .. } => notice.clone(),
+                RuntimeDestination::Unavailable(_) => None,
+            })
     }
 }
 
@@ -2134,6 +2228,14 @@ fn update_target_status(
         status.targets = targets
             .iter()
             .map(|target| (target.clone(), outputs.error(target)))
+            .collect();
+        status.fallbacks = targets
+            .iter()
+            .filter_map(|target| {
+                outputs
+                    .fallback(target)
+                    .map(|notice| (target.clone(), notice))
+            })
             .collect();
         status.available = status.targets.values().any(Option::is_none);
         status.error = status.targets.iter().find_map(|(target, error)| {
@@ -2210,34 +2312,170 @@ fn rescale_schedule(
         message.at = elapsed + remaining.mul_f64(scale);
     }
 }
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum MidiRouteChoice {
+    Instrument,
+    Hardware(usize),
+    Unavailable(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedMidiRoute {
+    choice: MidiRouteChoice,
+    notice: Option<String>,
+}
+
+fn resolve_midi_route(
+    config: &ExternalMidiConfig,
+    target: &PageTarget,
+    names: &[String],
+    instrument_online: bool,
+) -> ResolvedMidiRoute {
+    let configured_label = if config.output_match.is_empty() {
+        "configured external MIDI route"
+    } else {
+        &config.output_match
+    };
+    let configured = || {
+        config
+            .enabled
+            .then(|| matching_output_index(names, &config.output_match, true))
+            .transpose()
+            .ok()
+            .flatten()
+    };
+    let instrument = |notice: Option<String>, unavailable: String| ResolvedMidiRoute {
+        choice: if instrument_online {
+            MidiRouteChoice::Instrument
+        } else {
+            MidiRouteChoice::Unavailable(unavailable)
+        },
+        notice: instrument_online.then_some(notice).flatten(),
+    };
+    match target {
+        PageTarget::ActiveInstrument => {
+            instrument(None, "active SHR-DAW instrument is offline".into())
+        }
+        PageTarget::Default => {
+            if let Some(index) = configured() {
+                ResolvedMidiRoute {
+                    choice: MidiRouteChoice::Hardware(index),
+                    notice: None,
+                }
+            } else if config.enabled {
+                instrument(
+                    Some(format!(
+                        "MIDI fallback: internal instrument · missing {}",
+                        configured_label
+                    )),
+                    format!(
+                        "portable route has no active default; configured MIDI output {:?} is offline and no instrument is loaded",
+                        config.output_match
+                    ),
+                )
+            } else {
+                instrument(
+                    None,
+                    "portable route has no active machine default; configure MIDI or load an instrument"
+                        .into(),
+                )
+            }
+        }
+        PageTarget::ConfiguredExternal => {
+            if let Some(index) = configured() {
+                ResolvedMidiRoute {
+                    choice: MidiRouteChoice::Hardware(index),
+                    notice: None,
+                }
+            } else {
+                instrument(
+                    Some(format!(
+                        "MIDI fallback: internal instrument · missing {}",
+                        configured_label
+                    )),
+                    format!(
+                        "configured MIDI output {:?} is offline and no instrument fallback is loaded",
+                        config.output_match
+                    ),
+                )
+            }
+        }
+        PageTarget::Midi(wanted) => {
+            if let Ok(index) = matching_output_index(names, wanted, false) {
+                return ResolvedMidiRoute {
+                    choice: MidiRouteChoice::Hardware(index),
+                    notice: None,
+                };
+            }
+            let missing = format!("preferred MIDI {wanted:?}");
+            if let Some(index) = configured() {
+                ResolvedMidiRoute {
+                    choice: MidiRouteChoice::Hardware(index),
+                    notice: Some(format!(
+                        "MIDI fallback: {} · missing {missing}",
+                        config.output_match
+                    )),
+                }
+            } else {
+                instrument(
+                    Some(format!(
+                        "MIDI fallback: internal instrument · missing {missing}"
+                    )),
+                    format!(
+                        "MIDI output {wanted:?} is offline and no configured or instrument fallback is available"
+                    ),
+                )
+            }
+        }
+    }
+}
+
+fn open_runtime_destination(
+    config: &ExternalMidiConfig,
+    target: &PageTarget,
+    instrument_online: bool,
+) -> Result<RuntimeDestination> {
+    let output = MidiOutput::new(&config.client_name);
+    let (output, ports, names) = match output {
+        Ok(output) => {
+            let ports = output.ports();
+            let names = ports
+                .iter()
+                .map(|port| output.port_name(port).unwrap_or_default())
+                .collect::<Vec<_>>();
+            (Some(output), ports, names)
+        }
+        Err(_) => (None, Vec::new(), Vec::new()),
+    };
+    let resolved = resolve_midi_route(config, target, &names, instrument_online);
+    match resolved.choice {
+        MidiRouteChoice::Instrument => Ok(RuntimeDestination::Instrument {
+            notice: resolved.notice,
+        }),
+        MidiRouteChoice::Hardware(index) => {
+            let output = output.context("MIDI output backend unavailable")?;
+            let connection = output
+                .connect(&ports[index], "SHR-DAW tracker page")
+                .map_err(|error| anyhow!(error.to_string()))?;
+            Ok(RuntimeDestination::Hardware {
+                connection,
+                notice: resolved.notice,
+            })
+        }
+        MidiRouteChoice::Unavailable(error) => Ok(RuntimeDestination::Unavailable(error)),
+    }
+}
+
+#[cfg(test)]
 fn connect_target(
     config: &ExternalMidiConfig,
     target: &PageTarget,
 ) -> Result<MidiOutputConnection> {
-    let wanted = match target {
-        PageTarget::ConfiguredExternal => {
-            if !config.enabled {
-                bail!("configured MIDI output is disabled");
-            }
-            &config.output_match
-        }
-        PageTarget::Midi(name) => name,
-        PageTarget::ActiveInstrument => bail!("active instrument uses the monitored route"),
-    };
-    let output = MidiOutput::new(&config.client_name)?;
-    let ports = output.ports();
-    let names = ports
-        .iter()
-        .map(|port| output.port_name(port).unwrap_or_default())
-        .collect::<Vec<_>>();
-    let index = matching_output_index(
-        &names,
-        wanted,
-        matches!(target, PageTarget::ConfiguredExternal),
-    )?;
-    output
-        .connect(&ports[index], "SHR-DAW tracker page")
-        .map_err(|e| anyhow!(e.to_string()))
+    match open_runtime_destination(config, target, false)? {
+        RuntimeDestination::Hardware { connection, .. } => Ok(connection),
+        RuntimeDestination::Instrument { .. } => bail!("unexpected instrument route"),
+        RuntimeDestination::Unavailable(error) => bail!(error),
+    }
 }
 
 pub(crate) fn matching_output_index(
@@ -2416,13 +2654,16 @@ fn escape(value: &str) -> String {
 }
 fn target_text(target: &PageTarget) -> String {
     match target {
+        PageTarget::Default => "default".into(),
         PageTarget::ActiveInstrument => "instrument".into(),
         PageTarget::ConfiguredExternal => "configured".into(),
         PageTarget::Midi(name) => format!("midi:{}", escape(name)),
     }
 }
-fn parse_target(value: &str) -> Result<PageTarget> {
+fn parse_target(value: &str, version: u8) -> Result<PageTarget> {
     match value {
+        "default" if version >= 4 => Ok(PageTarget::Default),
+        "default" => bail!("portable routing requires Project format 4"),
         "instrument" => Ok(PageTarget::ActiveInstrument),
         "configured" => Ok(PageTarget::ConfiguredExternal),
         _ => value
@@ -2572,7 +2813,7 @@ mod tests {
             .unwrap();
         s.patterns.get_mut(&0).unwrap().rows[0][0].note = Note::On(60);
         let text = encode(&s).unwrap();
-        assert!(text.starts_with("SHSYNTH-SONG 3\n"));
+        assert!(text.starts_with("SHSYNTH-SONG 4\n"));
         assert_eq!(decode(&text).unwrap(), s);
         assert!(decode(&text.replace("gate=80\n", "")).is_err());
         assert!(decode(&text.replace("\"threshold_db\":-27.5", "\"threshold_db\":null")).is_err());
@@ -2612,7 +2853,7 @@ mod tests {
             command: Command::Delay(6),
         };
         let encoded = encode(&song).unwrap();
-        assert!(encoded.starts_with("SHSYNTH-SONG 3\n"));
+        assert!(encoded.starts_with("SHSYNTH-SONG 4\n"));
         assert!(encoded.contains("|64|111|17|37|D6\n"));
         assert_eq!(decode(&encoded).unwrap(), song);
     }
@@ -2732,6 +2973,7 @@ mod tests {
     fn bank_and_program_precede_note_and_notes_end() {
         let c = config();
         let mut s = Song::new(&c);
+        pages_mut(&mut s)[0] = Page::new("MELODY", c.melody_channel, false, 0);
         let cell = &mut s.patterns.get_mut(&0).unwrap().rows[0][0];
         cell.program = Some(7);
         cell.note = Note::On(60);
@@ -2905,7 +3147,8 @@ mod tests {
     fn installed_profile_has_four_lane_drum_page_on_channel_two() {
         let c = config();
         let mut song = Song::new(&c);
-        assert_eq!(pages(&song)[1].column(0).channel, 1);
+        assert_eq!(pages(&song)[1].column(0), &ColumnSetup::default());
+        assert_eq!(pages(&song)[1].runtime_channel(0, &c), 1);
         assert!(pages(&song)[1].percussion);
         song.patterns.get_mut(&0).unwrap().rows[0][4].note = Note::On(36);
         assert!(schedule(&song, &c, 0, 0).unwrap().iter().any(|message| {
@@ -2922,8 +3165,8 @@ mod tests {
         c.max_tracks = 2;
         c.bank_select = BankSelectMode::Off;
         let mut song = Song::new(&c);
-        assert_eq!(pages(&song)[1].column(0).channel, 1);
-        assert_eq!(pages(&song)[1].column(0).program, 9);
+        assert_eq!(pages(&song)[1].column(0), &ColumnSetup::default());
+        assert_eq!(pages(&song)[1].runtime_channel(0, &c), 1);
         assert!(pages(&song)[1].percussion);
         song.patterns.get_mut(&0).unwrap().rows[0][4].note = Note::On(36);
         let midi = schedule(&song, &c, 0, 0)
@@ -3004,8 +3247,24 @@ mod tests {
                     .is_some_and(|status| status & 0xf0 == 0x90)
             })
             .collect::<Vec<_>>();
-        assert_eq!(note_ons.iter().filter(|m| m.bytes[0] == 0x90).count(), 4);
-        assert_eq!(note_ons.iter().filter(|m| m.bytes[0] == 0x91).count(), 4);
+        assert_eq!(note_ons.len(), 8);
+        for lane in 0..LANES_PER_PAGE {
+            assert!(note_ons.iter().any(|message| {
+                message.lane == Some(lane)
+                    && message.bytes[0] == 0x90 | pages(&song)[0].runtime_channel(lane, &c)
+            }));
+        }
+        let percussion_channel = pages(&song)[1].runtime_channel(0, &c);
+        let melodic_on_percussion_channel = (0..LANES_PER_PAGE)
+            .filter(|lane| pages(&song)[0].runtime_channel(*lane, &c) == percussion_channel)
+            .count();
+        assert_eq!(
+            note_ons
+                .iter()
+                .filter(|message| message.bytes[0] == 0x90 | percussion_channel)
+                .count(),
+            LANES_PER_PAGE + melodic_on_percussion_channel
+        );
         assert!(note_ons.iter().all(|message| message.at == Duration::ZERO));
         assert_eq!(
             note_ons.iter().map(|m| m.bytes[2]).collect::<Vec<_>>(),
@@ -3014,7 +3273,10 @@ mod tests {
         let program = messages.iter().position(|m| m.bytes == [0xc1, 9]).unwrap();
         let first_drum = messages
             .iter()
-            .position(|m| m.bytes.first() == Some(&0x91))
+            .position(|message| {
+                message.lane.is_some_and(|lane| lane >= LANES_PER_PAGE)
+                    && message.bytes.first() == Some(&0x91)
+            })
             .unwrap();
         assert!(program < first_drum);
     }
@@ -3023,6 +3285,7 @@ mod tests {
     fn shared_channel_lanes_keep_independent_note_off_identity() {
         let c = config();
         let mut song = Song::new(&c);
+        pages_mut(&mut song)[0] = Page::new("MELODY", 0, false, 0);
         let row = &mut song.patterns.get_mut(&0).unwrap().rows[0];
         row[0].note = Note::On(60);
         row[1].note = Note::On(64);
@@ -3129,7 +3392,7 @@ mod tests {
             .err()
             .expect("disabled output must stay offline")
             .to_string()
-            .contains("disabled"));
+            .contains("offline"));
         let song = Song::new(&c);
         assert!(schedule(&song, &c, 0, 0).is_ok());
     }
@@ -3365,6 +3628,7 @@ mod tests {
     #[test]
     fn in_memory_page_values_and_setup_are_validated_before_save() {
         let mut song = Song::new(&config());
+        pages_mut(&mut song)[0].target = PageTarget::ConfiguredExternal;
         pages_mut(&mut song)[0].column_mut(0).channel = 16;
         assert!(encode(&song)
             .unwrap_err()
@@ -3460,28 +3724,32 @@ mod tests {
             }; LANES_PER_PAGE]
         );
         assert!(song.insert_rack.order.is_empty());
-        assert!(encode(&song).unwrap().starts_with("SHSYNTH-SONG 3\n"));
+        assert!(encode(&song).unwrap().starts_with("SHSYNTH-SONG 4\n"));
     }
 
     #[test]
     fn version_one_project_migrates_to_an_empty_insert_rack() {
         let current = encode(&Song::new(&config())).unwrap();
         let legacy = current
-            .replacen("SHSYNTH-SONG 3", "SHSYNTH-SONG 1", 1)
+            .replacen("SHSYNTH-SONG 4", "SHSYNTH-SONG 1", 1)
+            .replace("|default|default|default|default\n", "|1|0|0|0\n")
+            .replace("|default\n", "|configured\n")
             .lines()
             .filter(|line| !line.starts_with("insert_rack=") && !line.starts_with("aux_routing="))
             .collect::<Vec<_>>()
             .join("\n");
         let migrated = decode(&legacy).unwrap();
         assert!(migrated.insert_rack.order.is_empty());
-        assert!(encode(&migrated).unwrap().starts_with("SHSYNTH-SONG 3\n"));
+        assert!(encode(&migrated).unwrap().starts_with("SHSYNTH-SONG 4\n"));
     }
 
     #[test]
     fn version_two_project_migrates_to_empty_aux_routing() {
         let current = encode(&Song::new(&config())).unwrap();
         let old = current
-            .replacen("SHSYNTH-SONG 3", "SHSYNTH-SONG 2", 1)
+            .replacen("SHSYNTH-SONG 4", "SHSYNTH-SONG 2", 1)
+            .replace("|default|default|default|default\n", "|1|0|0|0\n")
+            .replace("|default\n", "|configured\n")
             .lines()
             .filter(|line| !line.starts_with("aux_routing="))
             .collect::<Vec<_>>()
@@ -3492,12 +3760,87 @@ mod tests {
     }
 
     #[test]
+    fn portable_route_is_explicit_and_never_serializes_channel_zero() {
+        let cfg = config();
+        let song = Song::new(&cfg);
+        let encoded = encode(&song).unwrap();
+        assert!(encoded.starts_with("SHSYNTH-SONG 4\n"));
+        assert!(encoded.contains("|default\n"));
+        assert!(encoded.contains("|default|default|default|default\n"));
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(decoded, song);
+        assert_eq!(decoded.patterns[&0].pages[0].target, PageTarget::Default);
+        assert_eq!(
+            decoded.patterns[&0].pages[0].runtime_channel(0, &cfg),
+            cfg.channels[0]
+        );
+    }
+
+    #[test]
+    fn version_three_routes_migrate_without_becoming_portable() {
+        let current = encode(&Song::new(&config())).unwrap();
+        let legacy = current
+            .replacen("SHSYNTH-SONG 4", "SHSYNTH-SONG 3", 1)
+            .replace("|default|default|default|default\n", "|7|0|0|0\n")
+            .replace("|default\n", "|configured\n");
+        let migrated = decode(&legacy).unwrap();
+        for page in &migrated.patterns[&0].pages {
+            assert_eq!(page.target, PageTarget::ConfiguredExternal);
+            assert!(page.columns.iter().all(|column| column.channel == 6));
+        }
+
+        let invalid_portable = legacy.replace("|configured\n", "|default\n");
+        assert!(decode(&invalid_portable)
+            .unwrap_err()
+            .to_string()
+            .contains("format 4"));
+    }
+
+    #[test]
+    fn runtime_midi_fallback_preserves_preference_and_reconnects() {
+        let mut cfg = config();
+        cfg.enabled = true;
+        cfg.output_match = "Machine default".into();
+        let preferred = PageTarget::Midi("Touring rack".into());
+        let default_only = vec!["Machine default port".to_owned()];
+        let fallback = resolve_midi_route(&cfg, &preferred, &default_only, true);
+        assert_eq!(fallback.choice, MidiRouteChoice::Hardware(0));
+        assert!(fallback.notice.unwrap().contains("Touring rack"));
+        assert_eq!(preferred, PageTarget::Midi("Touring rack".into()));
+
+        let restored_names = vec!["Machine default port".into(), "Touring rack".into()];
+        let restored = resolve_midi_route(&cfg, &preferred, &restored_names, true);
+        assert_eq!(restored.choice, MidiRouteChoice::Hardware(1));
+        assert_eq!(restored.notice, None);
+    }
+
+    #[test]
+    fn midi_resolution_handles_internal_and_no_hardware_states() {
+        let mut cfg = config();
+        cfg.enabled = true;
+        cfg.output_match = "missing default".into();
+        let exact = PageTarget::Midi("missing preferred".into());
+        let internal = resolve_midi_route(&cfg, &exact, &[], true);
+        assert_eq!(internal.choice, MidiRouteChoice::Instrument);
+        assert!(internal.notice.unwrap().contains("missing preferred"));
+
+        let none = resolve_midi_route(&cfg, &exact, &[], false);
+        assert!(matches!(none.choice, MidiRouteChoice::Unavailable(_)));
+
+        cfg.enabled = false;
+        let portable = resolve_midi_route(&cfg, &PageTarget::Default, &[], true);
+        assert_eq!(portable.choice, MidiRouteChoice::Instrument);
+        assert_eq!(portable.notice, None);
+    }
+
+    #[test]
     fn four_columns_schedule_distinct_channels_and_master_programs() {
         let mut cfg = config();
         cfg.program_changes = true;
         let mut song = Song::new(&cfg);
         song.patterns.get_mut(&0).unwrap().pages[1].enabled = false;
         let pattern = song.patterns.get_mut(&0).unwrap();
+        pattern.pages[0].target = PageTarget::ConfiguredExternal;
         pattern.rows.truncate(1);
         for column in 0..LANES_PER_PAGE {
             pattern.pages[0].columns[column] = ColumnSetup {
@@ -3523,6 +3866,7 @@ mod tests {
         let mut song = Song::new(&config());
         song.patterns.get_mut(&0).unwrap().pages[1].enabled = false;
         let page = &mut song.patterns.get_mut(&0).unwrap().pages[0];
+        page.target = PageTarget::ConfiguredExternal;
         page.columns = [ColumnSetup {
             channel: 3,
             program: 9,

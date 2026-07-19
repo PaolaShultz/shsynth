@@ -2,7 +2,7 @@ PREFIX ?= /usr/local
 DESTDIR ?=
 CARGO ?= cargo
 
-.PHONY: build test install install-files uninstall
+.PHONY: build test install install-files uninstall check-demos
 
 build:
 	$(CARGO) build --release --locked
@@ -10,9 +10,12 @@ build:
 test:
 	$(CARGO) test --locked
 
+check-demos:
+	python3 scripts/generate_demo_songs.py
+
 install: build install-files
 
-install-files:
+install-files: check-demos
 	install -Dm755 target/release/shr $(DESTDIR)$(PREFIX)/bin/shr
 	rm -f $(DESTDIR)$(PREFIX)/bin/shsynth
 	ln -sfn shr $(DESTDIR)$(PREFIX)/bin/synth-player
@@ -40,6 +43,10 @@ install-files:
 	  install -m644 "loops/$$loop" $(DESTDIR)$(PREFIX)/share/shsynth/loops/; \
 	done < loops/cleared-loops.txt
 	install -m644 loops/cleared-loops.txt loops/SOURCES.md $(DESTDIR)$(PREFIX)/share/shsynth/loops/
+	install -d $(DESTDIR)$(PREFIX)/share/shsynth/demos
+	set -e; python3 scripts/generate_demo_songs.py --files | while IFS= read -r demo; do \
+	  install -m644 "$$demo" $(DESTDIR)$(PREFIX)/share/shsynth/demos/; \
+	done
 	install -d $(DESTDIR)$(PREFIX)/share/doc/shsynth/images
 	install -m644 LICENSE THIRD_PARTY.md README.md $(DESTDIR)$(PREFIX)/share/doc/shsynth/
 	install -m644 docs/*.md $(DESTDIR)$(PREFIX)/share/doc/shsynth/

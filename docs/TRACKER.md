@@ -28,7 +28,7 @@ the same pattern until you explicitly clone or paste a new pattern.
 Each FT2 Pattern owns its own rows, meter, master tempo, pages, page targets,
 per-column MIDI channels/banks/programs, velocity defaults, mutes, percussion
 settings, lane settings, and cell data. A new Project starts with one pattern containing
-`MELODY` and `DRUMS`, and more pages can be added per pattern.
+portable `MELODY` and `DRUMS` pages, and more pages can be added per pattern.
 
 Each page keeps one MIDI target plus four independent column channel, bank, and
 master-program setups. It also keeps velocity, mute, percussion, and lane
@@ -37,11 +37,18 @@ and program match, because MIDI program selection is channel-wide. Pages play
 together, so one pattern can control several hardware instruments and the
 active SHR-DAW software instrument.
 
+`AUTO · machine default` is a real portable target. Its saved channel, bank,
+program, and setup fields are blank; at playback the machine's configured
+melody/percussion channels and available default destination are used. `AUTO`
+does not mean channel 1, channel zero, muted, or disabled. Choose an explicit
+target only when a song intentionally belongs to particular hardware.
+
 Open **TOOLS** → **PAGES** to reach the **TRACKS** screen. There you can add or
 select a page, choose a column, and set its target, channel, bank, and program.
 **DONE** validates shared-channel compatibility and keeps the changes. **SYS**
 → **EXIT** restores the Project as it was before TRACKS opened. A disconnected
-saved target is marked `OFFLINE`; its route and notes are not deleted.
+saved target is marked `FALLBACK` while a configured/default route is usable,
+or `OFFLINE` when none is; its preferred route and notes are not deleted.
 
 ## Step editing
 
@@ -97,9 +104,9 @@ recording, those notes do not also pass to the loaded software synth. They are
 auditioned only through the page's hardware MIDI target and column channels.
 
 Real-time recording is hardware-page-only. A page targeting the active SHR-DAW
-instrument cannot enter **REC**. Choose a configured or exact hardware MIDI
-output first. **REC END**, **STOP**, **EXIT**, and **PANIC** release auditioned
-notes.
+instrument, or an `AUTO`/preferred page currently resolved to the internal
+instrument, cannot enter **REC**. Choose an available hardware MIDI output
+first. **REC END**, **STOP**, **EXIT**, and **PANIC** release auditioned notes.
 
 ## WAV loops
 
@@ -215,13 +222,24 @@ automatic names keep both actions usable from a four-button controller.
 are refused and a saved rename keeps the loaded Project state.
 
 Projects are readable `.shsong` text files stored below
-`${XDG_DATA_HOME:-~/.local/share}/shsynth/songs/`. Current Project format 3
+`${XDG_DATA_HOME:-~/.local/share}/shsynth/songs/`. Current Project format 4
 stores each Pattern's tempo, meter, pages, four column setups, lanes, setup
-messages, cells, source insert rack, two aux routes, and master rack. Versions
+messages, cells, source insert rack, two aux routes, and master rack. Portable
+pages use explicit `default` markers rather than numeric routing. Versions
 0 and 1 gain empty effects routing; version 2 retains its source rack and gains
-empty aux/master routing. Version 0 page-wide setups copy the old
+empty aux/master routing. Format 3 routes stay explicit. Version 0 page-wide setups copy the old
 channel/bank/program into all four columns. Unknown newer versions, fields, or
 invalid effect shapes are not loaded or overwritten.
+
+## Cleared demo songs
+
+Setup seeds ten public-domain demo Projects into the same song directory, so
+they appear on **FILES** without an import step. Matching format-1 MIDI files
+and the clearance manifest live below
+`${XDG_DATA_HOME:-~/.local/share}/shsynth/demos/`. Seed copies never replace a
+same-named user Project. Each arrangement has separate drums, bass, pad, lead,
+and counterline pages on `AUTO`, making it easy to choose new sounds or bind a
+page to hardware. See [Public-domain demo songs](DEMO_SONGS.md).
 
 ## Effects saved with the Project
 

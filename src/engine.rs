@@ -40,6 +40,7 @@ pub struct Engine {
     fluid_soundfonts: Vec<(PathBuf, u16)>,
     audio_graph: Option<OwnedAudioGraph>,
     audio_graph_fallback: Option<String>,
+    audio_route_notice: Option<String>,
 }
 
 pub type SharedOutput = Arc<Mutex<Option<MidiOutputConnection>>>;
@@ -325,6 +326,7 @@ impl Engine {
             .with_context(|| format!("start {}", backend_config.command))?;
         let mut audio_graph = None;
         let mut audio_graph_fallback = None;
+        let mut audio_route_notice = None;
         let prepare = (|| -> Result<()> {
             write_owner(&state.join("engine.pid"), child.id() as i32)?;
             wait_ready(
@@ -334,11 +336,15 @@ impl Engine {
                 config.startup_timeout,
                 &log_path,
             )?;
-            connect_audio(&backend_config.client_name, config);
+            let resolved_audio = config.resolve_audio_route(&jack_ports());
+            let mut runtime_config = config.clone();
+            runtime_config.audio_outputs = resolved_audio.outputs;
+            audio_route_notice = resolved_audio.notice;
+            connect_audio(&backend_config.client_name, &runtime_config);
             if config.audio_graph.enabled {
                 match start_managed_audio_graph(
                     &backend_config.client_name,
-                    config,
+                    &runtime_config,
                     rack,
                     aux_routing,
                 ) {
@@ -397,6 +403,7 @@ impl Engine {
             fluid_soundfonts,
             audio_graph,
             audio_graph_fallback,
+            audio_route_notice,
         };
         if preset.backend == BackendKind::FluidSynth {
             engine.select_fluidsynth(preset)?;
@@ -413,12 +420,17 @@ impl Engine {
     }
 
     pub fn audio_route_status(&self) -> Option<String> {
-        if self.audio_graph.is_some() {
-            Some("owned insert graph active".into())
+        let graph = if self.audio_graph.is_some() {
+            Some("owned insert graph active".to_owned())
         } else {
             self.audio_graph_fallback
                 .as_ref()
                 .map(|error| format!("direct audio fallback · {error}"))
+        };
+        match (&self.audio_route_notice, graph) {
+            (Some(route), Some(graph)) => Some(format!("{route} · {graph}")),
+            (Some(route), None) => Some(route.clone()),
+            (None, graph) => graph,
         }
     }
 
@@ -1259,7 +1271,7 @@ fn command_lines(program: &str, args: &[&str]) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn jack_ports() -> Vec<String> {
+pub(crate) fn jack_ports() -> Vec<String> {
     command_lines("jack_lsp", &[])
 }
 

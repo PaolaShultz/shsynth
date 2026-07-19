@@ -9,7 +9,7 @@ hardware have not been tested there. Raspberry Pi OS Bullseye and Debian or
 Raspberry Pi OS 13 (Trixie) are expected to work, but are not hardware-tested.
 
 The supported family is Debian-based Linux. Rust 1.85, Cargo, a C build
-toolchain, `pkg-config`, ALSA development/runtime tools, and JACK2 are required
+toolchain, `pkg-config`, Python 3, ALSA development/runtime tools, and JACK2 are required
 to build the complete binary. A running JACK server is optional for browsing
 and editing but required for software-instrument audio, WAV-loop playback, and
 stereo recording. synthv1, Yoshimi, and FluidSynth/TimGM are separate optional
@@ -32,7 +32,8 @@ The installer:
 - installs/selects the official Rust 1.85 toolchain when the current Cargo is
   older, runs the locked tests, and builds the locked release version;
 - installs commands, templates, the 21 allowlisted presets, four allowlisted
-  CC0 48 kHz loops, device/controller profiles, drum data, documentation, and
+  CC0 48 kHz loops, ten manifest-cleared demo Projects plus MIDI files,
+  device/controller profiles, drum data, documentation, and
   all 80 menu-manual images below the selected prefix (normally `/usr/local`);
 - opens the routing wizard.
 
@@ -70,8 +71,8 @@ This path does not start JACK or transmit MIDI. Delete the two explicit `/tmp`
 paths afterward. For a persistent private development checkout,
 `./scripts/setup-local.sh` and `./scripts/local.sh` redirect configuration,
 Projects, Ideas, recordings, loops, and private presets below ignored `user/`.
-They copy missing public presets and starter loops without replacing private
-files. Build the release binary first; neither helper installs packages or
+They copy missing public presets, starter loops, and demo Projects without
+replacing private files. Build the release binary first; neither helper installs packages or
 builds the program.
 
 ## Upgrade and uninstall boundaries
@@ -99,8 +100,9 @@ unless their Projects, Ideas, recordings, loops, and private presets have been
 reviewed and backed up.
 
 The Makefile install/uninstall file boundary was validated in an isolated
-`DESTDIR`: 21 allowlisted public presets were installed, no `user/` path was
-included, and staged uninstall removed only staged product files.
+`DESTDIR`: 21 allowlisted public presets and only manifest-cleared demos were
+installed, no `user/` path was included, and staged uninstall removed only
+staged product files.
 
 ## JACK
 

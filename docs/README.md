@@ -22,6 +22,8 @@ configuration, or the architecture contracts.
 - [In-app help](HELP.md) — the compact help text shown by `?` or F1.
 - [Tracker guide](TRACKER.md) — FT2 editing, pages, routing, Arrangement,
   drums, loops, and Project files.
+- [Public-domain demo songs](DEMO_SONGS.md) — tempos, keys, parts, restyle
+  ideas, clearance records, and installed discovery.
 - [Controller interface](CONTROLLER_INTERFACE.md) — complete four-page action
   inventory and hardware navigation contract.
 - [Physical connections](CONNECTIONS.md) — MIDI and audio wiring examples.

@@ -43,6 +43,10 @@ display does not rely on an omitted suffix to teach the chord quality.
   melody-only transpose, and the separate reusable drum-pattern library. Drum
   filters choose genre, meter, and 2/4/8-bar phrase size. It also names and
   renames Projects and cleans only zero-reference Pattern records.
+
+Ten cleared demo Projects appear in **Files** after setup. Their five `AUTO`
+pages follow this machine's current MIDI defaults, and matching MIDI exports
+plus provenance live in the XDG demo directory.
 - **Arrange** edits the ordered pattern steps separately from pattern data.
 - **Loop** imports, trims, aligns, and plays a private WAV with the tracker,
   with a separate stereo `LOOP OUT` meter for that WAV alone;

@@ -35,7 +35,9 @@ a -18 dB post-insert send. Return changes also use 3 dB steps and wrap from
 One SHR-owned JACK client contains the current stereo graph. Effects are
 internal processors, not separate JACK clients or processes. That client has
 one stereo input boundary from the managed engine and one stereo output
-boundary to the two configured `audio.output` ports. Exact JACK and hardware
+boundary to the runtime-resolved pair. The saved preferred `audio.output` pair,
+ordered internal pairs, and final headphone pair remain machine configuration.
+Exact JACK and hardware
 names come from configuration, never Rust constants.
 
 The typed graph model reserves source and sink kinds for a loop player, live
@@ -72,10 +74,11 @@ alive until client deactivation returns.
 
 ## Project data and typed graph model
 
-Project format 3 stores the managed-source `InsertRack` and
+Project format 4 stores the managed-source `InsertRack` and
 `ProjectAuxRouting` as strict JSON inside the versioned `.shsong` line format.
 Formats 0 and 1 migrate to an empty rack and routing; format 2 keeps its source
-rack and adds empty aux/master routing. Unknown current fields, malformed rack
+rack and adds empty aux/master routing; format 3 retains explicit routes.
+Unknown current fields, malformed rack
 data, and newer Project/effect versions are refused on load and on overwrite.
 Rack order is a separate list of stable effect IDs, so moving an effect does
 not recreate its identity.

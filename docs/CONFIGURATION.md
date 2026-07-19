@@ -1,8 +1,9 @@
 # Configuration and tracker routing
 
-SHR-DAW is a Raspberry Pi mini DAW and MIDI routing hub. Hardware names belong
-in `shsynth.conf`, `controller.conf`, or a saved Project. They are not compiled
-into the program.
+SHR-DAW is a Raspberry Pi mini DAW and MIDI routing hub. Machine defaults and
+hardware fallbacks belong in `shsynth.conf` or `controller.conf`; only a page
+deliberately bound to exact hardware stores that preferred target in a Project.
+Names are not compiled into the program.
 
 Both configuration files use one `KEY=VALUE` entry per line. A comment must
 start with `#` after optional leading whitespace; `#` inside a value is kept as
@@ -16,7 +17,7 @@ overrides are documented in [Installation](INSTALLATION.md).
 
 ## Runtime key reference
 
-Repeated `midi.input`, `audio.output`, `yoshimi.preset_root`,
+Repeated `midi.input`, `audio.output`, `audio.internal_output`, `yoshimi.preset_root`,
 `yoshimi.category`, `fluidsynth.soundfont`, `external_midi.channel`,
 `external_midi.percussion_note`, `capture.input`, and `loop.output` keys build
 ordered lists. Empty optional values disable that choice. The current parser
@@ -29,7 +30,7 @@ accepts:
 | synthv1 | `synthv1.command`, `.client`, `.presets`, `.midi_output`; legacy `synth.command`, `synth.client`, `presets.directory`, and `midi.synth_output` remain accepted |
 | Yoshimi | `yoshimi.command`, `.client`, `.midi_output`, repeated `.preset_root` and `.category`, `.presets_per_category` |
 | FluidSynth | `fluidsynth.command`, `.client`, `.midi_output`, `.gain`, repeated `.soundfont` |
-| Managed MIDI/audio | `midi.autoconnect`, repeated `midi.input`; `audio.autoconnect`, repeated `audio.output`; optional `audio.engine_cpu` |
+| Managed MIDI/audio | `midi.autoconnect`, repeated `midi.input`; `audio.autoconnect`, exactly two preferred `audio.output` entries, ordered `audio.internal_output=NAME|LEFT|RIGHT` fallbacks, final optional `audio.headphone_output=NAME|LEFT|RIGHT`; optional `audio.engine_cpu` |
 | Owned graph | `audio.graph.enabled`, `.client`, `.maximum_callback_frames` (1–4096) |
 | External tracker MIDI | `external_midi.enabled`, `.client`, `.output`, `.max_tracks`, repeated `.channel`, `.melody_channel`, optional `.percussion_channel` and `.percussion_program`, `.percussion_input_base`, repeated `.percussion_note`, `.bank_select` (`off`, `cc0`, or `cc0+cc32`), `.program_changes`, `.send_transport`, `.default_tempo` (20–300), `.pattern_rows` (1–256), `.steps_per_beat` (1–16), `.live_thru`, `.profile`, `.gate_percent` (1–100), `.gesture_settle_ms` |
 | Stereo capture | `capture.directory`, `.client`, repeated `capture.input=NAME|LEFT|RIGHT`, `.ring_frames` (1024–4194304) |
@@ -79,8 +80,8 @@ audio.graph.client=shr-graph
 audio.graph.maximum_callback_frames=4096
 ```
 
-Exactly two `audio.output` entries are both the conservative direct fallback
-and the graph's main destinations. Enabling the graph requires those two
+Exactly two `audio.output` entries are the preferred direct route and the
+graph's main destinations. Enabling the graph requires those two
 entries and direct autoconnection. The callback frame bound may be 1–4096 and
 must cover the active JACK period; an unexpectedly larger callback is counted
 and written as silence rather than overrunning fixed memory.
@@ -139,6 +140,24 @@ Duration is bounded to 1–60 seconds. The command enables the graph only
 in its cloned in-memory configuration, sends note 48 at velocity 8, measures
 the owned graph and synth processes, restores the exact direct route, and stops
 only the engine it owns. It does not persist graph enablement or JACK settings.
+
+## Non-destructive runtime fallbacks
+
+Saved configuration is preference, not a cache of what happens to be connected
+today. At each safe engine or loop activation SHR-DAW compares visible JACK
+ports without changing the configuration it will later save. It tries the
+preferred `audio.output` pair, each configured `audio.internal_output` in
+order, and `audio.headphone_output` last. The final entry is for the Pi analogue
+jack or another lowest-quality emergency route; no port name is assumed. The
+status names the fallback and missing preferred pair. If none is visible,
+audio reports unavailable while retaining the preference for the next
+activation.
+
+Failure to open the preferred `midi.input` leaves the TUI and tracker computer
+keyboard active and shows which input is missing. An exact Project MIDI target
+falls back first to the configured external output, then to the already loaded
+internal instrument. The target text in the Project never changes, and
+transport resolves it again on the next play so reconnected hardware is used.
 
 ## Controller menu layouts
 
@@ -226,9 +245,11 @@ and each page stores:
 
 Open **TOOLS** → **PAGES** from FT2. The resulting **TRACKS** screen edits
 pages and columns. Use the main encoder to select a page. **ADD** creates
-another four-lane page in that Pattern. **TARGET**
-chooses an ALSA MIDI output that is currently visible, the active SHR-DAW
-software instrument, or the configured output. **CHANNEL**
+another four-lane page in that Pattern. **TARGET** chooses `AUTO` (portable
+machine default), an ALSA MIDI output that is currently visible, the active
+SHR-DAW software instrument, or the configured output. `AUTO` displays an
+`AUTO` channel and does not permit channel/bank/program editing because those
+values would bind the Project to one machine. **CHANNEL**
 chooses 1–16. Encoder press confirms a field. **DONE** keeps all page changes;
 **SYS** → **EXIT** restores the Project from before TRACKS opened. On the
 **COLUMN** and **BANK** pages, **COL−/COL+**, **PROG−/PROG+**, and the bank
@@ -239,16 +260,17 @@ The active-instrument choice always means the single software instrument that
 SHR-DAW currently owns and monitors. It does not start another engine. It is
 offline when no managed instrument is active.
 
-An exact hardware port name is saved in the Project. If that device is later
-missing, the page shows `OFFLINE`. SHR-DAW keeps the name and pattern data,
-does not rewrite the file, and continues playing pages whose targets are
-available. If multiple ports have the same exact name, or a configured partial
-match selects more than one port, the target is ambiguous and no port is chosen.
+An exact hardware port name is saved as a preferred route. If it is missing,
+the page and persistent status show `FALLBACK` and name the missing target while
+runtime uses the configured external route or loaded instrument. With no route
+at all it shows `OFFLINE`. SHR-DAW never rewrites the saved name. If multiple
+ports have the same exact name, or a configured partial match selects more than
+one port, the preferred target is ambiguous and is not guessed.
 
 ## Configured output
 
-The `external_midi.*` settings provide the configured route for new Projects
-and newly created FT2 Patterns.
+The `external_midi.*` settings provide the machine route resolved by portable
+pages in new Projects and newly created FT2 Patterns.
 They also hold tracker timing, gate, bank/program, transport, live-thru, and
 optional drum-map defaults.
 
@@ -278,12 +300,15 @@ Exact MIDI port targets can also match a profile's `port_matches` entries.
 ## Project files
 
 Projects are stored as `.shsong` text files below
-`${XDG_DATA_HOME:-~/.local/share}/shsynth/songs/`. Current Project format 3
+`${XDG_DATA_HOME:-~/.local/share}/shsynth/songs/`. Current Project format 4
 stores each FT2 Pattern as a self-contained unit with its own tempo,
 meter, page targets, setup messages, four lanes per page, four column
 channel/bank/program setups, every cell field, the source insert rack, aux
-routing, and master rack. Versions 0 and 1 migrate with empty effects routing;
-version 2 retains its source rack and gains empty aux/master routing. Version 0
+routing, and master rack. A format-4 `default` target plus four `default`
+column markers is the canonical portable/unassigned state; it is not channel
+zero, mute, or disabled. Versions 0 and 1 migrate with empty effects routing;
+version 2 retains its source rack and gains empty aux/master routing; format 3
+keeps every explicit target/channel unchanged. Version 0
 page-wide channel/bank/program data is copied to all four columns. Unknown
 newer versions, unknown fields, and invalid effect data are refused rather than
 partly loaded or written back.
@@ -316,7 +341,9 @@ loop.output=system:playback_1
 loop.output=system:playback_2
 ```
 
-Exactly two `loop.output` destinations are required when loading a loop. The
+Exactly two `loop.output` destinations are required when loading a loop. At
+application start its in-memory route follows the same resolved audio fallback
+pair described above; its remembered configured pair is not rewritten. The
 player owns only its JACK client and output ports; it never starts/restarts
 JACK, layers a synth engine, or disconnects another client. Missing servers or
 ports leave the MIDI tracker usable and produce a useful error.

@@ -144,8 +144,10 @@ Arrangement reference and never silently rewrites the Arrangement.
 
 Each Pattern owns one or more **pages**, and every page has four note
 **columns**. All enabled pages play together. A page chooses one MIDI
-destination: the active managed instrument, the configured external output, or
-an exact visible ALSA MIDI port. Each column then stores its own channel 1–16,
+destination: portable `AUTO`, the active managed instrument, the configured
+external output, or an exact visible ALSA MIDI port. An `AUTO` page persists no
+device/channel/bank/program route and resolves the current machine defaults at
+playback. An explicit page's columns store channel 1–16,
 bank MSB/LSB, master program, lane name, and mute state. Two columns may share
 the same destination/channel only when their master bank/program selections
 match, because MIDI program changes affect the whole channel.
@@ -153,9 +155,11 @@ match, because MIDI program changes affect the whole channel.
 This separation makes several useful routes possible in one Pattern: one page
 can play the managed software instrument, another can address a drum machine,
 and another can play a hardware synth on a different port. A disconnected
-exact target is displayed as `OFFLINE`; its name and notes stay in the Project,
-and other available pages continue. Ambiguous exact or partial port matches
-are refused rather than guessed.
+exact target is displayed as `FALLBACK` while the configured external route or
+loaded instrument can substitute, otherwise `OFFLINE`; its name and notes stay
+in the Project. Destinations are re-resolved on each play, so returned equipment
+is selected without editing the Project. Ambiguous exact or partial preferred
+matches are not guessed.
 
 External MIDI device profiles add trustworthy bank labels and program names to
 the column and cell program browsers. They remain JSON data, can be privately
@@ -353,7 +357,9 @@ clean up only the activity each action owns. This prevents one lane or screen
 from cutting off another shared note.
 
 Missing JACK leaves browsing and external-MIDI sequencing usable. A missing
-external MIDI target stays `OFFLINE` without rewriting Project data. Ambiguous
+controller leaves the computer keyboard active. Audio resolves preferred,
+ordered internal, then final headphone routes in memory. A missing external
+MIDI target falls back without rewriting Project data. Ambiguous
 ports are refused. Missing optional engines or sound banks remain visible with
 an explanation. A failed graph returns to direct playback. None of those
 failures authorizes SHR-DAW to rewire unrelated clients or terminate processes
@@ -361,7 +367,9 @@ it does not own.
 
 ## Project and private-data safety
 
-Project format 3 persists the complete tracker state and effects routing.
+Project format 4 persists the complete tracker state and effects routing plus
+an explicit portable route state. Format 3 remains loadable and keeps its
+device/channel routes explicit.
 Formats 0 and 1 migrate with empty effects; format 2 retains its source rack and
 gains empty aux/master routing. Unknown newer formats, fields, malformed rack
 data, unsafe paths, and over-limit structures are refused rather than partly
@@ -381,7 +389,8 @@ below `${XDG_DATA_HOME:-~/.local/share}/shsynth/`. A repository-local launch
 redirects both into ignored `user/`. Important private data includes Ideas,
 Projects, recordings, imported loops, user drum patterns, learned controller
 configuration, profile overrides, and uncleared presets. Public packaging uses
-only the 21-presets allowlist and the authored drum data. See
+only the 21-presets allowlist, the authored drum data, and files named by the
+cleared demo manifest. See
 [Licensing and redistribution](../THIRD_PARTY.md).
 
 ## Performance information and honest limits

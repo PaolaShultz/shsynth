@@ -6,10 +6,12 @@ if [[ -d "$ROOT/config" ]]; then
   CONFIG_SOURCE="$ROOT/config"
   PROFILE_SOURCE="$ROOT/midi-devices"
   LOOP_SOURCE="$ROOT/loops"
+  DEMO_SOURCE="$ROOT/demos"
 else
   CONFIG_SOURCE="$ROOT/share/shsynth/config"
   PROFILE_SOURCE="$ROOT/share/shsynth/midi-devices"
   LOOP_SOURCE="$ROOT/share/shsynth/loops"
+  DEMO_SOURCE="$ROOT/share/shsynth/demos"
 fi
 STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}"
 DATA_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -20,8 +22,9 @@ usage() {
   cat <<'EOF'
 Usage: setup.sh [--state-dir DIR]
 
-Install starter loops and interactively configure SHR-DAW's display, MIDI, and
-JACK routes. The wizard does not start JACK, synth engines, or audible tests.
+Install starter loops and cleared demo songs, then interactively configure
+SHR-DAW's display, MIDI, and JACK routes. The wizard does not start JACK,
+synth engines, or audible tests.
 EOF
 }
 
@@ -154,6 +157,52 @@ seed_public_loops() {
   done <"$manifest"
 }
 
+seed_public_demos() {
+  local manifest="$DEMO_SOURCE/cleared-demos.json" data_destination=$1 songs_destination=$2
+  local listing midi project source destination
+  [[ -f "$manifest" ]] || {
+    printf 'Cleared-demo manifest not found: %s\n' "$manifest" >&2
+    return 1
+  }
+  listing="$(python3 - "$manifest" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+manifest = pathlib.Path(sys.argv[1])
+document = json.loads(manifest.read_text(encoding="utf-8"))
+if document.get("schema") != 1 or not document.get("demos"):
+    raise SystemExit("invalid cleared-demo manifest")
+for entry in document["demos"]:
+    slug = entry.get("id", "")
+    midi = entry.get("midi", "")
+    project = entry.get("project", "")
+    if (not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug)
+            or pathlib.Path(midi).name != midi
+            or pathlib.Path(project).name != project
+            or midi != f"{slug}.mid" or project != f"{slug}.shsong"):
+        raise SystemExit("unsafe cleared-demo manifest path")
+    print(f"{midi}|{project}")
+PY
+  )" || return 1
+  mkdir -p "$data_destination" "$songs_destination"
+  install -m644 "$manifest" "$data_destination/cleared-demos.json"
+  while IFS='|' read -r midi project; do
+    [[ -n "$midi" && -n "$project" ]] || continue
+    for source in "$DEMO_SOURCE/$midi" "$DEMO_SOURCE/$project"; do
+      [[ -f "$source" ]] || {
+        printf 'Cleared demo not found: %s\n' "$source" >&2
+        return 1
+      }
+      destination="$data_destination/${source##*/}"
+      [[ -e "$destination" ]] || install -m644 "$source" "$destination"
+    done
+    [[ -e "$songs_destination/$project" ]] || \
+      install -m644 "$DEMO_SOURCE/$project" "$songs_destination/$project"
+  done <<<"$listing"
+}
+
 install_private_musicradar_loops() {
   local destination=$1 rate=$2
   local url='https://cdn.mos.musicradar.com/audio/samples/sampleradar-80s-pop-drums-samples.zip'
@@ -212,10 +261,14 @@ else
   LOOP_INBOX="$(expand_home_path "$configured_loop_inbox")"
 fi
 seed_public_loops "$LOOP_INBOX"
+DEMO_DATA="$DATA_ROOT/shsynth/demos"
+SONG_DATA="$DATA_ROOT/shsynth/songs"
+seed_public_demos "$DEMO_DATA" "$SONG_DATA"
 
 if [[ ! -t 0 ]]; then
   printf 'Created or kept configuration in %s.\n' "$STATE_DIR"
   printf 'Starter loops are available in %s.\n' "$LOOP_INBOX"
+  printf 'Cleared demo Projects are available in %s.\n' "$SONG_DATA"
   printf 'Interactive routing was skipped because standard input is not a terminal.\n'
   exit 0
 fi
@@ -368,16 +421,23 @@ if ((${#cards[@]})) && ask_yes_no 'Select the ALSA card JACK should use on its n
 fi
 
 mapfile -t midi_sources < <(alsa_ports -i)
-choose_value 'Controller MIDI input (notes and physical controls)' no "${midi_sources[@]}"
+choose_value 'Controller MIDI input (0 keeps keyboard-only fallback)' yes "${midi_sources[@]}"
 controller_input="$CHOSEN"
-replace_values "$RUNTIME_CONFIG" midi.autoconnect true
-replace_values "$RUNTIME_CONFIG" midi.input "$controller_input"
-replace_values "$CONTROLLER_CONFIG" input "$controller_input"
-profile_result="$(SHSYNTH_STATE_DIR="$STATE_DIR" "$SHSYNTH_BIN" pads auto "$controller_input")"
-printf '%s\n' "$profile_result"
-if [[ "$profile_result" == *'no known profile'* ]] && \
-   ask_yes_no 'Learn this controller now? MIDI will not be forwarded to a synth.' yes; then
-  SHSYNTH_STATE_DIR="$STATE_DIR" "$SHSYNTH_BIN" pads learn "$controller_input"
+if [[ -n "$controller_input" ]]; then
+  replace_values "$RUNTIME_CONFIG" midi.autoconnect true
+  replace_values "$RUNTIME_CONFIG" midi.input "$controller_input"
+  replace_values "$CONTROLLER_CONFIG" input "$controller_input"
+  profile_result="$(SHSYNTH_STATE_DIR="$STATE_DIR" "$SHSYNTH_BIN" pads auto "$controller_input")"
+  printf '%s\n' "$profile_result"
+  if [[ "$profile_result" == *'no known profile'* ]] && \
+     ask_yes_no 'Learn this controller now? MIDI will not be forwarded to a synth.' yes; then
+    SHSYNTH_STATE_DIR="$STATE_DIR" "$SHSYNTH_BIN" pads learn "$controller_input"
+  fi
+else
+  replace_values "$RUNTIME_CONFIG" midi.autoconnect false
+  replace_values "$RUNTIME_CONFIG" midi.input
+  replace_values "$CONTROLLER_CONFIG" input
+  printf 'No MIDI input selected; the computer keyboard remains available.\n'
 fi
 if [[ -n "${SHSYNTH_PRESET_DIR:-}" ]]; then
   replace_values "$RUNTIME_CONFIG" synthv1.presets "$SHSYNTH_PRESET_DIR"
@@ -411,6 +471,43 @@ else
   replace_values "$RUNTIME_CONFIG" audio.output
   replace_values "$RUNTIME_CONFIG" loop.output
 fi
+
+configure_audio_fallback() {
+  local key=$1 prompt=$2 default_name=$3 left right route_name
+  ask_yes_no "Change the remembered $prompt route?" no || return 0
+  if ((${#playback_ports[@]})); then
+    choose_value "$prompt left JACK destination" yes "${playback_ports[@]}"
+  else
+    choose_value "$prompt left JACK destination" yes
+  fi
+  left="$CHOSEN"
+  if [[ -z "$left" ]]; then
+    replace_values "$RUNTIME_CONFIG" "$key"
+    return 0
+  fi
+  if ((${#playback_ports[@]})); then
+    choose_value "$prompt right JACK destination" no "${playback_ports[@]}"
+  else
+    choose_value "$prompt right JACK destination" no
+  fi
+  right="$CHOSEN"
+  [[ "$left" != "$right" ]] || {
+    printf 'Left and right fallback destinations must be different.\n' >&2
+    return 1
+  }
+  read -r -p "$prompt label [$default_name]: " route_name
+  route_name="${route_name:-$default_name}"
+  validate_value "$route_name"
+  [[ "$route_name" != *'|'* ]] || {
+    printf 'Fallback labels cannot contain |.\n' >&2
+    return 1
+  }
+  replace_values "$RUNTIME_CONFIG" "$key" "$route_name|$left|$right"
+}
+
+configure_audio_fallback audio.internal_output 'internal sound device fallback' 'Internal audio'
+configure_audio_fallback audio.headphone_output \
+  'analogue headphone fallback (lowest quality, tried last)' 'Analogue headphones'
 
 if ask_yes_no 'Download four private MusicRadar drum loops (78 MB; raw samples cannot be redistributed)?' no; then
   read -r -p "WAV sample rate [$sample_rate]: " loop_sample_rate

@@ -43,12 +43,20 @@ SHR-DAW never starts or restarts it implicitly. Continue with
 - Route one controller to software or external MIDI instruments.
 - Sequence self-contained FT2 Patterns through an Arrangement.
 - Load and edit 72 bundled drum grooves.
+- Open ten cleared public-domain demo Projects, with matching Standard MIDI
+  files and five separable arrangement parts.
 - Save free-timed MIDI Ideas and private tracker Projects.
 - Start with four CC0 48 kHz WAV loops, optionally download private
   tempo-labelled drums during setup, and monitor the loop-only stereo meter.
 - Process the managed software instrument through source inserts, two aux
   returns, master effects, and a passive final-output meter.
 - Use a computer keyboard, mouse, or small configured controller.
+
+New Projects use portable `AUTO` routing: they take this machine's configured
+MIDI channels and active destination when loaded, without saving a device name
+or using channel zero as a sentinel. Explicit routes from older or deliberately
+hardware-bound Projects remain intact. Missing preferred MIDI/audio hardware
+activates a visible, non-destructive fallback and never rewrites the preference.
 
 Hardware names and routes remain configuration data. The current owned effects
 graph is opt-in, disabled by default, and intentionally limited to one managed
@@ -158,8 +166,9 @@ not in this product overview.
 
 ## License
 
-SHR-DAW code, the 21 included presets, and bundled original rhythm data are MIT
-licensed; the four bundled WAV loops are CC0. Read
+SHR-DAW code, the 21 included presets, original demo arrangements, and bundled
+rhythm data are MIT licensed; the four bundled WAV loops are CC0. The demo
+compositions themselves are documented public-domain sources. Read
 [THIRD_PARTY.md](THIRD_PARTY.md) before packaging the project or adding sounds.
 
 ---
