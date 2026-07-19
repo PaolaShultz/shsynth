@@ -25,7 +25,7 @@ if $INSTALL_DEPS; then
   sudo apt-get update
   sudo apt-get install -y \
     alsa-utils build-essential ca-certificates curl jackd2 libasound2-dev \
-    fluidsynth pkg-config synthv1 timgm6mb-soundfont yoshimi yoshimi-data
+    fluidsynth pkg-config sox synthv1 timgm6mb-soundfont unzip yoshimi yoshimi-data
 fi
 
 version_ok() {

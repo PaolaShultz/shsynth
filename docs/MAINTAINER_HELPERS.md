@@ -15,7 +15,7 @@ assumptions.
 |---|---|---|
 | `setup-local.sh` | Configure this checkout inside ignored private storage | Writes below `user/` by default; may run the interactive hardware wizard |
 | `local.sh` | Run the checkout without using normal home-directory state | Writes runtime data below `user/` by default |
-| `setup.sh` / installed `shr-setup` | Discover and configure MIDI/JACK routes | Backs up and rewrites owned configuration; optionally writes `~/.jackdrc` and installs CPU tuning after confirmation |
+| `setup.sh` / installed `shr-setup` | Seed loops and configure display/MIDI/JACK choices | Backs up and rewrites owned configuration; optionally downloads private loops, writes `~/.jackdrc`, and installs CPU tuning after confirmation |
 | `install.sh` | Install dependencies and SHR-DAW on Debian/Raspberry Pi OS | May use `sudo apt-get`, rustup, `sudo make install-files`, and the setup wizard |
 | `audio-performance.sh` / installed `shr-audio-tune` | Reversibly reserve one CPU for audio | Manages specific boot, systemd, governor, and JACK-affinity settings; requires reboot for isolation |
 | `render-readme-screenshots.py` | Regenerate or validate real TUI documentation images | Writes tracked PNGs below `docs/images/` only |
@@ -46,11 +46,13 @@ The wrapper exports:
 
 - `XDG_STATE_HOME=$SHSYNTH_USER_DIR/state`;
 - `XDG_DATA_HOME=$SHSYNTH_USER_DIR/data`;
-- `SHSYNTH_PRESET_DIR=$SHSYNTH_USER_DIR/presets/synthv1`.
+- `SHSYNTH_PRESET_DIR=$SHSYNTH_USER_DIR/presets/synthv1`;
+- `SHSYNTH_LOOP_INBOX=$SHSYNTH_USER_DIR/data/shsynth/loop-inbox`.
 
 It requires an executable SHR-DAW binary, creates the private preset directory,
 copies only missing public presets into it, and then replaces itself with
-`setup.sh --state-dir "$XDG_STATE_HOME/shsynth"`.
+`setup.sh --state-dir "$XDG_STATE_HOME/shsynth"`. The shared wizard seeds only
+the missing WAV names in `loops/cleared-loops.txt` into the private inbox.
 
 ### Why it exists
 
@@ -90,7 +92,7 @@ of passing through a redundant shell parent. This matters for All Notes Off and
 owned engine shutdown.
 
 The launcher does not recopy or reset the whole private tree. It creates only
-required directories and missing public preset seeds, preserving all user
+required directories and missing public preset/loop seeds, preserving all user
 work.
 
 ## Hardware setup wizard: `setup.sh` / `shr-setup`
@@ -116,33 +118,40 @@ Environment:
   profile commands.
 - `SHSYNTH_PRESET_DIR`, when present, becomes the configured synthv1 preset
   directory.
+- `SHSYNTH_LOOP_INBOX`, when present, becomes the configured and seeded loop
+  import inbox.
 
-The source-tree form reads templates from `config/` and MIDI-device profiles
-from `midi-devices/`. The installed form resolves both beneath
-`share/shsynth/`. If configuration is missing in the normal state directory it
-uses `shr config init`; for an explicit state directory it copies only missing
-template files.
+The source-tree form reads templates from `config/`, MIDI-device profiles from
+`midi-devices/`, and allowlisted starter WAVs from `loops/`. The installed form
+resolves all three beneath `share/shsynth/`. If configuration is missing in the
+normal state directory it uses `shr config init`; for an explicit state
+directory it copies only missing template files.
 
-If standard input is not a terminal, setup stops after creating or preserving
-configuration. It never guesses interactive hardware choices in automation.
+Setup always creates or preserves configuration, selects the active XDG/private
+loop inbox for new configuration, and copies missing allowlisted starter loops.
+If standard input is not a terminal it then stops; it never guesses display,
+download, or hardware choices in automation.
 
 ### Interactive sequence
 
 Before changing configuration, the wizard creates unique timestamped backups of
 both `shsynth.conf` and `controller.conf`. It then:
 
-1. optionally selects an ALSA interface and writes a backed-up `~/.jackdrc` for
+1. asks whether note names use English `B` or German `H`/`B` spelling;
+2. optionally selects an ALSA interface and writes a backed-up `~/.jackdrc` for
    the user's next manual JACK restart;
-2. selects the controller input and writes the same exact match to runtime and
+3. selects the controller input and writes the same exact match to runtime and
    controller configuration;
-3. runs non-audible `shr pads auto`, optionally followed by `shr pads learn` if
+4. runs non-audible `shr pads auto`, optionally followed by `shr pads learn` if
    no reviewed profile matches;
-4. discovers physical JACK playback ports, or accepts a manual exact name when
-   JACK is unavailable;
-5. optionally configures a distinct stereo capture pair and label;
-6. optionally configures an external MIDI destination and data-driven device
+5. discovers physical JACK playback ports, writes the same stereo pair for
+   synth and loop playback, or accepts a manual exact name when JACK is offline;
+6. optionally downloads four MusicRadar 80s drum beats, converts them to the
+   chosen WAV rate with SoX, and records their source/redistribution terms;
+7. optionally configures a distinct stereo capture pair and label;
+8. optionally configures an external MIDI destination and data-driven device
    profile;
-7. on systems with at least four CPUs, optionally invokes `shr-audio-tune` and
+9. on systems with at least four CPUs, optionally invokes `shr-audio-tune` and
    records the selected engine CPU.
 
 ### Design decisions
@@ -163,6 +172,11 @@ both `shsynth.conf` and `controller.conf`. It then:
   interrupt or produce audible output.
 - Controller learning is non-audible: learned MIDI is not forwarded to a synth.
 - Existing configuration is backed up rather than silently discarded.
+- Public and downloaded-private loop seeds never replace a same-named inbox
+  file. Public packaging is constrained by `loops/cleared-loops.txt`.
+- The optional 78 MB archive is fetched directly from MusicRadar into a
+  temporary directory and deleted after extracting four tempo-labelled beats.
+  Those raw WAVs remain private because MusicRadar forbids redistribution.
 
 ## Installer: `install.sh`
 
@@ -182,8 +196,9 @@ Options:
 - `-h`, `--help` prints usage.
 
 With dependencies enabled, it requires a Debian-style `apt-get` system and uses
-`sudo` to install the build toolchain, ALSA/JACK utilities and headers, the
-three supported software instruments, and their packaged data. It requires
+`sudo` to install the build toolchain, ALSA/JACK utilities and headers, SoX and
+unzip for optional loop installation, the three supported software instruments,
+and their packaged data. It requires
 Rust 1.85 or newer; when necessary it installs the official minimal rustup
 toolchain for the current user and runs Cargo as `cargo +1.85.0`.
 

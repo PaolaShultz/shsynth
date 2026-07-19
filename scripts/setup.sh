@@ -5,11 +5,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ -d "$ROOT/config" ]]; then
   CONFIG_SOURCE="$ROOT/config"
   PROFILE_SOURCE="$ROOT/midi-devices"
+  LOOP_SOURCE="$ROOT/loops"
 else
   CONFIG_SOURCE="$ROOT/share/shsynth/config"
   PROFILE_SOURCE="$ROOT/share/shsynth/midi-devices"
+  LOOP_SOURCE="$ROOT/share/shsynth/loops"
 fi
 STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}"
+DATA_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}"
 STATE_DIR="$STATE_ROOT/shsynth"
 SHSYNTH_BIN="${SHSYNTH_BIN:-}"
 
@@ -17,8 +20,8 @@ usage() {
   cat <<'EOF'
 Usage: setup.sh [--state-dir DIR]
 
-Interactively configure SHR-DAW's MIDI and JACK routes. The wizard only writes
-configuration: it does not start JACK, synth engines, or audible tests.
+Install starter loops and interactively configure SHR-DAW's display, MIDI, and
+JACK routes. The wizard does not start JACK, synth engines, or audible tests.
 EOF
 }
 
@@ -55,8 +58,10 @@ fi
 mkdir -p "$STATE_DIR"
 RUNTIME_CONFIG="$STATE_DIR/shsynth.conf"
 CONTROLLER_CONFIG="$STATE_DIR/controller.conf"
+RUNTIME_CREATED=false
 
 if [[ ! -f "$RUNTIME_CONFIG" || ! -f "$CONTROLLER_CONFIG" ]]; then
+  [[ -f "$RUNTIME_CONFIG" ]] || RUNTIME_CREATED=true
   if [[ "$STATE_DIR" == "$STATE_ROOT/shsynth" ]]; then
     "$SHSYNTH_BIN" config init
   else
@@ -65,21 +70,17 @@ if [[ ! -f "$RUNTIME_CONFIG" || ! -f "$CONTROLLER_CONFIG" ]]; then
   fi
 fi
 
-if [[ ! -t 0 ]]; then
-  printf 'Created or kept configuration in %s.\n' "$STATE_DIR"
-  printf 'Interactive routing was skipped because standard input is not a terminal.\n'
-  exit 0
+if [[ -t 0 ]]; then
+  STAMP_BASE="$(date +%Y%m%d-%H%M%S)"
+  STAMP="$STAMP_BASE"
+  backup_number=1
+  while [[ -e "$RUNTIME_CONFIG.bak-$STAMP" || -e "$CONTROLLER_CONFIG.bak-$STAMP" ]]; do
+    STAMP="$STAMP_BASE-$backup_number"
+    ((backup_number += 1))
+  done
+  cp -p "$RUNTIME_CONFIG" "$RUNTIME_CONFIG.bak-$STAMP"
+  cp -p "$CONTROLLER_CONFIG" "$CONTROLLER_CONFIG.bak-$STAMP"
 fi
-
-STAMP_BASE="$(date +%Y%m%d-%H%M%S)"
-STAMP="$STAMP_BASE"
-backup_number=1
-while [[ -e "$RUNTIME_CONFIG.bak-$STAMP" || -e "$CONTROLLER_CONFIG.bak-$STAMP" ]]; do
-  STAMP="$STAMP_BASE-$backup_number"
-  ((backup_number += 1))
-done
-cp -p "$RUNTIME_CONFIG" "$RUNTIME_CONFIG.bak-$STAMP"
-cp -p "$CONTROLLER_CONFIG" "$CONTROLLER_CONFIG.bak-$STAMP"
 
 validate_value() {
   local value=$1
@@ -110,6 +111,115 @@ replace_values() {
   mv "$tmp" "$file"
 }
 
+config_value() {
+  local file=$1 key=$2
+  awk -v wanted="$key" '
+    {
+      line=$0
+      sub(/^[[:space:]]*/, "", line)
+      if (index(line, wanted "=") == 1) value=substr(line, length(wanted) + 2)
+    }
+    END { print value }
+  ' "$file"
+}
+
+expand_home_path() {
+  local value=$1 tilde='~'
+  case "$value" in
+    "$tilde") printf '%s\n' "$HOME" ;;
+    "$tilde/"*) printf '%s/%s\n' "$HOME" "${value#"$tilde/"}" ;;
+    *) printf '%s\n' "$value" ;;
+  esac
+}
+
+seed_public_loops() {
+  local destination=$1 manifest="$LOOP_SOURCE/cleared-loops.txt" loop_name source
+  [[ -f "$manifest" ]] || {
+    printf 'Starter-loop manifest not found: %s\n' "$manifest" >&2
+    return 1
+  }
+  mkdir -p "$destination"
+  while IFS= read -r loop_name || [[ -n "$loop_name" ]]; do
+    [[ -n "$loop_name" && "$loop_name" != \#* ]] || continue
+    [[ "$loop_name" != */* && "$loop_name" == *.wav ]] || {
+      printf 'Unsafe starter-loop manifest entry: %s\n' "$loop_name" >&2
+      return 1
+    }
+    source="$LOOP_SOURCE/$loop_name"
+    [[ -f "$source" ]] || {
+      printf 'Starter loop not found: %s\n' "$source" >&2
+      return 1
+    }
+    [[ -e "$destination/$loop_name" ]] || install -m644 "$source" "$destination/$loop_name"
+  done <"$manifest"
+}
+
+install_private_musicradar_loops() {
+  local destination=$1 rate=$2
+  local url='https://cdn.mos.musicradar.com/audio/samples/sampleradar-80s-pop-drums-samples.zip'
+  local temp_dir archive bpm source output
+  for dependency in curl unzip sox; do
+    command -v "$dependency" >/dev/null 2>&1 || {
+      printf 'Optional loop download needs %s.\n' "$dependency" >&2
+      return 1
+    }
+  done
+  temp_dir="$(mktemp -d /tmp/shr-private-loops.XXXXXX)"
+  archive="$temp_dir/80s-pop-drums.zip"
+  if ! curl --fail --location --retry 2 --output "$archive" "$url"; then
+    find "$temp_dir" -type f -delete
+    rmdir "$temp_dir"
+    return 1
+  fi
+  mkdir -p "$destination"
+  for bpm in 85 110 120 140; do
+    output="$destination/private-80s-pop-${bpm}.wav"
+    [[ -e "$output" ]] && continue
+    source="$temp_dir/source-${bpm}.wav"
+    if ! unzip -p "$archive" \
+      "80s Pop Drums/${bpm}bpm/*Beat*-01.wav" >"$source"; then
+      printf 'Could not extract the %s BPM loop from the downloaded pack.\n' "$bpm" >&2
+      find "$temp_dir" -type f -delete
+      rmdir "$temp_dir"
+      return 1
+    fi
+    if ! sox "$source" -b 24 -r "$rate" "$temp_dir/output-${bpm}.wav" rate -v; then
+      find "$temp_dir" -type f -delete
+      rmdir "$temp_dir"
+      return 1
+    fi
+    install -m644 "$temp_dir/output-${bpm}.wav" "$output"
+  done
+  if [[ ! -e "$destination/PRIVATE-LOOPS-SOURCE.txt" ]]; then
+    printf '%s\n' \
+      'MusicRadar SampleRadar: 183 free 80s pop drums samples' \
+      'https://www.musicradar.com/news/sampleradar-free-80s-pop-drums-samples' \
+      'Royalty-free for music use; do not redistribute the raw samples.' \
+      >"$destination/PRIVATE-LOOPS-SOURCE.txt"
+  fi
+  find "$temp_dir" -type f -delete
+  rmdir "$temp_dir"
+}
+
+configured_loop_inbox="$(config_value "$RUNTIME_CONFIG" loop.import_directory)"
+if [[ -n "${SHSYNTH_LOOP_INBOX:-}" ]]; then
+  LOOP_INBOX="$SHSYNTH_LOOP_INBOX"
+  replace_values "$RUNTIME_CONFIG" loop.import_directory "$LOOP_INBOX"
+elif $RUNTIME_CREATED || [[ -z "$configured_loop_inbox" ]]; then
+  LOOP_INBOX="$DATA_ROOT/shsynth/loop-inbox"
+  replace_values "$RUNTIME_CONFIG" loop.import_directory "$LOOP_INBOX"
+else
+  LOOP_INBOX="$(expand_home_path "$configured_loop_inbox")"
+fi
+seed_public_loops "$LOOP_INBOX"
+
+if [[ ! -t 0 ]]; then
+  printf 'Created or kept configuration in %s.\n' "$STATE_DIR"
+  printf 'Starter loops are available in %s.\n' "$LOOP_INBOX"
+  printf 'Interactive routing was skipped because standard input is not a terminal.\n'
+  exit 0
+fi
+
 ask_yes_no() {
   local prompt=$1 default=$2 answer suffix
   if [[ "$default" == yes ]]; then suffix='[Y/n]'; else suffix='[y/N]'; fi
@@ -120,6 +230,24 @@ ask_yes_no() {
       y|yes) return 0 ;;
       n|no) return 1 ;;
       *) printf 'Please answer yes or no.\n' >&2 ;;
+    esac
+  done
+}
+
+choose_note_names() {
+  local current default_choice answer
+  current="$(config_value "$RUNTIME_CONFIG" display.note_names)"
+  if [[ "$current" == english ]]; then default_choice=1; else default_choice=2; fi
+  printf '\nWhich note-name system do you use?\n'
+  printf '  1) English: C D E F G A B C\n'
+  printf '  2) German:  C D E F G A H C  (B means B-flat)\n'
+  while true; do
+    read -r -p "[$default_choice] > " answer
+    answer="${answer:-$default_choice}"
+    case "$answer" in
+      1) replace_values "$RUNTIME_CONFIG" display.note_names english; return 0 ;;
+      2) replace_values "$RUNTIME_CONFIG" display.note_names german; return 0 ;;
+      *) printf 'Choose 1 or 2.\n' >&2 ;;
     esac
   done
 }
@@ -204,7 +332,11 @@ alsa_cards() {
 
 printf 'SHR-DAW hardware setup\n'
 printf 'No audio server, synth engine, or audible test will be started.\n'
+printf 'Starter loops: %s\n' "$LOOP_INBOX"
 
+choose_note_names
+
+sample_rate=48000
 mapfile -t cards < <(alsa_cards)
 if ((${#cards[@]})) && ask_yes_no 'Select the ALSA card JACK should use on its next start?' no; then
   choose_value 'JACK audio interface' no "${cards[@]}"
@@ -273,9 +405,26 @@ if [[ -n "$left_playback" ]]; then
   }
   replace_values "$RUNTIME_CONFIG" audio.autoconnect true
   replace_values "$RUNTIME_CONFIG" audio.output "$left_playback" "$right_playback"
+  replace_values "$RUNTIME_CONFIG" loop.output "$left_playback" "$right_playback"
 else
   replace_values "$RUNTIME_CONFIG" audio.autoconnect false
   replace_values "$RUNTIME_CONFIG" audio.output
+  replace_values "$RUNTIME_CONFIG" loop.output
+fi
+
+if ask_yes_no 'Download four private MusicRadar drum loops (78 MB; raw samples cannot be redistributed)?' no; then
+  read -r -p "WAV sample rate [$sample_rate]: " loop_sample_rate
+  loop_sample_rate="${loop_sample_rate:-$sample_rate}"
+  if [[ ! "$loop_sample_rate" =~ ^[0-9]+$ ]] || \
+     ((loop_sample_rate < 8000 || loop_sample_rate > 384000)); then
+    printf 'WAV sample rate must be between 8000 and 384000 Hz.\n' >&2
+    exit 1
+  fi
+  if install_private_musicradar_loops "$LOOP_INBOX" "$loop_sample_rate"; then
+    printf 'Installed private 85, 110, 120, and 140 BPM loops in %s.\n' "$LOOP_INBOX"
+  else
+    printf 'Optional private loops were not installed; setup will continue.\n' >&2
+  fi
 fi
 
 mapfile -t capture_ports < <(jack_audio_ports output)

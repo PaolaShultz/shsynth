@@ -117,3 +117,20 @@ Genre names are creative navigation hints rather than claims of an
 authoritative cultural transcription. The structural and naming audit is in
 `docs/DRUM_PATTERN_AUDIT.md`; groove, feel, and final curation still require
 human listening.
+
+## Bundled and private-download WAV loops
+
+The four WAVs named in `loops/cleared-loops.txt` are redistributable under CC0
+1.0 rather than MIT. Their authors, source pages, conversions, exact tempo and
+hashes are recorded in `loops/SOURCES.md`. The three `starter-100-step-*.wav`
+files come from obscure music's CC0 **Music loop variations** pack; the
+`war-drums-130.wav` file is William Hector's CC0 **Horde War Drums loop**.
+Packaging must continue to use the manifest allowlist.
+
+`shr-setup` can also download four tempo-labelled WAVs from MusicRadar's
+**SampleRadar: 183 free 80s pop drums samples** directly into the user's loop
+inbox. MusicRadar permits use in music but says not to redistribute the raw
+samples, so neither the 78 MB archive nor extracted WAVs may be committed,
+packaged, mirrored, or copied into a public release. Setup asks first, stores a
+source/terms note beside the private files, and downloads from:
+<https://www.musicradar.com/news/sampleradar-free-80s-pop-drums-samples>.

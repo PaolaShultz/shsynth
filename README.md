@@ -44,8 +44,8 @@ SHR-DAW never starts or restarts it implicitly. Continue with
 - Sequence self-contained FT2 Patterns through an Arrangement.
 - Load and edit 72 bundled drum grooves.
 - Save free-timed MIDI Ideas and private tracker Projects.
-- Import private WAV loops, monitor their separate loop-only stereo meter, and
-  record a configured stereo JACK input.
+- Start with four CC0 48 kHz WAV loops, optionally download private
+  tempo-labelled drums during setup, and monitor the loop-only stereo meter.
 - Process the managed software instrument through source inserts, two aux
   returns, master effects, and a passive final-output meter.
 - Use a computer keyboard, mouse, or small configured controller.
@@ -159,8 +159,8 @@ not in this product overview.
 ## License
 
 SHR-DAW code, the 21 included presets, and bundled original rhythm data are MIT
-licensed. Read [THIRD_PARTY.md](THIRD_PARTY.md) before packaging the project or
-adding sounds.
+licensed; the four bundled WAV loops are CC0. Read
+[THIRD_PARTY.md](THIRD_PARTY.md) before packaging the project or adding sounds.
 
 ---
 

@@ -15,9 +15,12 @@ shr doctor
 shr
 ```
 
-The setup wizard finds ALSA MIDI ports and JACK audio ports. You can enter an
-exact port name if automatic detection is not enough. Run `shr-setup` again
-after changing a controller, MIDI interface, sound card, or JACK port layout.
+The setup wizard selects English or German note spelling, installs four starter
+loops in the import inbox, and finds ALSA MIDI and JACK audio ports. It can also
+download four private MusicRadar drum loops after showing the redistribution
+restriction. You can enter an exact port name if automatic detection is not
+enough. Run `shr-setup` again after changing a controller, MIDI interface,
+sound card, or JACK port layout.
 
 `shr doctor` checks the complete audio/MIDI setup, so it reports missing JACK
 as a problem. The preset browser and external-MIDI tracker can still open

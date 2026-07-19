@@ -47,18 +47,28 @@ Repository-local operation uses:
 ```
 
 `SHSYNTH_USER_DIR` may replace `user/`. The launchers set `XDG_STATE_HOME`,
-`XDG_DATA_HOME`, and `SHSYNTH_PRESET_DIR`; do not replace this with hardcoded
-Rust paths. The important local paths are:
+`XDG_DATA_HOME`, `SHSYNTH_PRESET_DIR`, and `SHSYNTH_LOOP_INBOX`; do not replace
+this with hardcoded Rust paths. The important local paths are:
 
 - `user/state/shsynth/`: runtime/controller configuration, backups, PID/log
   state, and generated engine configuration;
 - `user/data/shsynth/ideas/`: recorded MIDI ideas;
 - `user/data/shsynth/songs/`: tracker Projects (`.shsong`);
 - `user/data/shsynth/recordings/`: stereo WAV recordings;
+- `user/data/shsynth/loop-inbox/`: missing-only public starter seeds and any
+  private source loops offered for import;
 - `user/data/shsynth/loops/`: privately imported FT2 WAV loops;
 - `user/data/shsynth/drum-patterns/`: user-saved reusable four-lane drum patterns;
 - `user/presets/synthv1/`: cleared copies plus local/legacy presets;
 - `user/downloads/`: private source archives.
+
+The tracked `loops/cleared-loops.txt` is the public WAV packaging allowlist.
+Its four CC0 stereo 48 kHz/24-bit files are documented and hashed in
+`loops/SOURCES.md`; setup copies missing names into the inbox. MusicRadar's
+optional 80s drum download is royalty-free for music but forbids raw-sample
+redistribution. It must remain below user data and must never be committed or
+packaged; setup downloads it directly and keeps a source/terms note beside the
+four extracted tempo examples.
 
 The local setup currently selects the MiniLab3 MIDI controller, JACK
 `system:playback_1`/`system:playback_2`, AudioBox USB 96 stereo capture through
@@ -229,7 +239,10 @@ inbox are configuration. Tempo matching sets the current Pattern tempo from the
 interpreted WAV BPM; the WAV is not stretched or pitch-shifted to fit the old
 tempo. The loop player requires the JACK server sample rate to match the WAV
 sample rate, so use JACK setup/restart at 44100 Hz for 44.1 kHz loops when
-needed. The deterministic loop fixture seeds useful stereo `LOOP OUT` display
+needed. Fresh setup uses the 48 kHz inbox seeds, writes the selected stereo JACK
+playback pair to both `audio.output` and `loop.output`, and asks explicitly for
+English `C D E F G A B C` or German `C D E F G A H C` note spelling. The
+deterministic loop fixture seeds useful stereo `LOOP OUT` display
 data without starting JACK or reading private loop files; mono decoding already
 duplicates samples into left/right values, so mono meter readings match.
 
@@ -374,6 +387,14 @@ passed, all 34 tracked Markdown files had valid local paths, image references,
 and heading fragments, `git diff --check` passed, and no tracked path existed
 below `user/`. No JACK server, synth engine, MIDI hardware, private loop file,
 recording, or audible test was used.
+
+After the starter-loop/setup work on 2026-07-19, all four public WAVs passed
+stereo 48 kHz/24-bit, exact-frame, provenance-hash, local-seed, no-replacement,
+and staged-package allowlist checks. The optional private MusicRadar path was
+exercised end to end at 48 kHz for its 85/110/120/140 BPM selections. Shellcheck,
+formatting, all 394 Rust tests, warning-denied Clippy, and the optimized locked
+release build passed. No JACK client, synth engine, MIDI transmission, playback,
+recording, or audible test was started.
 
 For docs, README, screenshot, or image-only changes, keep validation scoped to
 the files changed instead of running the Rust suite mechanically. Examples:

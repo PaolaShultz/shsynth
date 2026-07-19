@@ -34,6 +34,12 @@ install-files:
 	install -d $(DESTDIR)$(PREFIX)/share/shsynth/drum-patterns
 	install -m644 drum-patterns/*.shdrum $(DESTDIR)$(PREFIX)/share/shsynth/drum-patterns/
 	install -m644 drum-patterns/*.shrdrums $(DESTDIR)$(PREFIX)/share/shsynth/drum-patterns/
+	install -d $(DESTDIR)$(PREFIX)/share/shsynth/loops
+	set -e; while IFS= read -r loop; do \
+	  case "$$loop" in ''|'#'*) continue ;; esac; \
+	  install -m644 "loops/$$loop" $(DESTDIR)$(PREFIX)/share/shsynth/loops/; \
+	done < loops/cleared-loops.txt
+	install -m644 loops/cleared-loops.txt loops/SOURCES.md $(DESTDIR)$(PREFIX)/share/shsynth/loops/
 	install -d $(DESTDIR)$(PREFIX)/share/doc/shsynth/images
 	install -m644 LICENSE THIRD_PARTY.md README.md $(DESTDIR)$(PREFIX)/share/doc/shsynth/
 	install -m644 docs/*.md $(DESTDIR)$(PREFIX)/share/doc/shsynth/

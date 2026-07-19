@@ -43,7 +43,9 @@ of editing Rust constants.
 `display.note_names` changes Playback chord roots, slash bass notes, and the
 held-note row together. It does not transpose MIDI or alter the keyboard-state
 positions. The default is `german`, matching the existing central-European B
-and H convention; `english` names those pitch classes A# and B.
+and H convention; `english` names those pitch classes A# and B. `shr-setup`
+asks with the two example scales `C D E F G A B C` and
+`C D E F G A H C (B means B-flat)` and writes this key.
 
 ## Audio CPU isolation
 
@@ -309,7 +311,7 @@ Loop hardware and source locations are configured rather than compiled in:
 
 ```text
 loop.client=shs-loop
-loop.import_directory=~/Music
+loop.import_directory=~/.local/share/shsynth/loop-inbox
 loop.output=system:playback_1
 loop.output=system:playback_2
 ```
@@ -326,6 +328,13 @@ and copied without replacement to
 filename, source BPM, cut region, and bar placement offset. Disk I/O, decoding,
 allocation, import, and auto-alignment analysis happen outside the JACK
 callback.
+
+On first setup, the inbox is placed below the active XDG data root and seeded
+without replacement from the four CC0 48 kHz WAVs in the installed
+`loops/cleared-loops.txt` allowlist. Setup copies the selected JACK playback
+pair to `loop.output`. Its optional MusicRadar download adds private 85, 110,
+120, and 140 BPM drum loops to the same inbox after explicit confirmation; the
+raw files are not part of the public package.
 
 The callback also publishes a bounded stereo `LOOP OUT` snapshot after region
 selection, interpolation, transport gating, and edge fades. This uses the same
