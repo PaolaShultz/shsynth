@@ -130,7 +130,8 @@ Validation checks:
   accepts the doubled-path warning;
 - every non-empty aux rack contains a wet generator; delay, reverb, chorus,
   flanger, and phaser are forced to 100% wet with zero dry signal;
-- structural edits only while transport and recording are stopped; and
+- runtime plan publication only while transport and recording are stopped;
+  graph-disabled Project edits validate and persist without touching audio; and
 - every capacity and memory bound below.
 
 The graph plan, filter coefficients, port resolution, delay memory, and all
@@ -230,6 +231,11 @@ return meters observe the wet bus after return gain; `FINAL OUT` observes the
 complete owned graph after master processing. All publish bounded peak/RMS,
 clip, and non-finite state through atomics. They do not observe the separate
 loop client, recorder capture, hardware, or unrelated JACK clients. The MTR
+keeps its non-decaying numeric L/R maxima entirely in UI presentation state;
+the audio callback continues to publish only the bounded lock-free snapshots.
+The bar's short peak marker retains its existing hold and decay behavior. The
+numeric maxima reset on MTR RESET, every downward mapped synthv1 Volume movement
+even before pickup, and meter/engine session boundaries. The MTR
 CPU bars are whole-core `/proc/stat` load and deliberately cannot diagnose
 per-process DSP cost, callback deadlines, scheduling jitter, or xruns; those
 belong to the explicit checkpoint counters and JACK evidence.

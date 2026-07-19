@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 pub enum MidiEvent {
+    MappedControl(u8, f32),
     Value(u8, f32),
     Raw { received: Instant, bytes: Vec<u8> },
     Pad(PadAction, bool),
@@ -890,6 +891,9 @@ fn connect_midi_input(
                 let forced_pad_release =
                     locked_pad_release(&pads, message, pad_locked, &mut locked_pad_notes);
                 let routed = crate::midi::route_with_pad_lock(&pads, backend, message, pad_locked);
+                if let Some((cc, value)) = routed.value {
+                    let _ = tx.send(MidiEvent::MappedControl(cc, value));
+                }
                 let accepted = routed
                     .value
                     .map(|(cc, value)| {

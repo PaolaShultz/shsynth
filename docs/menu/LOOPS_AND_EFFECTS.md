@@ -93,8 +93,9 @@ performing another automatic analysis.
 The rack targets `SOURCE`, `AUX 1`, `AUX 2`, or `MASTER`. Source and master
 racks are serial inserts. Aux buses have an independent send level, pre/post
 source-insert point, wet-only processor rack, and return level. Each rack is
-bounded to eight effects. Structural publication is refused while transport or
-recording makes it unsafe.
+bounded to eight effects. With the graph active, FX changes are refused while
+transport or recording makes publication unsafe. With it disabled, the same
+controls edit saved Project data without touching audio.
 
 The screenshot shows a populated source chain. Selecting another target keeps
 the same menu but changes the body and which routing actions apply.

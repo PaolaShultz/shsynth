@@ -66,6 +66,36 @@ values are saved too. Loading an idea can replace the current managed engine,
 then TAKE plays through the restored idea instrument rather than an arbitrary
 active engine.
 
+## Effects and routing
+
+From Playback, open **SOUND** → **FX**. `TARGET` moves among SOURCE, AUX 1,
+AUX 2, and MASTER. A source rack changes the managed instrument in series; it
+is the natural place for EQ, compression, filtering, distortion, gating, or
+other processing that belongs to that sound. The master rack processes the
+complete managed-source-plus-aux mix immediately before `FINAL OUT`.
+
+An aux is a parallel path for space or motion. `SEND` controls how much of the
+instrument enters it, `POINT` chooses before or after the source inserts, and
+`RETURN` controls how much processed sound comes back. The aux editor offers
+Delay, Reverb, Chorus, Flanger, and Phaser and forces them wet-only, so the
+return cannot accidentally add a second dry instrument. A new aux begins with
+a conservative -18 dB post-insert send.
+
+Source and master racks also offer Utility, EQ, Compressor, Distortion,
+Tremolo/Pan, Gate, Filter, and Crusher as well as the five time/space effects.
+Each rack is ordered: filter before distortion sounds different from distortion
+before filter. Source/master bypass fades toward clean passthrough. A fully
+bypassed aux fades to silence; a delay can optionally stop new input and let
+its already-created wet tail decay.
+
+The rack remains editable and saved when the opt-in graph is disabled, but the
+direct audio path cannot process or meter it. With the graph active, stop
+transport and all recording before publishing an FX change. The current graph
+contains only the managed software instrument; the WAV loop, recorder input,
+and external-instrument audio do not pass through these effects. Read
+[How SHR-DAW works](HOW_IT_WORKS.md#the-managed-audio-graph) for the complete
+route and sound-oriented effect guide.
+
 ## Stereo audio
 
 The Audio Recorder writes the selected JACK stereo pair as a 24-bit WAV file.
@@ -92,11 +122,21 @@ yellow is 60–85%, and red is above 85%. If fewer cores or no Linux statistics
 are available, the missing rows say `n/a`. A configured CPU-temperature sensor
 is shown too, but MTR does not require one.
 
-The friendly stereo VU display is labelled in dBFS: its solid body is smoothed
-RMS, the thin marker is peak hold, and `CLIP!` is held visibly after a full-scale
-sample. The scale runs from −60 to 0 dBFS; green is below −12 dBFS, yellow is
-−12 through −3 dBFS, and red is above −3 dBFS. RESET clears only the visual
-peak and clip holds. It does not touch audio, effects, engines, or JACK routes.
+The friendly stereo VU display is labelled in dBFS. Its solid body is live,
+smoothed RMS; the thin marker is a short peak hold that later decays. The
+`MAX` number is separate: left and right independently retain their highest
+detected peak and never decay merely because the signal becomes quieter or
+time passes. `CLIP!` is held visibly after a full-scale sample. The scale runs
+from −60 to 0 dBFS; green is below −12 dBFS, yellow is −12 through −3 dBFS,
+and red is above −3 dBFS.
+
+RESET clears the two `MAX` numbers, short peak markers, and clip hold without
+touching audio, effects, engines, or JACK routes. Turning the mapped synthv1
+Volume control down also clears both `MAX` numbers. This happens on every
+downward physical movement, even while pickup is still waiting and the Volume
+change is blocked; increases, unchanged values, and other controls do not clear
+them. A new sound/engine session, a stopped engine, direct unmetered playback,
+or a lost meter starts with no maximum from the previous session.
 
 `FINAL OUT` is truthful only while the owned audio graph is active. It is the
 graph master after the managed software-instrument source, its wet aux returns,

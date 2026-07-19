@@ -59,9 +59,10 @@ are forced wet.
 The editor selects named parameters and adjusts values in physical units. Its
 bottom rows show input/output peak and RMS, clip/non-finite counts, and
 compressor gain reduction when the owned graph is active. Rack size and total
-effect count are bounded. Stop transport and all recording before structural
-changes. The rack is still saved when the opt-in audio graph is disabled, but
-direct playback will not process it.
+effect count are bounded. With the graph active, stop transport and all
+recording before an FX change can publish a replacement plan. With the graph
+disabled, the same editor can design and save the Project silently, but direct
+playback will not process or meter it.
 
 ## Performance meters
 
@@ -71,8 +72,13 @@ whole-core Linux `/proc/stat` counter changes: green is below 60%, yellow is
 timing, xrun detection, or proof of audio safety. Configured CPU temperature is
 optional.
 
-Stereo bars show smoothed RMS and a peak-hold marker on a −60 to 0 dBFS scale.
-CLIP is held in red. RESET clears only the visible peak and clip holds.
+Stereo bars show live smoothed RMS and a short, decaying peak marker on a −60
+to 0 dBFS scale. Each channel's `MAX` number separately holds its highest peak
+without decay. CLIP is held in red. RESET clears `MAX`, the short markers, and
+CLIP. Any downward movement of the mapped synthv1 Volume control clears both
+`MAX` values even when pickup blocks the actual Volume change; increases,
+equal values, and other controls leave them alone. Stopped, unavailable, and
+new meter sessions cannot carry an old `MAX` forward.
 
 FINAL OUT is available only for the active owned graph. It measures after all
 master inserts, immediately before playback, and covers the managed source and

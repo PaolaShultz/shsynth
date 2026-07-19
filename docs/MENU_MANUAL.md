@@ -84,7 +84,8 @@ the arrows in reverse by one level; it does not throw the user back to the root.
 - **Audio recording** means a stereo 24-bit WAV from the configured JACK input.
 - **Remove Loop** detaches the WAV from the Project. Deleting a private WAV is
   a separate confirmed action and is refused while saved Projects reference it.
-- Structural FX edits require stopped transport and no active recording.
+- With the graph active, FX edits require stopped transport and no active
+  recording. With it disabled, FX edits change saved Project data only.
 
 For the source-of-truth page/action matrix and controller reachability rules,
 see the [controller interface](CONTROLLER_INTERFACE.md). For computer keyboard

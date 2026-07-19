@@ -15,7 +15,7 @@ configuration, or the architecture contracts.
 
 - [First run](FIRST_RUN.md) — configure hardware and open SHR-DAW.
 - [Using SHR-DAW](USING_SHR_DAW.md) — instruments, screens, MIDI Ideas,
-  performance meters, recording, and commands.
+  source/aux/master effects, performance meters, recording, and commands.
 - [Complete screen and menu manual](MENU_MANUAL.md) — 80 deterministic images
   covering every populated 40×20 screen, contextual editor, and controller
   menu page, with explanations.
@@ -41,8 +41,9 @@ configuration, or the architecture contracts.
 
 ## Architecture and safety
 
-- [How SHR-DAW works](HOW_IT_WORKS.md) — concise ownership, MIDI, pickup,
-  recording, audio-graph, and data boundaries.
+- [How SHR-DAW works](HOW_IT_WORKS.md) — end-to-end MIDI/audio routing,
+  instrument ownership, Ideas, FT2 Projects, loops, recording, the full effect
+  palette, graph safety, persistence, and honest current limits.
 - [Audio graph and DSP contract](AUDIO_GRAPH.md) — Project effects data, exact
   parameter schemas, real-time limits, routing publication, meters, bypass,
   tails, topology limits, and curation gates.

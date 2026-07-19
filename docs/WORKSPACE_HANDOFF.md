@@ -130,6 +130,12 @@ silence; delay-tail bypass drains wet-only with its input muted, and bypassed
 serial processors preserve a safe path around another active/tail wet
 generator. An all-bypassed chain never exposes its raw send.
 
+The FX rack/editor is deliberately available when `audio.graph.enabled=false`:
+it validates and saves Project routing without processing or metering the
+direct audio path. Only an enabled graph needs runtime replacement publication,
+so only that mode blocks FX changes until transport and all recording are
+stopped. Keep this distinction explicit in musician and architecture docs.
+
 The Phase 3/4 Pi checkpoint on 2026-07-19 measured the combined eight source
 inserts, two aux reverbs, and master compressor for 60 seconds. At 128 frames it
 reported 313.572 us mean, 360 us p99, 540.108 us maximum, and zero
@@ -172,14 +178,18 @@ slash bass (`C maj/E`); a single held C remains `C`.
 
 Presets NAV item 1 opens the passive `MTR` performance screen. CPU0–CPU3 come
 from bounded UI-side `/proc/stat` deltas, with the configured temperature when
-available. Stereo RMS, peak hold, and clip state come only from the active
-owned graph's dedicated post-master meter. Direct mode, stopped engines, WAV
-loops, hardware returns, recorder inputs, and unrelated JACK clients are never
+available. Live stereo smoothed RMS, a short decaying peak marker, independent
+non-decaying L/R `MAX` peaks, and clip state come only from the active owned
+graph's dedicated post-master meter. Direct mode, stopped engines, WAV loops,
+hardware returns, recorder inputs, and unrelated JACK clients are never
 presented as final-output activity; direct/stopped output is explicitly
-unavailable. MTR RESET clears presentation holds only. CPU rows are whole-core
-load: they do not measure synth/graph process CPU, callback timing, scheduling
-jitter, or xruns. Its deterministic README screenshot says that it uses
-presentation data.
+unavailable and lifecycle changes clear stale maxima. MTR RESET clears
+presentation holds only. Every downward movement of the mapped synthv1 Volume
+control clears both numeric maxima before pickup acceptance, while increases,
+equal values, and unrelated controls do not. CPU rows are whole-core load: they
+do not measure synth/graph process CPU, callback timing, scheduling jitter, or
+xruns. Its deterministic README screenshot says that it uses presentation
+data.
 
 FT2 real-time REC is hardware-page-only: it refuses `ActiveInstrument`,
 consumes notes before the loaded synth, auditions through the selected page's

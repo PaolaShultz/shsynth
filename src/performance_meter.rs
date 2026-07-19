@@ -210,6 +210,7 @@ pub struct PerformanceMeter {
     cpu_cores: usize,
     cpu_available: bool,
     audio: [LevelState; 2],
+    numeric_peak_dbfs: [f32; 2],
     audio_availability: AudioAvailability,
     audio_last_update: Option<Instant>,
     clip_count: Option<u64>,
@@ -227,6 +228,7 @@ impl Default for PerformanceMeter {
             cpu_cores: 0,
             cpu_available: false,
             audio: [LevelState::default(); 2],
+            numeric_peak_dbfs: [AUDIO_FLOOR_DBFS; 2],
             audio_availability: AudioAvailability::Stopped,
             audio_last_update: None,
             clip_count: None,
@@ -291,6 +293,7 @@ impl PerformanceMeter {
         self.clip_until = None;
         self.non_finite = 0;
         self.audio = [LevelState::default(); 2];
+        self.numeric_peak_dbfs = [AUDIO_FLOOR_DBFS; 2];
     }
 
     pub fn update_audio(&mut self, snapshot: MeterSnapshot, now: Instant) {
@@ -305,9 +308,15 @@ impl PerformanceMeter {
             (snapshot.rms.left, snapshot.peak.left),
             (snapshot.rms.right, snapshot.peak.right),
         ];
-        for (state, (rms, peak)) in self.audio.iter_mut().zip(inputs) {
+        for ((state, numeric_peak), (rms, peak)) in self
+            .audio
+            .iter_mut()
+            .zip(&mut self.numeric_peak_dbfs)
+            .zip(inputs)
+        {
             let target_rms = level_dbfs(rms);
             let target_peak = level_dbfs(peak);
+            *numeric_peak = (*numeric_peak).max(target_peak);
             if !state.initialized {
                 state.display.rms_dbfs = target_rms;
                 state.display.peak_dbfs = target_peak;
@@ -352,6 +361,10 @@ impl PerformanceMeter {
         [self.audio[0].display, self.audio[1].display]
     }
 
+    pub fn numeric_peak_dbfs(&self) -> [f32; 2] {
+        self.numeric_peak_dbfs
+    }
+
     pub fn clipping(&self, now: Instant) -> bool {
         self.clip_until.is_some_and(|until| now < until)
     }
@@ -365,13 +378,19 @@ impl PerformanceMeter {
             state.display.peak_dbfs = state.display.rms_dbfs;
             state.hold_until = None;
         }
+        self.clear_numeric_peaks();
         self.clip_until = None;
+    }
+
+    pub fn clear_numeric_peaks(&mut self) {
+        self.numeric_peak_dbfs = [AUDIO_FLOOR_DBFS; 2];
     }
 
     pub fn seed_presentation(
         &mut self,
         cpu: [Option<f32>; VISIBLE_CPU_CORES],
         audio: [AudioLevel; 2],
+        numeric_peak_dbfs: [f32; 2],
         now: Instant,
     ) {
         self.cpu_loads = cpu;
@@ -382,6 +401,7 @@ impl PerformanceMeter {
             state.initialized = true;
             state.hold_until = Some(now + AUDIO_HOLD);
         }
+        self.numeric_peak_dbfs = numeric_peak_dbfs;
         self.audio_availability = AudioAvailability::Presentation;
         self.audio_last_update = Some(now);
         self.presentation = true;
@@ -485,5 +505,104 @@ cpu3 35 0 55 390 0 0 0 0 0 0\n";
         assert!((held.peak_dbfs + 6.0206).abs() < 0.01);
         meter.update_audio(MeterSnapshot::default(), now + Duration::from_secs(1));
         assert!(meter.audio_levels()[0].peak_dbfs < held.peak_dbfs);
+    }
+
+    #[test]
+    fn numeric_peak_maximum_rises_and_never_decays() {
+        let now = Instant::now();
+        let mut meter = PerformanceMeter::default();
+        meter.update_audio(
+            MeterSnapshot {
+                peak: StereoFrame::new(0.25, 0.25),
+                ..MeterSnapshot::default()
+            },
+            now,
+        );
+        let first = meter.numeric_peak_dbfs();
+        meter.update_audio(
+            MeterSnapshot {
+                peak: StereoFrame::new(0.75, 0.5),
+                ..MeterSnapshot::default()
+            },
+            now + Duration::from_millis(10),
+        );
+        let louder = meter.numeric_peak_dbfs();
+        assert!(louder[0] > first[0]);
+        assert!(louder[1] > first[1]);
+
+        meter.update_audio(
+            MeterSnapshot {
+                peak: StereoFrame::new(0.01, 0.02),
+                ..MeterSnapshot::default()
+            },
+            now + Duration::from_secs(60),
+        );
+        assert_eq!(meter.numeric_peak_dbfs(), louder);
+    }
+
+    #[test]
+    fn numeric_peak_maxima_are_independent_and_manual_reset_clears_both() {
+        let now = Instant::now();
+        let mut meter = PerformanceMeter::default();
+        meter.update_audio(
+            MeterSnapshot {
+                peak: StereoFrame::new(0.8, 0.2),
+                ..MeterSnapshot::default()
+            },
+            now,
+        );
+        let first = meter.numeric_peak_dbfs();
+        meter.update_audio(
+            MeterSnapshot {
+                peak: StereoFrame::new(0.4, 0.9),
+                ..MeterSnapshot::default()
+            },
+            now + Duration::from_millis(20),
+        );
+        let second = meter.numeric_peak_dbfs();
+        assert_eq!(second[0], first[0]);
+        assert!(second[1] > first[1]);
+
+        meter.clear_holds();
+        assert_eq!(
+            meter.numeric_peak_dbfs(),
+            [AUDIO_FLOOR_DBFS, AUDIO_FLOOR_DBFS]
+        );
+    }
+
+    #[test]
+    fn unavailable_and_new_meter_lifecycle_cannot_leak_an_old_maximum() {
+        let now = Instant::now();
+        let mut meter = PerformanceMeter::default();
+        meter.update_audio(
+            MeterSnapshot {
+                peak: StereoFrame::new(0.95, 0.85),
+                ..MeterSnapshot::default()
+            },
+            now,
+        );
+        assert!(meter.numeric_peak_dbfs()[0] > -1.0);
+
+        meter.set_audio_unavailable(AudioAvailability::Stopped);
+        assert_eq!(
+            meter.numeric_peak_dbfs(),
+            [AUDIO_FLOOR_DBFS, AUDIO_FLOOR_DBFS]
+        );
+        meter.update_audio(
+            MeterSnapshot {
+                peak: StereoFrame::new(0.1, 0.2),
+                ..MeterSnapshot::default()
+            },
+            now + Duration::from_secs(1),
+        );
+        let fresh = meter.numeric_peak_dbfs();
+        assert!((fresh[0] - level_dbfs(0.1)).abs() < 0.001);
+        assert!((fresh[1] - level_dbfs(0.2)).abs() < 0.001);
+
+        meter.set_audio_unavailable(AudioAvailability::DirectUnavailable);
+        assert_eq!(
+            meter.numeric_peak_dbfs(),
+            [AUDIO_FLOOR_DBFS, AUDIO_FLOOR_DBFS]
+        );
     }
 }

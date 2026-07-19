@@ -140,10 +140,10 @@ From **TOOLS** → **LOOP**, press **REMOVE** twice to detach the loop from the
 Project and unload its JACK client. The imported private WAV is kept on disk so
 another Project can still use it.
 
-**TOOLS** → **LIBRARY** is separate from Remove. It pages through imported
-private WAVs and marks the current loop, saved-Project references, and free
-files. Physical deletion requires confirmation and is refused for referenced,
-symlinked, or unsafe paths.
+On FT2 Tools, open the **LOOP** menu page and choose **LIBRARY**. It is separate
+from Remove: it pages through imported private WAVs and marks the current loop,
+saved-Project references, and free files. Physical deletion requires
+confirmation and is refused for referenced, symlinked, or unsafe paths.
 
 ## Copy and Paste
 
@@ -222,6 +222,23 @@ messages, cells, source insert rack, two aux routes, and master rack. Versions
 empty aux/master routing. Version 0 page-wide setups copy the old
 channel/bank/program into all four columns. Unknown newer versions, fields, or
 invalid effect shapes are not loaded or overwritten.
+
+## Effects saved with the Project
+
+The Project also owns the managed instrument's ordered source insert rack, two
+aux send/rack/return routes, and master rack. Those settings are independent of
+the Pattern/Arrangement structure: repeating a Pattern does not duplicate an
+effect, and changing Arrangement steps does not change rack order. The two aux
+sends take their pre/post source-insert taps from the one managed software
+instrument, not from individual MIDI lanes.
+
+With the opt-in graph active, the source and wet returns meet once before the
+master rack and final meter. The private WAV loop, external-instrument audio,
+and recorder capture are separate audio paths, so their MIDI pages or loop
+references do not acquire source inserts or aux sends. See
+[How SHR-DAW works](HOW_IT_WORKS.md#the-managed-audio-graph) for the musical
+workflow and [Audio graph and DSP contract](AUDIO_GRAPH.md) for exact effect
+schemas and limits.
 
 ## Detailed controls and routing
 

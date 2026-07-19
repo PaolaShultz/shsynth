@@ -4,7 +4,7 @@ use crate::audio_graph::{
 use crate::audio_recorder::{AudioRecorder, RecorderStatus};
 use crate::chord::HeldNotes;
 use crate::config::{BankSelectMode, ExternalMidiConfig, RuntimeConfig};
-use crate::control::{parameter_color, CONTROLS};
+use crate::control::{parameter_color, CONTROLS, VOLUME_CC};
 use crate::device_profile::{DeviceProfile, Registry as DeviceProfiles};
 use crate::drum_pattern::{self, DrumPattern};
 use crate::engine::{self, Engine, MidiEvent};
@@ -382,6 +382,7 @@ struct App {
     fx_add_kind: usize,
     fx_target: usize,
     performance_meter: PerformanceMeter,
+    last_mapped_volume: Option<f32>,
 }
 impl App {
     fn new(
@@ -521,6 +522,7 @@ impl App {
             fx_add_kind: 0,
             fx_target: 0,
             performance_meter: PerformanceMeter::default(),
+            last_mapped_volume: None,
         }
     }
 
@@ -702,6 +704,8 @@ impl App {
         self.stop_recording();
         self.stop_playback();
         self.engine.take();
+        self.performance_meter
+            .set_audio_unavailable(AudioAvailability::Stopped);
         let _ = engine::stop_managed(state);
         self.playing = None;
         self.status = "synth stopped".into();
@@ -3202,11 +3206,38 @@ impl App {
         original_values: HashMap<u8, f32>,
         values: HashMap<u8, f32>,
     ) {
+        self.performance_meter
+            .set_audio_unavailable(AudioAvailability::Stopped);
         self.playing = Some(preset);
         self.original_values = original_values;
         self.values = values;
         self.arm_pickup();
         self.set_screen(Screen::Playback);
+    }
+
+    fn observe_mapped_control(&mut self, cc: u8, value: f32) {
+        if cc != VOLUME_CC {
+            return;
+        }
+        if self
+            .last_mapped_volume
+            .is_some_and(|previous| value < previous)
+        {
+            self.performance_meter.clear_numeric_peaks();
+        }
+        self.last_mapped_volume = Some(value);
+    }
+
+    fn apply_control_value(&mut self, cc: u8, value: f32) {
+        if cc == VOLUME_CC
+            && self
+                .values
+                .get(&cc)
+                .is_some_and(|previous| value < *previous)
+        {
+            self.performance_meter.clear_numeric_peaks();
+        }
+        self.values.insert(cc, value);
     }
     fn audio_graph_edit_blocker(&self) -> Option<&'static str> {
         if !self.config.audio_graph.enabled {
@@ -3673,6 +3704,8 @@ impl App {
             return;
         }
         self.engine.take();
+        self.performance_meter
+            .set_audio_unavailable(AudioAvailability::Stopped);
         self.playing = None;
         self.status = format!("starting JACK/{}…", p.backend.label());
         let backend_label = p.backend.label();
@@ -3968,6 +4001,8 @@ impl App {
                     return;
                 }
                 self.engine.take();
+                self.performance_meter
+                    .set_audio_unavailable(AudioAvailability::Stopped);
                 self.playing = None;
                 match Engine::start_with_routing(
                     &preset,
@@ -4083,11 +4118,15 @@ impl App {
             }
         }
         if let Some(status) = self.engine.as_mut().and_then(Engine::poll_audio_graph) {
+            self.performance_meter
+                .set_audio_unavailable(AudioAvailability::DirectUnavailable);
             self.status = status;
         }
         if self.engine.as_mut().is_some_and(|engine| !engine.alive()) {
             self.playback.take();
             self.engine.take();
+            self.performance_meter
+                .set_audio_unavailable(AudioAvailability::Stopped);
             self.playing = None;
             self.status = "ENGINE EXITED · select a sound to restart it".into();
         }
@@ -4241,8 +4280,11 @@ fn drain(
 ) {
     while let Ok(ev) = rx.try_recv() {
         match ev {
+            MidiEvent::MappedControl(cc, v) => {
+                app.observe_mapped_control(cc, v);
+            }
             MidiEvent::Value(cc, v) => {
-                app.values.insert(cc, v);
+                app.apply_control_value(cc, v);
             }
             MidiEvent::Raw { received, bytes } => {
                 app.held_notes.observe(&bytes);
@@ -4723,7 +4765,7 @@ fn perform(
         }
         Action::ResetMeter => {
             a.performance_meter.clear_holds();
-            a.status = "meter peak and clip holds cleared".into();
+            a.status = "meter MAX, short peak, and clip holds cleared".into();
         }
         Action::Back => {
             if a.screen == Screen::FxEditor {
@@ -5882,8 +5924,13 @@ fn cpu_meter_line(
     Spans::from(spans)
 }
 
-fn audio_meter_line(label: char, level: AudioLevel, width: usize) -> Spans<'static> {
-    let bar_width = width.saturating_sub(10).max(1);
+fn audio_meter_line(
+    label: char,
+    level: AudioLevel,
+    numeric_peak_dbfs: f32,
+    width: usize,
+) -> Spans<'static> {
+    let bar_width = width.saturating_sub(14).max(1);
     let mut spans = vec![Span::styled(
         format!("{label} ["),
         Style::default()
@@ -5896,16 +5943,16 @@ fn audio_meter_line(label: char, level: AudioLevel, width: usize) -> Spans<'stat
         level.peak_dbfs,
     )));
     spans.push(Span::styled(
-        format!("] {:>5.1}", level.rms_dbfs),
+        format!("] MAX {numeric_peak_dbfs:>5.1}"),
         Style::default().fg(performance_color(performance_meter::audio_color(
-            level.rms_dbfs,
+            numeric_peak_dbfs,
         ))),
     ));
     Spans::from(spans)
 }
 
 fn audio_scale_line(width: usize) -> String {
-    let bar_width = width.saturating_sub(10).max(1);
+    let bar_width = width.saturating_sub(14).max(1);
     let mut chars = vec![' '; width];
     let start = 3;
     let right = "-12  -3  0";
@@ -6018,8 +6065,9 @@ fn draw_performance_meter<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     } else {
         [AudioLevel::default(); 2]
     };
-    lines.push(audio_meter_line('L', levels[0], width));
-    lines.push(audio_meter_line('R', levels[1], width));
+    let numeric_peaks = a.performance_meter.numeric_peak_dbfs();
+    lines.push(audio_meter_line('L', levels[0], numeric_peaks[0], width));
+    lines.push(audio_meter_line('R', levels[1], numeric_peaks[1], width));
     let route = performance_audio_route(availability);
     lines.push(Spans::from(Span::styled(
         truncate(route, width),
@@ -6032,9 +6080,13 @@ fn draw_performance_meter<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     if detailed {
         lines.push(Spans::from(vec![
             Span::styled("█ RMS smoothed  ", Style::default().fg(Color::Green)),
-            Span::styled("│ peak hold  ", Style::default().fg(Color::LightYellow)),
+            Span::styled("│ short peak  ", Style::default().fg(Color::LightYellow)),
             Span::styled("· scale", Style::default().fg(Color::Red)),
         ]));
+        lines.push(Spans::from(Span::styled(
+            "MAX = highest peak since reset",
+            Style::default().fg(Color::White),
+        )));
     }
     if detailed && a.performance_meter.is_presentation() {
         lines.push(Spans::from(Span::styled(
@@ -7939,9 +7991,10 @@ fn configure_screenshot(app: &mut App, screen: Screen) {
                         peak_dbfs: -1.8,
                     },
                 ],
+                [-2.7, -0.6],
                 Instant::now(),
             );
-            app.status = "passive meter · RESET clears peak holds".into();
+            app.status = "passive meter · RESET clears held maxima".into();
         }
         _ => {}
     }
@@ -8332,7 +8385,7 @@ mod tests {
     }
 
     #[test]
-    fn meter_renders_deterministic_40x20_regions_and_honest_route_label() {
+    fn meter_renders_readable_deterministic_40x20_regions_and_honest_labels() {
         let p = presets();
         let mut a = app(&p);
         configure_screenshot(&mut a, Screen::Meter);
@@ -8351,6 +8404,9 @@ mod tests {
             "STEREO VU",
             "FINAL OUT",
             "dBFS",
+            "MAX  -2.7",
+            "MAX  -0.6",
+            "MAX = highest peak since reset",
             "Presentation · no live audio",
         ] {
             assert!(text.contains(expected), "missing {expected:?}");
@@ -8397,7 +8453,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol.as_str())
             .collect::<String>();
-        for expected in ["CPU LOAD", "0 [", "3 [", "STEREO VU", "L [", "R ["] {
+        for expected in ["CPU LOAD", "0 [", "3 [", "STEREO VU", "L [", "R [", "MAX"] {
             assert!(text.contains(expected), "missing {expected:?}");
         }
     }
@@ -8434,6 +8490,117 @@ mod tests {
             assert!(performance_audio_route(availability).chars().count() <= 38);
         }
     }
+
+    fn seed_numeric_meter_peaks(app: &mut App) {
+        app.performance_meter.update_audio(
+            crate::dsp::MeterSnapshot {
+                peak: crate::dsp::StereoFrame::new(0.8, 0.6),
+                ..crate::dsp::MeterSnapshot::default()
+            },
+            Instant::now(),
+        );
+        assert!(app.performance_meter.numeric_peak_dbfs()[0] > -2.0);
+    }
+
+    #[test]
+    fn mapped_volume_down_clears_maxima_even_when_pickup_blocks_the_value() {
+        let p = presets();
+        let mut a = app(&p);
+        a.values.insert(VOLUME_CC, 0.5);
+        seed_numeric_meter_peaks(&mut a);
+        let (tx, rx) = mpsc::channel();
+        tx.send(MidiEvent::MappedControl(VOLUME_CC, 0.8)).unwrap();
+        tx.send(MidiEvent::MappedControl(VOLUME_CC, 0.7)).unwrap();
+
+        drain(&rx, &mut a, Path::new("/none"), &tx);
+
+        assert_eq!(a.values.get(&VOLUME_CC), Some(&0.5));
+        assert_eq!(
+            a.performance_meter.numeric_peak_dbfs(),
+            [
+                performance_meter::AUDIO_FLOOR_DBFS,
+                performance_meter::AUDIO_FLOOR_DBFS,
+            ]
+        );
+    }
+
+    #[test]
+    fn accepted_volume_decrease_clears_maxima() {
+        let p = presets();
+        let mut a = app(&p);
+        a.values.insert(VOLUME_CC, 0.8);
+        seed_numeric_meter_peaks(&mut a);
+
+        a.apply_control_value(VOLUME_CC, 0.7);
+
+        assert_eq!(a.values.get(&VOLUME_CC), Some(&0.7));
+        assert_eq!(
+            a.performance_meter.numeric_peak_dbfs(),
+            [
+                performance_meter::AUDIO_FLOOR_DBFS,
+                performance_meter::AUDIO_FLOOR_DBFS,
+            ]
+        );
+    }
+
+    #[test]
+    fn manual_meter_reset_clears_numeric_maxima() {
+        let p = presets();
+        let mut a = app(&p);
+        seed_numeric_meter_peaks(&mut a);
+
+        assert!(!perform(
+            Action::ResetMeter,
+            &mut a,
+            Path::new("/none"),
+            None
+        ));
+
+        assert_eq!(
+            a.performance_meter.numeric_peak_dbfs(),
+            [
+                performance_meter::AUDIO_FLOOR_DBFS,
+                performance_meter::AUDIO_FLOOR_DBFS,
+            ]
+        );
+    }
+
+    #[test]
+    fn loading_a_new_preset_session_clears_numeric_maxima() {
+        let p = presets();
+        let mut a = app(&p);
+        seed_numeric_meter_peaks(&mut a);
+
+        a.commit_loaded_preset(p[0].clone(), HashMap::new(), HashMap::new());
+
+        assert_eq!(
+            a.performance_meter.numeric_peak_dbfs(),
+            [
+                performance_meter::AUDIO_FLOOR_DBFS,
+                performance_meter::AUDIO_FLOOR_DBFS,
+            ]
+        );
+    }
+
+    #[test]
+    fn volume_increase_equal_value_and_unrelated_controls_keep_maxima() {
+        let p = presets();
+        let mut a = app(&p);
+        a.values.insert(VOLUME_CC, 0.5);
+        seed_numeric_meter_peaks(&mut a);
+        let expected = a.performance_meter.numeric_peak_dbfs();
+
+        a.observe_mapped_control(VOLUME_CC, 0.4);
+        a.observe_mapped_control(VOLUME_CC, 0.4);
+        a.observe_mapped_control(VOLUME_CC, 0.6);
+        a.observe_mapped_control(74, 0.1);
+        a.apply_control_value(VOLUME_CC, 0.5);
+        a.apply_control_value(VOLUME_CC, 0.7);
+        a.apply_control_value(74, 0.0);
+
+        assert_eq!(a.performance_meter.numeric_peak_dbfs(), expected);
+    }
+
     #[test]
     fn owned_graph_route_changes_require_stopped_transport_and_recording() {
         let p = presets();

@@ -78,7 +78,9 @@ controls, and record MIDI Ideas.
 <img src="docs/images/shr-daw-performance-meter.png" alt="MTR performance screen with four CPU bars and stereo output meters" width="100%">
 
 Inspect CPU load and the owned graph's final stereo output without changing the
-audio route. [Meter details](docs/USING_SHR_DAW.md#performance-meters).
+audio route. Live bars show smoothed RMS and a short peak marker; the clearly
+labelled `MAX` numbers hold each channel's highest peak until RESET or a mapped
+Volume-down movement. [Meter details](docs/USING_SHR_DAW.md#performance-meters).
 
 ### FT2 Pattern Editor
 

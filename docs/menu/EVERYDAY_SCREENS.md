@@ -171,8 +171,9 @@ file. `HELP` opens help. `EXIT` returns one level.
 ## Performance meter
 
 MTR is passive: it never changes the route. CPU bars come from bounded UI-side
-system readings. Stereo RMS and peak hold are shown only for the final output
-of SHR-DAW's active owned graph. Direct mode and stopped engines are explicitly
+system readings. Live stereo RMS bars, a short decaying peak marker, and the
+independent non-decaying `MAX` numbers are shown only for the final output of
+SHR-DAW's active owned graph. Direct mode and stopped engines are explicitly
 reported as unavailable instead of displaying unrelated audio.
 
 CPU is whole-core `/proc/stat` activity, not synth or graph process CPU, JACK
@@ -184,8 +185,10 @@ loop, recorder input, external hardware, and unrelated JACK clients.
 
 ![Populated performance meter with the OPS controller page](../images/menu/performance-meter-ops.png)
 
-`RESET` clears peak and clip presentation holds. It does not reset audio,
-effects, CPU state, or transport.
+`RESET` clears both `MAX` numbers, the short peak markers, and the clip hold. It
+does not reset audio, effects, CPU state, or transport. Moving the mapped
+synthv1 Volume control downward clears both `MAX` numbers even before pickup
+accepts the control; upward, equal, and unrelated control movements do not.
 
 ### SYS — safety and return
 

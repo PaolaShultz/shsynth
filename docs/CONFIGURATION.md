@@ -95,10 +95,12 @@ unrelated JACK clients and connections are not changed.
 
 An orderly `shr stop` writes the owned graph's
 callback count, mean, p95, p99, maximum, missed-deadline count, and oversized
-callback count to the private `engine.log`. The FX rack/editor is available
-only when the graph is enabled; stopped transport and no active recording are
-required for rack publication. Projects still save their rack while the graph
-is disabled, but direct playback does not process it.
+callback count to the private `engine.log`. The FX rack/editor remains
+available while the graph is disabled, and those validated Project edits do
+not publish a runtime plan. With the graph enabled, stop transport and all
+recording before an FX change can rebuild and publish the owned graph. Projects
+save their racks in either mode, but direct playback does not process or meter
+them.
 
 Each rack holds at most eight effects; the complete graph holds at most 16,
 including at most two reverbs. Source and master racks offer Utility, EQ,
@@ -320,15 +322,16 @@ ports leave the MIDI tracker usable and produce a useful error.
 `loop.import_directory` is only the browseable inbox. A chosen WAV is validated
 and copied without replacement to
 `${XDG_DATA_HOME:-~/.local/share}/shsynth/loops/`, or the matching
-`SHSYNTH_USER_DIR` tree set by the local launcher. Songs retain the private
+`SHSYNTH_USER_DIR` tree set by the local launcher. Projects retain the private
 filename, source BPM, cut region, and bar placement offset. Disk I/O, decoding,
 allocation, import, and auto-alignment analysis happen outside the JACK
 callback.
 
 **TOOLS** → **LOOP** → **REMOVE** requires a second press, clears the Project's
 loop reference, and unloads the loop client. It never deletes the imported WAV
-from private storage. **TOOLS** → **LIBRARY** is the separate physical cleanup
-workflow. It lists only regular WAV files, marks current and saved-Project
+from private storage. On FT2 Tools, the **LOOP** menu page's **LIBRARY** action
+opens the separate physical cleanup workflow. It lists only regular WAV files,
+marks current and saved-Project
 references, rejects symlinks/unsafe paths, and requires confirmation before
 deleting an unreferenced file.
 
