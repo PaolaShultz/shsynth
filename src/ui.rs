@@ -5923,6 +5923,15 @@ fn audio_scale_line(width: usize) -> String {
     chars.into_iter().collect()
 }
 
+const fn performance_audio_route(availability: AudioAvailability) -> &'static str {
+    match availability {
+        AudioAvailability::GraphActive => "Owned graph master",
+        AudioAvailability::DirectUnavailable => "Direct · meter unavailable",
+        AudioAvailability::Stopped => "Engine stopped · meter unavailable",
+        AudioAvailability::Presentation => "Presentation · no live audio",
+    }
+}
+
 fn draw_performance_meter<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     let z = f.size();
     let body = rect(z.x, z.y, z.width, z.height.saturating_sub(3));
@@ -6011,12 +6020,7 @@ fn draw_performance_meter<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     };
     lines.push(audio_meter_line('L', levels[0], width));
     lines.push(audio_meter_line('R', levels[1], width));
-    let route = match availability {
-        AudioAvailability::GraphActive => "Owned graph master · source + wet returns",
-        AudioAvailability::DirectUnavailable => "Direct unavailable · no safe meter tap",
-        AudioAvailability::Stopped => "Unavailable · managed engine is stopped",
-        AudioAvailability::Presentation => "Presentation data · no JACK audio sampled",
-    };
+    let route = performance_audio_route(availability);
     lines.push(Spans::from(Span::styled(
         truncate(route, width),
         Style::default().fg(match availability {
@@ -7933,7 +7937,7 @@ mod tests {
             "STEREO VU",
             "FINAL OUT",
             "dBFS",
-            "Presentation data",
+            "Presentation · no live audio",
         ] {
             assert!(text.contains(expected), "missing {expected:?}");
         }
@@ -8001,8 +8005,20 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol.as_str())
             .collect::<String>();
-        assert!(text.contains("Direct unavailable"));
+        assert!(text.contains("Direct · meter unavailable"));
         assert!(!text.contains("Owned graph master"));
+    }
+
+    #[test]
+    fn meter_route_labels_fit_the_40_column_inner_row_without_truncation() {
+        for availability in [
+            AudioAvailability::GraphActive,
+            AudioAvailability::DirectUnavailable,
+            AudioAvailability::Stopped,
+            AudioAvailability::Presentation,
+        ] {
+            assert!(performance_audio_route(availability).chars().count() <= 38);
+        }
     }
     #[test]
     fn owned_graph_route_changes_require_stopped_transport_and_recording() {

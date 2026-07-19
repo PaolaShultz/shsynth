@@ -3,148 +3,16 @@
 </p>
 
 > [!WARNING]
-> **SHR-DAW is a highly experimental release.** Expect breaking changes,
-> unfinished workflows, and audio/MIDI behavior that still requires real-world
-> testing and musical curation. Back up Projects and user data before relying on
-> it, and keep monitoring levels low while evaluating new audio features.
+> **SHR-DAW is highly experimental.** Back up Projects and user data, expect
+> breaking changes, and keep monitoring levels low while testing audio.
 
-SHR-DAW turns a Raspberry Pi, a 40×20 terminal, and the MIDI gear you already
-own into a focused music workstation. It is for bedroom musicians and
-Linux-audio makers who want a physical, mouse-free workflow without hiding the
-routing and safety rules that keep live MIDI predictable.
+SHR-DAW turns a Raspberry Pi, a 40×20 terminal, and optional MIDI gear into a
+focused music workstation. Play software or external instruments, build FT2
+Patterns and Arrangements, use effects, import private loops, save MIDI ideas,
+and record stereo audio from a compact physical interface.
 
-Use it to play software instruments, control external MIDI instruments, build
-FT2 Patterns, arrange complete Projects, save MIDI ideas, and record stereo
-audio. Start with only a Raspberry Pi and a computer keyboard. Add a MIDI
-controller, synthesizer, audio interface, or dedicated screen when you need one.
-
-Development and release QA are target-native: Codex CLI runs directly on the
-Raspberry Pi, and the source editing, Rust compilation, tests, Clippy checks,
-and optimized builds happen on that same machine. This is specifically **not a
-PC-first development path** where the application is developed or
-cross-compiled on a desktop and then copied to the Pi. The creator also
-completed a working session with two active Codex CLI instances while
-SHR-DAW's managed synth was running. That is a qualitative user-observed
-session, not a latency or capacity benchmark.
-
-All Codex CLI work in this development push was deliberately run with the
-literal `--yolo` invocation. I gave Codex the goals and durable repository
-safety rules, but did very little line-by-line terminal supervision or screen
-reading; I reviewed checkpoints and working outcomes instead. Codex still had
-to pause for physical hardware, audible listening, destructive/system changes,
-publishing, and decisions only I could make. This describes my high-autonomy
-workflow on my own Pi and checkout—it is not a general recommendation to bypass
-safeguards.
-
-## App screens
-
-SHR-DAW is split into focused 40x20 pages, so performance controls, FT2 pattern
-editing, arrangement, routing, files, loops, and recording stay separate.
-
-### Presets
-
-<img src="docs/images/shr-daw-presets.png" alt="Preset browser showing synthv1 sounds" width="100%">
-
-Browse playable software-instrument sounds. The browser is paged across three
-software instruments, each with its own independent patch list.
-
-### Playback
-
-<img src="docs/images/shr-daw-playback.png" alt="Playback screen with held notes, control indicators, and recorded MIDI status" width="100%">
-
-Play, record, review, and save MIDI ideas.
-
-### Performance Meter
-
-<img src="docs/images/shr-daw-performance-meter.png" alt="MTR performance screen with four CPU bars and stereo output meters" width="100%">
-
-MTR is a passive performance view with four per-core CPU bars and an optional
-CPU temperature, plus smoothed stereo RMS, peak hold, clip warning, and honest
-dBFS values. The stereo final-output reading is available only when SHR-DAW's
-owned audio graph is active. Direct playback has no safe passive tap, so MTR
-shows output metering as unavailable instead of changing or guessing the route.
-
-### FT2 Pattern Editor
-
-<img src="docs/images/shr-daw-ft2-pattern.png" alt="FT2 Pattern editor with four lanes of note data" width="100%">
-
-Edit notes, velocity, programs, gates, and commands. Every visible column has
-its own MIDI channel, bank, and master instrument. Step entry can advance by
-1, 2, 4, or 8 rows for fast rhythm and bass-line entry.
-
-### Pattern Pages
-
-<img src="docs/images/shr-daw-ft2-pages.png" alt="FT2 Pattern page routing screen with MIDI channels and targets" width="100%">
-
-Keep one destination per page with four independent column channel/instrument
-setups, plus lanes and mutes, inside each Pattern.
-
-### FT2 Arrangement
-
-<img src="docs/images/shr-daw-ft2-arrangement.png" alt="FT2 Arrangement screen listing ordered pattern steps" width="100%">
-
-Chain Pattern IDs into the Project timeline.
-
-### Drum Pattern Library
-
-<img src="docs/images/shr-daw-drum-patterns.png" alt="FT2 drum pattern browser filtered by genre, meter, and phrase size" width="100%">
-
-Choose a genre, 3/4 or 4/4 meter, and a 2/4/8-bar phrase before loading the
-rhythm into the current Pattern's percussion page.
-
-### Project Files
-
-<img src="docs/images/shr-daw-project-files.png" alt="Project Files screen listing saved Projects" width="100%">
-
-Name, rename, save, load, preview, and delete whole Projects; clean up only
-unreferenced Pattern records.
-
-### FT2 WAV Loop
-
-<img src="docs/images/shr-daw-ft2-loop.png" alt="FT2 WAV Loop screen with tempo and beat-region controls" width="100%">
-
-Import private loops and set tracker tempo from detected WAV beats.
-
-### Stereo Recorder
-
-<img src="docs/images/shr-daw-audio-recorder.png" alt="Stereo recorder screen with input ports and recording status" width="100%">
-
-Capture a JACK stereo input as a 24-bit WAV file.
-
-## Start simple, expand when you want
-
-SHR-DAW can sit at the center of a larger music setup, but the devices in this
-diagram are optional. Begin with a Raspberry Pi and an audio output. Add a MIDI
-controller, external instruments, an audio interface, a mixer, or a dedicated
-screen as your setup grows.
-
-![SHR-DAW connected to an optional controller, display, audio interface, MIDI instruments, mixer, speakers, and headphones](docs/images/shr-daw-physical-connections.jpg)
-
-The basic signal paths are controller → SHR-DAW, SHR-DAW → software or hardware
-instruments, and audio → speakers or the stereo recorder. See
-[Physical connections](docs/CONNECTIONS.md) for the detailed MIDI and audio
-routes.
-
-## What it does
-
-- Plays synthv1, Yoshimi, and FluidSynth instruments.
-- Routes one MIDI controller to software and hardware instruments.
-- Builds Projects with self-contained FT2 Patterns and an FT2 Arrangement.
-- Provides FT2 Play/Rec/Edit/N00B modes and scale-safe live MIDI input.
-- Filters 72 bundled drum grooves by genre, meter, and 2/4/8-bar
-  phrase size, saves drum pages separately, and transposes melodic Pattern
-  pages by semitone or octave.
-- Imports private WAV loops and synchronizes FT2 tempo to them through JACK.
-- Records free playing as reusable MIDI ideas.
-- Records a stereo JACK input as a 24-bit WAV file.
-- Provides a project-persisted, ordered eight-slot insert rack with EQ,
-  compressor, distortion, gate, multimode filter, bitcrusher/sample-rate
-  reducer, and utility processing when the owned audio graph is enabled.
-- Works from a computer keyboard or a small physical controller.
-
-SHR-DAW is designed as a portable music box. It is not tied to one controller,
-synthesizer, or audio interface. Hardware names and routes are configured by
-the user.
+Start with a Pi and computer keyboard. Add a MIDI controller, synth, audio
+interface, or dedicated screen when useful.
 
 ## Quick start
 
@@ -157,142 +25,124 @@ shr doctor
 shr
 ```
 
-The preset browser and external-MIDI tracker can open without JACK. JACK must
-be running before loading a software instrument, playing a WAV loop, or
-recording audio. The setup wizard helps choose MIDI and audio ports, but it
-does not start or restart JACK.
+The browser and external-MIDI tracker work without JACK. Software-instrument
+audio, WAV loops, effects, and stereo recording require a running JACK server;
+SHR-DAW never starts or restarts it implicitly. Continue with
+[First run](docs/FIRST_RUN.md).
 
-The SHR-owned audio graph remains opt-in and disabled by default. Its authorized
-Raspberry Pi dry-path checkpoint passed with bit-exact stereo output and no
-callback deadline misses. The bounded rack now includes the essential inserts,
-delay/modulation, three shared-topology reverb voicings, two pre/post aux buses,
-and a master insert chain. Phase 2's 128- and 64-frame Raspberry Pi stress runs
-passed without sustained-window deadline misses. The expanded 11-effect graph
-also passed at both settings; consolidated human curation remains open. Direct
-synth playback remains the fallback if graph validation, activation, or an
-exact JACK connection fails.
+## At a glance
 
-Current routing is deliberately narrower than a full multi-channel DAW mixer:
-exactly one managed software-instrument source enters the owned effects graph
-at a time. The aux buses and master chain process only that source and its wet
-returns. WAV loops, additional engines, live inputs, and hardware returns do
-not share those effects yet. See the
-[audio graph contract](docs/AUDIO_GRAPH.md), [Phase 1 measurement](docs/PHASE1_AUDIO_GRAPH_MEASUREMENT.md),
-the [Phase 2 measurement](docs/PHASE2_AUDIO_GRAPH_MEASUREMENT.md), and the
-[Phase 3/4 measurement](docs/PHASE3_4_AUDIO_GRAPH_MEASUREMENT.md).
+- Browse synthv1, Yoshimi, and FluidSynth sounds without layering managed
+  engines.
+- Route one controller to software or external MIDI instruments.
+- Sequence self-contained FT2 Patterns through an Arrangement.
+- Load and edit 72 bundled drum grooves.
+- Save free-timed MIDI Ideas and private tracker Projects.
+- Import private WAV loops and record a configured stereo JACK input.
+- Process the managed software instrument through source inserts, two aux
+  returns, master effects, and a passive final-output meter.
+- Use a computer keyboard, mouse, or small configured controller.
 
-Read [Installation](docs/INSTALLATION.md) for supported systems and installer
-options. Then follow [First run](docs/FIRST_RUN.md) to configure and test your
-setup.
+Hardware names and routes remain configuration data. The current owned effects
+graph is opt-in, disabled by default, and intentionally limited to one managed
+software-instrument source. See [How it works](docs/HOW_IT_WORKS.md) and the
+[audio graph contract](docs/AUDIO_GRAPH.md) for the exact boundaries.
 
-### Fast non-audible evaluation
+## Screens
 
-Judges and contributors without the exact hardware can exercise the real parser,
-storage, routing, and 40×20 rendering code without starting JACK:
+### Presets
 
-```sh
-cargo test --locked
-SHSYNTH_STATE_DIR=/tmp/shr-daw-judge-state cargo run --locked -- config init
-SHSYNTH_STATE_DIR=/tmp/shr-daw-judge-state cargo run --locked -- list
-SHSYNTH_STATE_DIR=/tmp/shr-daw-judge-state cargo run --locked -- screenshots > /tmp/shr-daw-screens.json
-```
+<img src="docs/images/shr-daw-presets.png" alt="Preset browser showing synthv1 sounds" width="100%">
 
-Run `cargo run --locked -- menu` in a terminal at least 40×20 cells to inspect
-the browser and tracker interactively. Missing MIDI or JACK hardware is reported
-in the status line; it does not prevent opening the interface. The two `/tmp`
-paths above are the only generated evaluation data and can be deleted afterward.
+Browse the three independent software-instrument catalogs.
 
-### Bundled sample and presentation data
+### Playback
 
-The public checkout includes 21 original synthv1 preset XML files and 72
-editable drum-pattern seeds. `shr list` exercises the real preset discovery
-path; the **Drum Patterns** screen loads and expands the real rhythm files into
-2-, 4-, or 8-bar Pattern data. `shr screenshots` uses explicitly seeded
-in-memory presentation states to exercise the real 40×20 renderer; it does not
-simulate audio or connected hardware. The MTR frame labels its deterministic
-meter values as presentation data rather than measured CPU or JACK results.
+<img src="docs/images/shr-daw-playback.png" alt="Playback screen with held notes, control indicators, and recorded MIDI status" width="100%">
 
-No WAV, private Idea, recording, or finished demo Project is bundled. The final
-Build Week Project remains a human listening/performance task until its sounds,
-routes, and original music are approved. Private and uncleared material stays
-below ignored `user/` or the normal XDG data directories and is never required
-for the judge path.
+Play sounds, shape mapped synthv1 controls, and record MIDI Ideas.
+
+### Performance Meter
+
+<img src="docs/images/shr-daw-performance-meter.png" alt="MTR performance screen with four CPU bars and stereo output meters" width="100%">
+
+Inspect CPU load and the owned graph's final stereo output without changing the
+audio route. [Meter details](docs/USING_SHR_DAW.md#performance-meters).
+
+### FT2 Pattern Editor
+
+<img src="docs/images/shr-daw-ft2-pattern.png" alt="FT2 Pattern editor with four lanes of note data" width="100%">
+
+Edit notes, velocity, programs, gates, commands, and multiple routed pages.
+
+### Pattern Pages
+
+<img src="docs/images/shr-daw-ft2-pages.png" alt="FT2 Pattern page routing screen with MIDI channels and targets" width="100%">
+
+Choose one destination per page and an instrument setup for each column.
+
+### FT2 Arrangement
+
+<img src="docs/images/shr-daw-ft2-arrangement.png" alt="FT2 Arrangement screen listing ordered pattern steps" width="100%">
+
+Chain Pattern IDs into the Project timeline.
+
+### Drum Pattern Library
+
+<img src="docs/images/shr-daw-drum-patterns.png" alt="FT2 drum pattern browser filtered by genre, meter, and phrase size" width="100%">
+
+Filter, load, edit, and save reusable four-lane rhythms.
+
+### Project Files
+
+<img src="docs/images/shr-daw-project-files.png" alt="Project Files screen listing saved Projects" width="100%">
+
+Name, save, preview, and safely clean up Projects and Patterns.
+
+### FT2 WAV Loop
+
+<img src="docs/images/shr-daw-ft2-loop.png" alt="FT2 WAV Loop screen with tempo and beat-region controls" width="100%">
+
+Import private loops and align the tracker tempo and beat region.
+
+### Stereo Recorder
+
+<img src="docs/images/shr-daw-audio-recorder.png" alt="Stereo recorder screen with input ports and recording status" width="100%">
+
+Capture a configured JACK stereo input as a 24-bit WAV file.
+
+## Optional hardware
+
+![SHR-DAW connected to an optional controller, display, audio interface, MIDI instruments, mixer, speakers, and headphones](docs/images/shr-daw-physical-connections.jpg)
+
+Every device beyond the Raspberry Pi and audio output is optional. See
+[Physical connections](docs/CONNECTIONS.md) for safe MIDI and audio paths.
 
 ## Documentation
 
-### Use SHR-DAW
+- [First run](docs/FIRST_RUN.md) — configure and start.
+- [Using SHR-DAW](docs/USING_SHR_DAW.md) — normal musical workflow.
+- [Tracker guide](docs/TRACKER.md) — Patterns, pages, Arrangement, drums, and
+  loops.
+- [Installation](docs/INSTALLATION.md) — dependencies, local evaluation,
+  upgrades, and removal.
+- [Development story](docs/BUILD_WEEK.md) — how SHR-DAW was built on the Pi
+  with Codex, what each side contributed, and the Build Week record.
+- [Complete documentation index](docs/README.md) — configuration, controller,
+  architecture, measurements, audits, and future plans.
 
-- [First run](docs/FIRST_RUN.md) — configure, check, and open SHR-DAW.
-- [Using SHR-DAW](docs/USING_SHR_DAW.md) — instruments, screens, ideas, and
-  audio recording.
-- [In-app help](docs/HELP.md) — compact help text shown by `?`, F1, or the
-  controller Help action. While Help is open, SHR-DAW also tries to serve the
-  same page temporarily at `http://<LAN-IP>/help`.
-- [Tracker guide](docs/TRACKER.md) — FT2 Patterns, pages, arrangement, step
-  editing, live recording, and Project files.
-- [Controller interface](docs/CONTROLLER_INTERFACE.md) — physical controls and
-  the complete menu map.
-- [Physical connections](docs/CONNECTIONS.md) — simple and expanded hardware
-  setups, MIDI paths, and audio paths.
-- [Future improvements](docs/FUTURE_IMPROVEMENTS.md) — intentionally deferred
-  rhythm, routing, insert/send effects, and their safety requirements.
-- [Post-competition rhythm plan](docs/POST_COMPETITION_RHYTHM_PLAN.md) — staged
-  arbitrary Pattern length, microtiming, swing, groove, and optional meter work.
+## Development
 
-### Install and customize it
-
-- [Installation](docs/INSTALLATION.md) — dependencies, installed commands, and
-  optional Raspberry Pi audio tuning.
-- [Configuration and routing](docs/CONFIGURATION.md) — configuration files,
-  page targets, channels, and offline devices.
-- [MIDI device profiles](docs/MIDI_DEVICE_PROFILES.md) — named sounds and bank
-  data for external instruments.
-- [Controller profiles and MIDI learn](docs/CONTROLLER_PROFILES.md) — automatic
-  matching and non-audible setup for USB input controllers.
-- [Codex-assisted setup](docs/CODEX_ASSISTED_SETUP.md) — optional help for
-  unusual hardware or recovery.
-
-### Understand or develop it
-
-- [How it works](docs/HOW_IT_WORKS.md) — synth ownership, MIDI safety, pickup,
-  recording, and data locations.
-- [Audio graph and DSP contract](docs/AUDIO_GRAPH.md) — owned-routing schema,
-  real-time rules, fixed limits, fallback, measurement, and curation gates.
-- [Add patches and sounds](docs/NEW_PATCHES.md) — create and validate synthv1
-  presets.
-- [Third-party software and sounds](THIRD_PARTY.md) — credits, licences, and
-  redistribution rules.
-- [Workspace handoff](docs/WORKSPACE_HANDOFF.md) — current development and
-  local-machine context.
-- [Build Week record](docs/BUILD_WEEK.md) — Codex's development role, current
-  metrics, eligibility timeline, and the human/AI decision boundary.
-
-## About the creator
-
-The first public commit was not the beginning of the code. It was the moment I
-released the first version and dedicated it to my uncle, who died while I was
-releasing it. I developed the code leading to that release with GPT-5.6 Sol
-through Codex CLI on the Raspberry Pi; the privacy-preserving evidence summary
-is in the [Build Week record](docs/BUILD_WEEK.md#model-provenance-for-the-first-release).
-
-`PaolaShultz`, the repository owner, is my gaming name and a nickname I
-sometimes use online. I chose it after the empty tombstone used in the
-buried-alive sequence in *Kill Bill: Volume 2*—the marker where nobody was
-actually buried before that scene. It is not a company or a separate
-contributor: I am the same person making the product and musical decisions
-described here.
-
-SHR-DAW is personal in the same way. It is a weekend/free-time project built
-around the Raspberry Pi and music hardware I actually own, sometimes alongside
-my main work on the `bee247.hr` portal. Codex helped me turn those goals into a
-working instrument, but the reasons for building it, the physical setup, and
-the final musical taste are mine.
+SHR-DAW is a personal weekend project developed and validated directly on its
+Raspberry Pi. The detailed target-native, high-autonomy Codex workflow and its
+human/AI decision boundary belong in the [development story](docs/BUILD_WEEK.md),
+not in this product overview.
 
 ## License
 
 SHR-DAW code, the 21 included presets, and bundled original rhythm data are MIT
-licensed. See
-[THIRD_PARTY.md](THIRD_PARTY.md) before packaging the project or adding sounds.
+licensed. Read [THIRD_PARTY.md](THIRD_PARTY.md) before packaging the project or
+adding sounds.
 
 ---
 

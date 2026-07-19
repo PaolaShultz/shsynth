@@ -32,12 +32,11 @@ controls.
   column's channel, bank, master program, and profile-provided instrument name.
 - **Files** manages Projects; its **Pattern** child groups pattern editing,
   melody-only transpose, and the separate reusable drum-pattern library. Drum
-  filters choose genre, meter, and 2/4/8-bar phrase size.
+  filters choose genre, meter, and 2/4/8-bar phrase size. It also names and
+  renames Projects and cleans only zero-reference Pattern records.
 - **Arrange** edits the ordered pattern steps separately from pattern data.
 - **Loop** imports, trims, aligns, and plays a private WAV with the tracker;
   **Library** separately deletes only unreferenced regular WAV files.
-- **Files** names/renames Projects and confirms cleanup of zero-reference
-  Pattern records without changing the Arrangement.
 - **Audio Recorder** records the configured stereo JACK input.
 
 The display shows the current screen, menu page, and four available actions.

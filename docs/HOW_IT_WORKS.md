@@ -70,14 +70,14 @@ An interrupted recording stays as `.wav.part`. SHR-DAW attempts recovery when
 the next recording starts. Live input is not sent from JACK capture back to
 JACK playback; use hardware direct monitoring when available.
 
-The shared real-time foundations, validated model, and disabled-by-default
-owned stereo dry-graph client are documented in
-[Audio graph and DSP contract](AUDIO_GRAPH.md). When explicitly enabled, one
-managed engine is moved transactionally from direct playback through the dry
-graph. Any validation, activation, or connection failure keeps the direct
-route. The authorized dry-path Raspberry Pi comparison is still pending, so
-this is not a performance or listening claim and creative effects remain
-gated.
+The opt-in owned stereo graph is documented in [Audio graph and DSP
+contract](AUDIO_GRAPH.md). When enabled, one managed engine moves
+transactionally from direct playback through its source inserts, two aux
+returns, master inserts, and final meter. Validation, activation, publication,
+or connection failure keeps or restores the conservative direct route. WAV
+loops, hardware returns, recorder inputs, and unrelated JACK clients are not
+part of that graph. The measured engineering checkpoints and still-separate
+musical curation decisions live in the linked phase documents.
 
 ## Data and configuration
 

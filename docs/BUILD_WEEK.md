@@ -1,12 +1,13 @@
-# OpenAI Build Week record
+# Development story and OpenAI Build Week record
 
 SHR-DAW is being prepared for the OpenAI Build Week Challenge. The official
 [Build Week page](https://openai.com/build-week/),
 [Devpost overview](https://openai.devpost.com/), and
 [rules](https://openai.devpost.com/rules) were checked on 2026-07-18. The
-submission deadline is July 21, 2026 at 5:00 PM Pacific Time. This page
-preserves the truthful development timeline and a reproducible project
-snapshot; it is not an implementation specification.
+submission deadline is July 21, 2026 at 5:00 PM Pacific Time. This is the
+project's development story: it preserves the truthful timeline, working
+method, human/AI boundary, and a reproducible snapshot without turning the main
+README into a development journal. It is not an implementation specification.
 
 SHR-DAW is a weekend/free-time side project, sometimes developed in parallel
 with the creator's primary `bee247.hr` portal work. Its first public commit was
@@ -110,7 +111,7 @@ hardware or heard audio. Those actions require the user.
 Snapshot date: 2026-07-18, including the audit fixes and submission
 documentation prepared for this release.
 
-| Measure | Current value | Consistent counting rule |
+| Measure | Snapshot value | Consistent counting rule |
 | --- | ---: | --- |
 | Rust physical LOC | 24,165 | `find src -name '*.rs' -print0 \| xargs -0 wc -l` |
 | Rust source modules | 22 | `.rs` files below `src/` |
@@ -153,6 +154,11 @@ The dated feature diffs, rather than raw change volume, are the evidence:
 - **2026-07-18:** expanded rhythm editing, reusable drum-pattern workflow, and
   72 authored grooves, followed by safety/content auditing, Raspberry Pi
   validation, and submission preparation.
+- **2026-07-18/19:** an opt-in owned audio graph progressed from a measured dry
+  path through bounded source inserts, time/modulation effects, reverb, two aux
+  returns, master processing, and a passive CPU/final-output meter. Exact
+  topology, measurements, and the still-open musical curation sheet remain in
+  the audio-graph and phase documents rather than this narrative.
 
 The detailed audit ledger, submission copy, video script, fallback, checklist,
 and working journal remain below the ignored private `user/build-week/` tree.
@@ -174,24 +180,13 @@ public end-to-end video below three minutes. These human listening, performance,
 and publishing tasks are submission blockers; they are not marked complete in
 advance.
 
-## Candidate roadmap
+## Continuing development
 
-Everything in this section is an idea until explicitly selected.
-
-- Sampling: independent WAV lanes, live manipulation, loop controls, pitch,
-  start/end trim, filters, and sends.
-- Audio graph: per-source inserts, JACK-summed master/aux prototypes,
-  per-source send levels, first-class live inputs, optional external hardware
-  loops, free but validated routing, explicit chain order, and Pi-measured
-  real-time limits. The design study and acceptance gates are in
-  [`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md).
-- DSP: EQ, delay, reverb, chorus, distortion, compression, and compact
-  performance effects.
-- Native Rust synth: original or experimental oscillators, filters, and
-  modulation that develop a recognizable SHR sound without copying a
-  commercial instrument.
-
-Sampling, a complete mixer, and a native synth are high-effort directions. A
-metric-gated source-insert or delay-send prototype could be smaller, but it
-must prove the JACK graph and callback budget on the Pi and must not displace
-stability, musical curation, documentation, or the demo song unless selected.
+The README intentionally stops at the current product boundary. Deferred ideas
+and their safety requirements live in
+[`FUTURE_IMPROVEMENTS.md`](FUTURE_IMPROVEMENTS.md). The selected
+post-competition work is split into executable [mixer/aux](POST_COMPETITION_MIXER_AUX_PLAN.md)
+and [rhythm](POST_COMPETITION_RHYTHM_PLAN.md) plans. This record should grow
+only when there is a meaningful development event to preserve; feature manuals,
+benchmark tables, and speculative implementation detail belong in their
+dedicated documents.
