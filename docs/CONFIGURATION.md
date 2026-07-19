@@ -24,8 +24,9 @@ restarts JACK. Reboot after installing or removing the isolation settings.
 
 ## Owned audio graph
 
-The opt-in SHR-owned JACK client processes one managed software instrument and
-its Project-persisted Phase 2 insert rack. It remains disabled by default after
+The opt-in SHR-owned JACK client processes one managed software instrument,
+its Project-persisted source inserts, two optional aux returns, and master
+inserts. It remains disabled by default after
 the authorized Phase 1 low-gain Raspberry Pi comparison:
 
 ```text
@@ -55,27 +56,32 @@ unrelated JACK clients and connections are not changed.
 
 An orderly `shr stop` writes the owned graph's
 callback count, mean, p95, p99, maximum, missed-deadline count, and oversized
-callback count to the private `engine.log`. The Phase 2 rack/editor is available
+callback count to the private `engine.log`. The FX rack/editor is available
 only when the graph is enabled; stopped transport and no active recording are
 required for rack publication. Projects still save their rack while the graph
 is disabled, but direct playback does not process it.
 
 Do not enable this merely to perform a routine setup check. The first
 authorized dry-path comparison is recorded in
-[Phase 1 dry audio graph measurement](PHASE1_AUDIO_GRAPH_MEASUREMENT.md). The
-Phase 2 software and Pi performance gates, plus the pending human listening
-checkpoint, are recorded in
-[Phase 2 insert-effects measurement](PHASE2_AUDIO_GRAPH_MEASUREMENT.md).
+[Phase 1 dry audio graph measurement](PHASE1_AUDIO_GRAPH_MEASUREMENT.md).
+Phase 2's software and Pi performance gates are recorded in
+[Phase 2 insert-effects measurement](PHASE2_AUDIO_GRAPH_MEASUREMENT.md). The
+time/modulation, reverb, aux, and master evidence is recorded in
+[Phase 3/4 effects measurement](PHASE3_4_AUDIO_GRAPH_MEASUREMENT.md).
 
 The maintainer-only low-gain performance command is:
 
 ```sh
-shr phase2-checkpoint ENGINE:PRESET [PROFILE] [SECONDS]
+shr effects-checkpoint ENGINE:PRESET [PROFILE] [SECONDS]
 ```
 
-Profiles are `dry`, `eq`, `compressor`, `soft-cubic`, `hard-clip`,
+Phase 2 profiles are `dry`, `eq`, `compressor`, `soft-cubic`, `hard-clip`,
 `asymmetric`, `gate`, `filter-lp`, `filter-bp`, `filter-hp`, `crusher`, and
-`full`. Duration is bounded to 1–60 seconds. The command enables the graph only
+`full`. Expanded profiles are `delay`, `chorus`, `flanger`, `phaser`,
+`tremolo`, `autopan`, `time-full`, `reverb-room`, `reverb-plate`,
+`reverb-hall`, `two-reverbs`, and `phase4-full`. The last profile deliberately
+uses eight source inserts, two reverb buses, and one master compressor.
+Duration is bounded to 1–60 seconds. The command enables the graph only
 in its cloned in-memory configuration, sends note 48 at velocity 8, measures
 the owned graph and synth processes, restores the exact direct route, and stops
 only the engine it owns. It does not persist graph enablement or JACK settings.

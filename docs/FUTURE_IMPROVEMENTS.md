@@ -64,12 +64,14 @@ ordinary drum loops should feel like a pleasant afternoon.
 
 ## Audio effects graph: inserts, sends, and returns
 
-Phase 2 now includes the managed-source ordered insert rack, its essential
-processors, strict Project persistence, stopped structural publication, compact
-editors, and meters. Its software evidence and still-pending Pi/listening gate
-are in [Phase 2 insert-effects measurement](PHASE2_AUDIO_GRAPH_MEASUREMENT.md).
-Master inserts, auxes, hardware loops, and Phase 3 time/modulation processors
-below remain deferred until their phase gates pass.
+The managed graph now includes the essential source inserts, delay/modulation,
+three reverb voicings, two independently scaled pre/post aux sends and returns,
+and an ordered master rack. It retains strict Project persistence, stopped
+structural publication, compact editors, and meters. Evidence is in the
+[Phase 2 insert-effects measurement](PHASE2_AUDIO_GRAPH_MEASUREMENT.md) and
+[Phase 3/4 effects measurement](PHASE3_4_AUDIO_GRAPH_MEASUREMENT.md). Hardware
+loops and full-duplex live-input monitoring remain deferred because they cross
+the physical-interface safety boundary.
 
 ### Product idea
 
@@ -95,27 +97,18 @@ hiding both behaviors behind a generic “effect” switch.
 
 ### Current architecture boundary
 
-SHR-DAW does not yet own a common audio mixer. The managed software engine
-connects its stereo JACK output directly to configured playback destinations.
-The WAV loop client independently connects its stereo output to destinations,
-and the recorder captures one configured stereo input pair.
+For a managed software engine, SHR-DAW now owns a bounded internal stereo sum:
+the source's dry path and two optional wet returns meet once, then pass through
+the master rack to configured playback. The WAV loop client remains on its
+independent direct route, and the recorder still captures one configured stereo
+input pair.
 
-The official JACK API documents that when an input port has multiple inbound
-connections, JACK mixes those buffers. This makes a useful first graph smaller
-than a general mixer:
-
-- a single-source insert can route that source through an owned effect client;
-- a master insert can connect multiple SHR outputs to one stereo effect input,
-  which JACK sums, then connect only the effect output to playback;
-- a basic global aux can preserve each dry playback connection, also connect
-  sources to a 100%-wet effect input, and connect its return to playback, where
-  JACK mixes dry sources and the wet return; but
-- independent per-source send levels still require scaled send outputs,
-  per-source effect input pairs, or owned gain/tap clients before summing.
-
-A fuller owned mixer is still needed for independent source gain/pan, metering,
-mute/solo, stable record points, and more complex buses. Configuration alone
-cannot own graph transitions, control headroom, or prevent feedback.
+The graph uses internal preallocated mixer, send-tap, and return nodes rather
+than relying on implicit JACK summing. That makes independent send/return gain,
+pre/post placement, return metering, and exactly-once mixing explicit and
+testable. A fuller owned mixer is still needed before loops and live inputs can
+share independent gain/pan, mute/solo, and stable record points with the managed
+engine.
 
 Primary source: [JACK 2 `jack_port_get_buffer` API
 contract](https://github.com/jackaudio/jack2/blob/develop/common/jack/jack.h),

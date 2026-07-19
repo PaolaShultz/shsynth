@@ -26,7 +26,7 @@ implemented.
 | Page/track manager | Select previous/next page; add four-lane page; edit target; edit channel; confirm all changes; cancel and restore the original song; open files; mute current page. |
 | Target/channel field mode | Previous/next choice, confirm field, cancel field. Encoder turn/press and menu items share these operations. |
 | Audio recorder | Start/toggle recording, stop/finalize, inspect status, back, open presets/ideas/FT2, and panic. |
-| FX rack/editor | Add one of seven Phase 2 insert kinds, select/remove/bypass/reorder stable instances, choose named parameters and adjust strict physical-unit values, inspect peak/RMS/clip/non-finite/gain-reduction meters, return one level, and panic. Structural publication requires stopped transport and no recording. |
+| FX rack/editor | Choose source, AUX 1, AUX 2, or master; add/select/remove/bypass/reorder bounded effects; edit strict named physical-unit parameters; set independent send level, pre/post point, and return level; inspect peak/RMS/clip/non-finite/gain-reduction meters; and panic. Aux time effects are forced wet. Structural publication requires stopped transport and no recording. |
 | Help | Compact Markdown user help, temporary LAN web help when port 80 is available, section links selected by the master encoder, page scrolling, top, and return to the previous screen. |
 | Global/safety | Stop MIDI playback, tracker transport, recorder, managed engine, and owned notes; All Notes Off; cancel or leave the current controller level. Application exit remains computer-keyboard-only. Help is also reachable from `?` or F1. Process termination remains limited to the engine owned by SHR-DAW. |
 

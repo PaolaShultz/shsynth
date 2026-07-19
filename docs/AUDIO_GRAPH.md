@@ -3,7 +3,7 @@
 This document is the implementation contract for SHR-DAW's owned audio graph
 and lightweight effects rack. It records the stable model and real-time limits
 before the graph becomes responsible for playback. The owned client now compiles
-the Phase 2 managed-source insert rack but remains disabled by default. Its first
+the managed-source, aux-return, and master racks but remains disabled by default. Its first
 authorized Raspberry Pi dry-path checkpoint passed; direct JACK routing remains
 the default and conservative fallback. See
 [Phase 1 dry audio graph measurement](PHASE1_AUDIO_GRAPH_MEASUREMENT.md).
@@ -71,8 +71,10 @@ arrays. Interactive controls clamp to their visible range. Persisted
 parameters must already be finite and valid or the whole proposed graph is
 rejected.
 
-Project format 2 stores a managed-source `InsertRack` as strict JSON inside the
-versioned `.shsong` line format. Formats 0 and 1 migrate to an empty rack.
+Project format 3 stores a managed-source `InsertRack` and `ProjectAuxRouting`
+as strict JSON inside the versioned `.shsong` line format. Formats 0 and 1
+migrate to an empty rack and routing; format 2 keeps its source rack and adds
+empty aux/master routing.
 Unknown current fields, malformed rack data, and newer Project/effect versions
 are refused on load and on overwrite. Rack order is a separate list of stable
 effect IDs, so moving an effect does not recreate its identity.
@@ -146,7 +148,7 @@ steps are calculated before callback use. Every processor guards non-finite
 input, output, and state; a poisoned processor resets and yields a bounded dry
 or silent fallback instead of propagating NaN/infinity.
 
-Phase 2 structural publication is intentionally stopped-only. The publish flag
+Structural publication is intentionally stopped-only. The publish flag
 is cleared and JACK deactivation joins the callback before the control thread
 rebuilds the plan. Compatible kind plus stable instance ID moves the existing
 runtime slot into the replacement plan, retaining recursive DSP, smoothing,
@@ -176,19 +178,25 @@ Deterministic tests cover silence/step/impulse behavior, supported sample-rate
 limits, reset and non-finite recovery, stereo independence, long-running
 finite state, chunk-size invariance, and callback-path allocation detection.
 
-Phase 2 adds one canonical named parameter schema per effect kind in
+The effect rack adds one canonical named parameter schema per effect kind in
 `src/effect_schema.rs`. Persisted values may omit older/defaulted controls, but
 unknown names, non-finite values, invalid discrete choices, and values outside
 the declared physical range reject the complete graph. `src/effects/` provides
 fixed runtime slots with stable instance identity, finite dry fallback,
 click-conscious bypass, reset, and separate input/output peak/RMS, clip, and
-non-finite meters. The Phase 2 EQ, compressor, distortion, crusher/reducer,
-gate, and multimode filter have passed their deterministic software response
-gates and are available in the managed insert rack. The compact rack/editor
+non-finite meters. The EQ, compressor, distortion, crusher/reducer, gate,
+multimode filter, delay, chorus, flanger, phaser, tremolo/autopan, and
+shared-topology reverb have passed their deterministic software response gates.
+They are available in source and master racks; delay/reverb/modulation effects
+on an aux are validated as 100% wet. Two independently scaled pre/post sends
+feed two metered returns, which are mixed exactly once before the ordered master
+chain. The compact rack/editor
 uses four controller pages, with `OPS` first and `EXIT` at page 4/item 4, and
 shows input and output peak/RMS, clipping, non-finite counts, and compressor
-gain reduction. Their Raspberry Pi whole-chain and human-curation gate remains
-documented in [Phase 2 audio graph measurement](PHASE2_AUDIO_GRAPH_MEASUREMENT.md).
+gain reduction. Raspberry Pi whole-chain evidence is documented in the
+[Phase 2 measurement](PHASE2_AUDIO_GRAPH_MEASUREMENT.md) and
+[Phase 3/4 measurement](PHASE3_4_AUDIO_GRAPH_MEASUREMENT.md); the consolidated
+human-curation gate remains open in the latter.
 
 The dry client additionally publishes allocation-free callback count, total,
 mean, maximum, missed-deadline, and oversized-callback counters. One fixed

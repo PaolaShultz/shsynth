@@ -148,13 +148,16 @@ does not start or restart JACK.
 
 The SHR-owned audio graph remains opt-in and disabled by default. Its authorized
 Raspberry Pi dry-path checkpoint passed with bit-exact stereo output and no
-callback deadline misses. Phase 2's bounded insert processors and compact FX
-editors are implemented, and both 128- and 64-frame Raspberry Pi stress runs
-passed without sustained-window deadline misses. Human musical curation remains
-open. Direct synth playback remains the fallback if
+callback deadline misses. The bounded rack now includes the essential inserts,
+delay/modulation, three shared-topology reverb voicings, two pre/post aux buses,
+and a master insert chain. Phase 2's 128- and 64-frame Raspberry Pi stress runs
+passed without sustained-window deadline misses. The expanded 11-effect graph
+also passed at both settings; consolidated human curation remains open. Direct
+synth playback remains the fallback if
 graph validation, activation, or an exact JACK connection fails; see the
 [audio graph contract](docs/AUDIO_GRAPH.md), [Phase 1 measurement](docs/PHASE1_AUDIO_GRAPH_MEASUREMENT.md),
-and [Phase 2 measurement](docs/PHASE2_AUDIO_GRAPH_MEASUREMENT.md).
+the [Phase 2 measurement](docs/PHASE2_AUDIO_GRAPH_MEASUREMENT.md), and the
+[Phase 3/4 measurement](docs/PHASE3_4_AUDIO_GRAPH_MEASUREMENT.md).
 
 Read [Installation](docs/INSTALLATION.md) for supported systems and installer
 options. Then follow [First run](docs/FIRST_RUN.md) to configure and test your

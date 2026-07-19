@@ -126,5 +126,7 @@ creator's musical decision.
 | High-pass filter | ☐ | ☐ | ☐ | |
 | Bitcrusher/sample-rate reducer | ☐ | ☐ | ☐ | |
 
-Phase 3 delay/modulation work remains blocked until the curation sheet is
-complete.
+The user later authorized completing the bounded internal Phase 3/4 graph before
+one consolidated listen-and-repair pass. The unchecked rows therefore remain
+open and are repeated beside the newer effects in the consolidated curation
+sheet.

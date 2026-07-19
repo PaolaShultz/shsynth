@@ -105,8 +105,26 @@ and zero missed/oversized callbacks. There were no xruns in either sustained
 window; synth-client xruns began at deliberate teardown and are recorded as a
 future cleanup issue. The service was restored to 128 frames, the ignored local
 graph flag remains `false`, the engine was stopped, and no stale JACK resources
-remained. See `docs/PHASE2_AUDIO_GRAPH_MEASUREMENT.md`. Phase 3 must not begin
-until the user completes the KEEP/IMPROVE/DROP curation sheet.
+remained. See `docs/PHASE2_AUDIO_GRAPH_MEASUREMENT.md`.
+
+The user then explicitly changed the phase order to build as much of the safe
+internal effects graph as possible before one consolidated listen-and-repair
+pass. Phase 3/4 now add bounded stereo delay, chorus, flanger, phaser,
+tremolo/autopan, three shared-topology FDN reverb voicings, two forced-wet
+pre/post aux buses, and a master insert rack. Project format 3 migrates the
+routing without overwriting newer data. Hardware loops and full-duplex live
+input are still deferred because they require physical-interface monitoring
+decisions. See `docs/PHASE3_4_AUDIO_GRAPH_MEASUREMENT.md`.
+
+The Phase 3/4 Pi checkpoint on 2026-07-19 measured the combined eight source
+inserts, two aux reverbs, and master compressor for 60 seconds. At 128 frames it
+reported 313.572 us mean, 360 us p99, 540.108 us maximum, and zero
+missed/oversized callbacks. At 64 frames it reported 158.527 us mean, 198 us
+p99, 349.905 us maximum, and zero missed/oversized callbacks. No sustained-run
+xrun occurred; the known synth teardown-only xruns remain. `/etc/jackdrc` was
+restored byte-for-byte to 48 kHz/128 frames/3 periods, JACK is active, SHR is
+stopped, graph enablement remains absent/default-false, and no owned ports
+remain. The consolidated KEEP/IMPROVE/DROP listening sheet is still open.
 
 At installation time the AudioBox USB 96 was disconnected. Consequently the
 pre-existing `jack.service` remained failed because ALSA could not resolve
@@ -266,6 +284,10 @@ Rust tests, warning-denied Clippy, and the optimized locked release build passed
 again with Rust 1.85. At the Phase 2 final checkpoint, all 333 Rust tests,
 formatting, warning-denied Clippy, and the optimized locked release build passed
 with Rust 1.85.
+
+After Phase 3/4 implementation, all 356 Rust tests, formatting,
+warning-denied Clippy, and the optimized locked release build passed with Rust
+1.85 before the documentation-only measurement update.
 
 For docs, README, screenshot, or image-only changes, keep validation scoped to
 the files changed instead of running the Rust suite mechanically. Examples:
