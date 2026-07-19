@@ -44,7 +44,9 @@ Empty actions are hidden. The main encoder moves through lists, rows, pages,
 and values. Its press selects or confirms.
 
 Physical menu layouts with four, five, or eight buttons are supported. Read
-the [Controller interface](CONTROLLER_INTERFACE.md) for every action and menu.
+the [screen and menu manual](MENU_MANUAL.md) for the complete visual tour and
+the [Controller interface](CONTROLLER_INTERFACE.md) for the implementation
+contract behind every action and menu.
 Press `?` or F1 from the keyboard to open the same in-app help. The Help screen
 tries to start `http://<LAN-IP>/help` on port 80 only while Help is open; if the
 port or network is unavailable, the local Help screen keeps working.

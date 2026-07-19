@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import gzip
 import json
 import os
@@ -135,7 +136,9 @@ def render(
                 pixels[cell_x + out_x, cell_y + gy] = (
                     fg if bits & (0x80 >> source_x) else bg
                 )
-    integer_scale(image, OUTPUT_SCALE).save(OUT / name, optimize=True)
+    destination = OUT / name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    integer_scale(image, OUTPUT_SCALE).save(destination, optimize=True)
 
 
 def integer_scale(image: Image.Image, scale: int) -> Image.Image:
@@ -152,13 +155,61 @@ def integer_scale(image: Image.Image, scale: int) -> Image.Image:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--only",
+        metavar="NAME",
+        help="render one exact output name from the screenshot manifest",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="verify that every manifest image is present and exactly 2x scaled",
+    )
+    args = parser.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
     glyphs, unicode_map = load_psf1()
     data = screenshot_data()
     cols = int(data["cols"])
     rows = int(data["rows"])
+    if args.check:
+        check_rendered(data, cols, rows)
+        return
     for screen in data["screens"]:
+        if args.only is not None and screen["name"] != args.only:
+            continue
         render(screen["name"], cols, rows, screen["cells"], glyphs, unicode_map)
+
+
+def check_rendered(data: dict, cols: int, rows: int) -> None:
+    expected_size = (cols * CELL_W * OUTPUT_SCALE, rows * CELL_H * OUTPUT_SCALE)
+    expected = {screen["name"] for screen in data["screens"]}
+    rendered = {
+        str(path.relative_to(OUT))
+        for path in OUT.rglob("*.png")
+        if path.name.startswith("shr-daw-") or path.parent == OUT / "menu"
+    }
+    missing = sorted(expected - rendered)
+    if missing:
+        raise ValueError(f"missing screenshot outputs: {', '.join(missing)}")
+    for name in sorted(expected):
+        with Image.open(OUT / name) as image:
+            image = image.convert("RGB")
+            if image.size != expected_size:
+                raise ValueError(
+                    f"{name}: expected {expected_size[0]}x{expected_size[1]}, "
+                    f"got {image.width}x{image.height}"
+                )
+            pixels = image.load()
+            for y in range(0, image.height, OUTPUT_SCALE):
+                for x in range(0, image.width, OUTPUT_SCALE):
+                    value = pixels[x, y]
+                    if any(
+                        pixels[x + dx, y + dy] != value
+                        for dy in range(OUTPUT_SCALE)
+                        for dx in range(OUTPUT_SCALE)
+                    ):
+                        raise ValueError(f"{name}: non-integer scaling at {x},{y}")
 
 
 if __name__ == "__main__":

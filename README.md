@@ -50,6 +50,10 @@ software-instrument source. See [How it works](docs/HOW_IT_WORKS.md) and the
 
 ## Screens
 
+This overview shows the main workspaces. The
+[complete visual menu manual](docs/MENU_MANUAL.md) contains all 16 screens,
+every contextual editor, and all 80 populated controller-menu pages.
+
 ### Presets
 
 <img src="docs/images/shr-daw-presets.png" alt="Preset browser showing synthv1 sounds" width="100%">
@@ -122,6 +126,8 @@ Every device beyond the Raspberry Pi and audio output is optional. See
 
 - [First run](docs/FIRST_RUN.md) — configure and start.
 - [Using SHR-DAW](docs/USING_SHR_DAW.md) — normal musical workflow.
+- [Complete screen and menu manual](docs/MENU_MANUAL.md) — every screen,
+  editor context, and controller-menu page with populated screenshots.
 - [Tracker guide](docs/TRACKER.md) — Patterns, pages, Arrangement, drums, and
   loops.
 - [Installation](docs/INSTALLATION.md) — dependencies, local evaluation,

@@ -84,8 +84,8 @@ Blank physical positions and wholly empty pages are omitted.
 | Playback | Sys | Panic | Stop take | Help | Exit |
 | FX rack | Ops | Edit | Add | Bypass | Remove |
 | FX rack | Order | Up | Down | Kind− | Kind+ |
-| FX rack | Nav | Presets | Play/back | FT2 | Audio |
-| FX rack | Sys | Panic | — | Help | Exit |
+| FX rack | Route | Target | Send− | Send+ | Point |
+| FX rack | Sys | Panic | Return | Help | Exit |
 | FX editor | Ops | Parameter− | Parameter+ | Value− | Value+ |
 | FX editor | State | Bypass | — | — | — |
 | FX editor | Nav | Rack | — | — | — |

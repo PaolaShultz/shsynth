@@ -9,6 +9,8 @@ measurements, history, and future plans do not become repeated walls of text.
 - [First run](FIRST_RUN.md) — configure hardware and open SHR-DAW.
 - [Using SHR-DAW](USING_SHR_DAW.md) — instruments, screens, MIDI Ideas,
   performance meters, recording, and commands.
+- [Complete screen and menu manual](MENU_MANUAL.md) — every populated 40×20
+  screen, contextual editor, and controller-menu page with explanations.
 - [In-app help](HELP.md) — the compact help text shown by `?` or F1.
 - [Tracker guide](TRACKER.md) — FT2 editing, pages, routing, Arrangement,
   drums, loops, and Project files.
@@ -54,6 +56,9 @@ measurements, history, and future plans do not become repeated walls of text.
 
 ## Development record
 
+- [Maintainer helper scripts](MAINTAINER_HELPERS.md) — parameters, side
+  effects, safety boundaries, and design decisions for every repository helper
+  and the related Make targets.
 - [Development story and Build Week record](BUILD_WEEK.md) — chronology,
   model provenance, division of work, target-native workflow, and evaluation.
 - [Feature and quirk matrix](BUILD_WEEK_FEATURE_MATRIX.md) — subsystem-level

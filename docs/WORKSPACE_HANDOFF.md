@@ -270,6 +270,12 @@ The final command must produce no output.
 
 ## Installed tools and validation
 
+Read `docs/MAINTAINER_HELPERS.md` before changing or replacing anything below
+`scripts/` or its related Make targets. It is the durable reference for helper
+arguments, environment overrides, side effects, safety boundaries, and design
+rationale. In particular, the screenshot renderer's explicit pixel-copy loops
+and exhaustive 2×2 check are intentionally slower than a library resize.
+
 On this Raspberry Pi, `gh`, `libxml2-utils` (`xmllint`), and `shellcheck` are
 installed. If a
 required validation or publishing tool is missing, install it instead of
@@ -315,6 +321,25 @@ check links/references, verify image dimensions and byte sizes, compile Python
 helpers with `python3 -m py_compile`, and run `git diff --check`. Run the full
 Rust checks only when code, Cargo files, runtime behavior, or install/runtime
 scripts changed.
+
+The complete visual interface reference starts at `docs/MENU_MANUAL.md` and is
+split into focused chapters below `docs/menu/`. Its 80 menu-page images come
+from 25 populated deterministic scenarios in `src/ui.rs`; available pages and
+labels are read from the canonical `src/navigation.rs` tables. The renderer
+draws the real 40×20 ratatui UI with the PSF console font at 480×320, then uses
+explicit integer copying to make a 960×640 PNG in which every source pixel is
+an exact 2×2 square. Do not substitute antialiased font or resize rendering.
+After a fixture/renderer change, inspect one frame before the batch, then run:
+
+```sh
+python3 scripts/render-readme-screenshots.py --only menu/ft2-step-edit-add.png
+python3 scripts/render-readme-screenshots.py
+python3 scripts/render-readme-screenshots.py --check
+```
+
+The reusable Codex workflow is private and ignored at
+`user/codex/skills/shr-menu-documentation/`; it must never be staged or moved
+into the public project without explicit user direction.
 
 ## Safety and fresh-session checklist
 

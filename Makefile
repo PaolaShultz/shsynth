@@ -37,7 +37,11 @@ install-files:
 	install -d $(DESTDIR)$(PREFIX)/share/doc/shsynth/images
 	install -m644 LICENSE THIRD_PARTY.md README.md $(DESTDIR)$(PREFIX)/share/doc/shsynth/
 	install -m644 docs/*.md $(DESTDIR)$(PREFIX)/share/doc/shsynth/
-	install -m644 docs/images/* $(DESTDIR)$(PREFIX)/share/doc/shsynth/images/
+	install -m644 docs/images/*.html docs/images/*.jpg docs/images/*.png $(DESTDIR)$(PREFIX)/share/doc/shsynth/images/
+	install -d $(DESTDIR)$(PREFIX)/share/doc/shsynth/menu
+	install -m644 docs/menu/*.md $(DESTDIR)$(PREFIX)/share/doc/shsynth/menu/
+	install -d $(DESTDIR)$(PREFIX)/share/doc/shsynth/images/menu
+	install -m644 docs/images/menu/*.png $(DESTDIR)$(PREFIX)/share/doc/shsynth/images/menu/
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/shsynth $(DESTDIR)$(PREFIX)/bin/shr

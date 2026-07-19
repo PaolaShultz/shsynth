@@ -3,6 +3,10 @@
 Read `docs/WORKSPACE_HANDOFF.md` at the start of work in this checkout. It
 records the repository/local-data boundary, current hardware setup, publishing
 workflow, and the decisions that must survive a fresh conversation.
+Before changing or questioning a repository helper, also read
+`docs/MAINTAINER_HELPERS.md`; it records every helper's parameters, side
+effects, safety boundary, and design rationale, including the intentionally
+explicit screenshot scaler.
 
 ## Purpose and environment
 

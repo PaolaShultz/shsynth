@@ -7517,7 +7517,7 @@ struct ScreenshotSet {
 
 #[derive(Serialize)]
 struct ScreenshotFrame {
-    name: &'static str,
+    name: String,
     cells: Vec<ScreenshotCell>,
 }
 
@@ -7530,48 +7530,203 @@ struct ScreenshotCell {
 }
 
 pub fn readme_screenshots_json(config: &RuntimeConfig) -> Result<String> {
-    let screens = [
-        ("shr-daw-presets.png", Screen::Presets),
-        ("shr-daw-playback.png", Screen::Playback),
-        ("shr-daw-ft2-pattern.png", Screen::Tracker),
-        ("shr-daw-ft2-arrangement.png", Screen::TrackerArrange),
-        ("shr-daw-ft2-pages.png", Screen::TrackerPages),
-        ("shr-daw-project-files.png", Screen::TrackerFiles),
-        ("shr-daw-drum-patterns.png", Screen::TrackerFiles),
-        ("shr-daw-ft2-loop.png", Screen::TrackerLoop),
-        ("shr-daw-audio-recorder.png", Screen::AudioRecorder),
-        ("shr-daw-performance-meter.png", Screen::Meter),
+    let readme_screens = [
+        ("shr-daw-presets.png", ScreenshotScenario::Presets),
+        ("shr-daw-playback.png", ScreenshotScenario::Playback),
+        ("shr-daw-ft2-pattern.png", ScreenshotScenario::TrackerEdit),
+        (
+            "shr-daw-ft2-arrangement.png",
+            ScreenshotScenario::TrackerArrange,
+        ),
+        ("shr-daw-ft2-pages.png", ScreenshotScenario::TrackerPages),
+        (
+            "shr-daw-project-files.png",
+            ScreenshotScenario::TrackerFiles,
+        ),
+        (
+            "shr-daw-drum-patterns.png",
+            ScreenshotScenario::DrumPatterns,
+        ),
+        ("shr-daw-ft2-loop.png", ScreenshotScenario::TrackerLoop),
+        (
+            "shr-daw-audio-recorder.png",
+            ScreenshotScenario::AudioRecorder,
+        ),
+        ("shr-daw-performance-meter.png", ScreenshotScenario::Meter),
     ];
     let mut frames = Vec::new();
-    for (name, screen) in screens {
+    for (name, scenario) in readme_screens {
         let mut app = screenshot_app(config.clone());
-        configure_screenshot(&mut app, screen);
-        if name == "shr-daw-drum-patterns.png" {
-            app.open_pattern_tools();
-            app.open_drum_patterns();
+        configure_screenshot_scenario(&mut app, scenario);
+        frames.push(render_screenshot_frame(&mut app, name.into())?);
+    }
+    for scenario in ScreenshotScenario::ALL {
+        let mut app = screenshot_app(config.clone());
+        configure_screenshot_scenario(&mut app, scenario);
+        let context = app.menu_context();
+        for (page_index, page) in navigation::pages(app.screen, context).iter().enumerate() {
+            if !page.available() {
+                continue;
+            }
+            app.select_menu_page(page_index);
+            let name = format!(
+                "menu/{}-{}.png",
+                scenario.slug(),
+                screenshot_name_slug(page.label)
+            );
+            frames.push(render_screenshot_frame(&mut app, name)?);
         }
-        let backend = TestBackend::new(40, 20);
-        let mut terminal = Terminal::new(backend)?;
-        terminal.draw(|frame| draw(frame, &mut app))?;
-        let cells = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| ScreenshotCell {
-                symbol: cell.symbol.clone(),
-                fg: color_rgb(cell.fg, true),
-                bg: color_rgb(cell.bg, false),
-                bold: cell.modifier.contains(Modifier::BOLD),
-            })
-            .collect();
-        frames.push(ScreenshotFrame { name, cells });
     }
     Ok(serde_json::to_string_pretty(&ScreenshotSet {
         cols: 40,
         rows: 20,
         screens: frames,
     })?)
+}
+
+fn render_screenshot_frame(app: &mut App, name: String) -> Result<ScreenshotFrame> {
+    let backend = TestBackend::new(40, 20);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.draw(|frame| draw(frame, app))?;
+    let cells = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| ScreenshotCell {
+            symbol: cell.symbol.clone(),
+            fg: color_rgb(cell.fg, true),
+            bg: color_rgb(cell.bg, false),
+            bold: cell.modifier.contains(Modifier::BOLD),
+        })
+        .collect();
+    Ok(ScreenshotFrame { name, cells })
+}
+
+fn screenshot_name_slug(label: &str) -> String {
+    let mut slug = String::new();
+    for character in label.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.trim_matches('-').to_owned()
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ScreenshotScenario {
+    Presets,
+    Playback,
+    Ideas,
+    Help,
+    TrackerPlay,
+    TrackerEdit,
+    TrackerRecord,
+    TrackerCellEdit,
+    TrackerFiles,
+    PatternTools,
+    DrumPatterns,
+    PatternSetup,
+    TrackerArrange,
+    TrackerPages,
+    PageTarget,
+    PageChannel,
+    TrackerTools,
+    TrackerNoob,
+    TrackerLoop,
+    LoopLibrary,
+    TrackerLoopAlign,
+    AudioRecorder,
+    FxRack,
+    FxEditor,
+    Meter,
+}
+
+impl ScreenshotScenario {
+    const ALL: [Self; 25] = [
+        Self::Presets,
+        Self::Playback,
+        Self::Ideas,
+        Self::Help,
+        Self::TrackerPlay,
+        Self::TrackerEdit,
+        Self::TrackerRecord,
+        Self::TrackerCellEdit,
+        Self::TrackerFiles,
+        Self::PatternTools,
+        Self::DrumPatterns,
+        Self::PatternSetup,
+        Self::TrackerArrange,
+        Self::TrackerPages,
+        Self::PageTarget,
+        Self::PageChannel,
+        Self::TrackerTools,
+        Self::TrackerNoob,
+        Self::TrackerLoop,
+        Self::LoopLibrary,
+        Self::TrackerLoopAlign,
+        Self::AudioRecorder,
+        Self::FxRack,
+        Self::FxEditor,
+        Self::Meter,
+    ];
+
+    const fn screen(self) -> Screen {
+        match self {
+            Self::Presets => Screen::Presets,
+            Self::Playback => Screen::Playback,
+            Self::Ideas => Screen::Ideas,
+            Self::Help => Screen::Help,
+            Self::TrackerPlay | Self::TrackerEdit | Self::TrackerRecord | Self::TrackerCellEdit => {
+                Screen::Tracker
+            }
+            Self::TrackerFiles | Self::PatternTools | Self::DrumPatterns | Self::PatternSetup => {
+                Screen::TrackerFiles
+            }
+            Self::TrackerArrange => Screen::TrackerArrange,
+            Self::TrackerPages | Self::PageTarget | Self::PageChannel => Screen::TrackerPages,
+            Self::TrackerTools => Screen::TrackerTools,
+            Self::TrackerNoob => Screen::TrackerNoob,
+            Self::TrackerLoop | Self::LoopLibrary => Screen::TrackerLoop,
+            Self::TrackerLoopAlign => Screen::TrackerLoopAlign,
+            Self::AudioRecorder => Screen::AudioRecorder,
+            Self::FxRack => Screen::FxRack,
+            Self::FxEditor => Screen::FxEditor,
+            Self::Meter => Screen::Meter,
+        }
+    }
+
+    const fn slug(self) -> &'static str {
+        match self {
+            Self::Presets => "presets",
+            Self::Playback => "playback",
+            Self::Ideas => "ideas",
+            Self::Help => "help",
+            Self::TrackerPlay => "ft2-play",
+            Self::TrackerEdit => "ft2-step-edit",
+            Self::TrackerRecord => "ft2-record",
+            Self::TrackerCellEdit => "ft2-cell-edit",
+            Self::TrackerFiles => "files",
+            Self::PatternTools => "pattern-tools",
+            Self::DrumPatterns => "drum-patterns",
+            Self::PatternSetup => "pattern-setup",
+            Self::TrackerArrange => "arrange",
+            Self::TrackerPages => "tracks",
+            Self::PageTarget => "target-editor",
+            Self::PageChannel => "channel-editor",
+            Self::TrackerTools => "ft2-tools",
+            Self::TrackerNoob => "noob-setup",
+            Self::TrackerLoop => "ft2-loop",
+            Self::LoopLibrary => "loop-library",
+            Self::TrackerLoopAlign => "loop-align",
+            Self::AudioRecorder => "audio-recorder",
+            Self::FxRack => "fx-rack",
+            Self::FxEditor => "fx-editor",
+            Self::Meter => "performance-meter",
+        }
+    }
 }
 
 fn screenshot_app(mut config: RuntimeConfig) -> App {
@@ -7726,6 +7881,201 @@ fn configure_screenshot(app: &mut App, screen: Screen) {
         }
         _ => {}
     }
+}
+
+fn configure_screenshot_scenario(app: &mut App, scenario: ScreenshotScenario) {
+    configure_screenshot(app, scenario.screen());
+    match scenario {
+        ScreenshotScenario::Presets
+        | ScreenshotScenario::Playback
+        | ScreenshotScenario::TrackerArrange
+        | ScreenshotScenario::TrackerPages
+        | ScreenshotScenario::TrackerFiles
+        | ScreenshotScenario::TrackerLoop
+        | ScreenshotScenario::AudioRecorder
+        | ScreenshotScenario::Meter => {}
+        ScreenshotScenario::Ideas => {
+            app.ideas = vec![
+                "2026-07-19-dusk-chords".into(),
+                "2026-07-19-bass-answer".into(),
+                "2026-07-18-d50-cloud".into(),
+                "2026-07-18-break-variation".into(),
+                "2026-07-17-copper-pluck".into(),
+            ];
+            app.idea_selected = 1;
+            app.status = "Compact Bass · 18.4 s · ready to inspect".into();
+        }
+        ScreenshotScenario::Help => {
+            app.web_help_status = "Local help · LAN page not started for screenshot".into();
+            app.help_selected = 2;
+            app.help_offset = 0;
+            app.status = "turn to move · OPEN follows section links".into();
+        }
+        ScreenshotScenario::TrackerPlay => {
+            fill_demo_song(app);
+            app.tracker_mode = TrackerMode::Play;
+            app.status = "PLAY mode · encoder moves rows".into();
+        }
+        ScreenshotScenario::TrackerEdit => {
+            fill_demo_song(app);
+            app.tracker_mode = TrackerMode::Edit;
+            app.tracker_row = 4;
+            app.tracker_track = 1;
+            app.status = "step edit · ADD 2 rows after entry".into();
+        }
+        ScreenshotScenario::TrackerRecord => {
+            fill_demo_song(app);
+            app.tracker_mode = TrackerMode::Rec;
+            app.tracker_row = 7;
+            app.tracker_recording = Some(TrackerRecording {
+                pattern: 0,
+                order: 0,
+                page: 0,
+                last_row: 7,
+                next_lane: 2,
+                active_lanes: HashMap::new(),
+                notes: 11,
+            });
+            app.status = "REC pattern 0 · EXT only · 11 notes".into();
+        }
+        ScreenshotScenario::TrackerCellEdit => {
+            fill_demo_song(app);
+            app.tracker_mode = TrackerMode::Edit;
+            app.tracker_row = 4;
+            app.tracker_track = 0;
+            app.open_note_editor();
+            if let Some(editor) = app.note_editor.as_mut() {
+                editor.field = NoteEditorField::EffectParameter;
+                editor.draft.gate = Some(75);
+                editor.draft.command = Command::Retrigger(3);
+            }
+            app.status = "CELL EDIT · PARAM selected · draft not committed".into();
+        }
+        ScreenshotScenario::PatternTools => {
+            fill_demo_song(app);
+            app.open_pattern_tools();
+            app.status = "pattern 0 · 12 melodic notes · clipboard ready".into();
+        }
+        ScreenshotScenario::DrumPatterns => {
+            fill_demo_song(app);
+            app.open_pattern_tools();
+            app.open_drum_patterns();
+        }
+        ScreenshotScenario::PatternSetup => {
+            fill_demo_song(app);
+            app.open_pattern_tools();
+            app.confirm_pattern_clear = true;
+            app.pattern_setup_new = true;
+            app.pattern_clear_beats = 3;
+            app.pattern_setup_rows = 48;
+            app.status = "new pattern setup · confirm creates it".into();
+        }
+        ScreenshotScenario::PageTarget => {
+            fill_demo_song(app);
+            configure_demo_page_editor(app);
+            app.page_manager_mode = PageManagerMode::Target;
+            app.page_target_selected = 1;
+            app.status = "target editor · Roland D-50 is online".into();
+        }
+        ScreenshotScenario::PageChannel => {
+            fill_demo_song(app);
+            configure_demo_page_editor(app);
+            app.page_manager_mode = PageManagerMode::Channel;
+            app.page_channel_draft = 9;
+            app.status = "channel editor · draft channel 10".into();
+        }
+        ScreenshotScenario::TrackerTools => {
+            fill_demo_song(app);
+            app.status = "choose a focused FT2 tool".into();
+        }
+        ScreenshotScenario::TrackerNoob => {
+            fill_demo_song(app);
+            app.noob_draft = Scale {
+                root: 4,
+                kind: ScaleKind::NaturalMinor,
+            };
+            app.status = "E natural minor · DONE enables note mapping".into();
+        }
+        ScreenshotScenario::LoopLibrary => {
+            configure_demo_loop(app);
+            app.loop_library_mode = true;
+            app.loop_library = vec![
+                crate::loop_player::LibraryEntry {
+                    file: "breakbeat-96.wav".into(),
+                    current: true,
+                    saved_references: 2,
+                },
+                crate::loop_player::LibraryEntry {
+                    file: "tape-drums-92.wav".into(),
+                    current: false,
+                    saved_references: 1,
+                },
+                crate::loop_player::LibraryEntry {
+                    file: "room-pulse-120.wav".into(),
+                    current: false,
+                    saved_references: 0,
+                },
+                crate::loop_player::LibraryEntry {
+                    file: "odd-percussion-135.wav".into(),
+                    current: false,
+                    saved_references: 0,
+                },
+            ];
+            app.loop_library_selected = 2;
+            app.status = "FREE loops can be deleted after confirmation".into();
+        }
+        ScreenshotScenario::TrackerLoopAlign => {
+            configure_demo_loop(app);
+            app.screen = Screen::TrackerLoopAlign;
+            app.status = "AUTO measured 4 bars · offset +1 bar".into();
+            if let Some(settings) = app.song.audio_loop.as_mut() {
+                settings.offset_beats = 4;
+            }
+        }
+        ScreenshotScenario::FxRack => {
+            configure_demo_fx(app);
+            app.screen = Screen::FxRack;
+        }
+        ScreenshotScenario::FxEditor => {
+            configure_demo_fx(app);
+            app.screen = Screen::FxEditor;
+            app.fx_selected = 1;
+            app.fx_parameter = 2;
+            app.status = "COMPRESSOR · ratio selected · graph inactive".into();
+        }
+    }
+    app.select_menu_page(0);
+}
+
+fn configure_demo_page_editor(app: &mut App) {
+    app.page_manager_original = Some(app.song.clone());
+    app.available_page_outputs = vec![
+        "USB MIDI Interface".into(),
+        "Roland D-50".into(),
+        "Elektron Model:Cycles".into(),
+    ];
+    app.page_target_candidates = vec![
+        PageTarget::ConfiguredExternal,
+        PageTarget::Midi("Roland D-50".into()),
+        PageTarget::Midi("Elektron Model:Cycles".into()),
+        PageTarget::ActiveInstrument,
+    ];
+}
+
+fn configure_demo_loop(app: &mut App) {
+    configure_screenshot(app, Screen::TrackerLoop);
+}
+
+fn configure_demo_fx(app: &mut App) {
+    fill_demo_song(app);
+    app.fx_target = 0;
+    for kind in [0, 1, 2, 10] {
+        app.fx_add_kind = kind;
+        app.add_effect();
+    }
+    app.fx_selected = 1;
+    app.fx_add_kind = 3;
+    app.status = "SOURCE · four active inserts · transport stopped".into();
 }
 
 fn fill_demo_song(app: &mut App) {
