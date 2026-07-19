@@ -313,6 +313,17 @@ pub fn minimum_runtime_memory_bytes(
         }
         EffectKind::TremoloPan => (MODULATION_TABLE_STEPS + 1)
             .saturating_mul(std::mem::size_of::<crate::dsp::StereoFrame>()),
+        EffectKind::Reverb => {
+            let predelay = 2usize.saturating_mul(
+                ((sample_rate as usize).saturating_mul(200) / 1_000).saturating_add(3),
+            );
+            let fdn = 4usize.saturating_mul(
+                ((sample_rate as usize).saturating_mul(100) / 1_000).saturating_add(3),
+            );
+            predelay
+                .saturating_add(fdn)
+                .saturating_mul(std::mem::size_of::<f32>())
+        }
         _ => 0,
     };
     if crate::audio_graph::is_insert_effect(kind) {

@@ -9,6 +9,7 @@ mod filter;
 mod gate;
 mod modulated_delay;
 mod phaser;
+mod reverb;
 mod tremolo_pan;
 
 use crate::audio_graph::{EffectId, EffectInstance, EffectKind};
@@ -27,6 +28,7 @@ use filter::Filter;
 use gate::Gate;
 use modulated_delay::ModulatedDelay;
 use phaser::Phaser;
+use reverb::Reverb;
 use tremolo_pan::TremoloPan;
 
 const PARAMETER_SMOOTH_SAMPLES: u32 = 64;
@@ -66,6 +68,7 @@ enum Processor {
     Flanger(Box<ModulatedDelay>),
     Phaser(Box<Phaser>),
     TremoloPan(Box<TremoloPan>),
+    Reverb(Box<Reverb>),
     Crusher(Box<Crusher>),
     Gate(Box<Gate>),
     Filter(Box<Filter>),
@@ -101,16 +104,16 @@ impl Processor {
                 effect,
                 sample_rate,
             )?))),
+            EffectKind::Reverb => Ok(Self::Reverb(Box::new(Reverb::compile(
+                effect,
+                sample_rate,
+            )?))),
             EffectKind::Crusher => Ok(Self::Crusher(Box::new(Crusher::compile(effect)?))),
             EffectKind::Gate => Ok(Self::Gate(Box::new(Gate::compile(effect, sample_rate)?))),
             EffectKind::Filter => Ok(Self::Filter(Box::new(Filter::compile(
                 effect,
                 sample_rate,
             )?))),
-            _ => Err(EffectError::new(format!(
-                "{:?} processing is not implemented",
-                effect.kind
-            ))),
         }
     }
 
@@ -125,6 +128,7 @@ impl Processor {
             Self::Chorus(effect) | Self::Flanger(effect) => effect.process(frame),
             Self::Phaser(effect) => effect.process(frame),
             Self::TremoloPan(effect) => effect.process(frame),
+            Self::Reverb(effect) => effect.process(frame),
             Self::Crusher(effect) => effect.process(frame),
             Self::Gate(effect) => effect.process(frame),
             Self::Filter(effect) => effect.process(frame),
@@ -141,6 +145,7 @@ impl Processor {
             Self::Chorus(effect) | Self::Flanger(effect) => effect.set_parameter(name, value),
             Self::Phaser(effect) => effect.set_parameter(name, value),
             Self::TremoloPan(effect) => effect.set_parameter(name, value),
+            Self::Reverb(effect) => effect.set_parameter(name, value),
             Self::Crusher(effect) => effect.set_parameter(name, value),
             Self::Gate(effect) => effect.set_parameter(name, value),
             Self::Filter(effect) => effect.set_parameter(name, value),
@@ -157,6 +162,7 @@ impl Processor {
             Self::Chorus(effect) | Self::Flanger(effect) => effect.reset(),
             Self::Phaser(effect) => effect.reset(),
             Self::TremoloPan(effect) => effect.reset(),
+            Self::Reverb(effect) => effect.reset(),
             Self::Crusher(effect) => effect.reset(),
             Self::Gate(effect) => effect.reset(),
             Self::Filter(effect) => effect.reset(),
@@ -174,6 +180,7 @@ impl Processor {
             | Self::Flanger(_)
             | Self::Phaser(_)
             | Self::TremoloPan(_)
+            | Self::Reverb(_)
             | Self::Crusher(_)
             | Self::Gate(_)
             | Self::Filter(_) => None,
@@ -453,12 +460,13 @@ mod tests {
     }
 
     #[test]
-    fn slot_preserves_identity_and_rejects_unimplemented_kinds() {
+    fn slot_preserves_identity_and_rejects_mismatched_parameter_schemas() {
         let slot = EffectSlot::compile(&utility(BTreeMap::new(), false), 48_000, 128).unwrap();
         assert_eq!(slot.id(), 7);
         assert_eq!(slot.kind(), EffectKind::Utility);
         let mut effect = utility(BTreeMap::new(), false);
-        effect.kind = EffectKind::Reverb;
+        effect.kind = EffectKind::Chorus;
+        effect.parameters.insert("trim_db".into(), 0.0);
         assert!(EffectSlot::compile(&effect, 48_000, 128).is_err());
     }
 
