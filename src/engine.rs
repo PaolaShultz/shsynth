@@ -441,6 +441,10 @@ impl Engine {
         self.audio_graph.as_ref()?.aux_meter(aux_id)
     }
 
+    pub(crate) fn master_meter(&self) -> Option<AuxMeterSnapshot> {
+        self.audio_graph.as_ref()?.master_meter()
+    }
+
     pub(crate) fn process_id(&self) -> u32 {
         self.child.id()
     }

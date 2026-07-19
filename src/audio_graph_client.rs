@@ -24,6 +24,7 @@ const FIRST_EFFECT_NODE: u32 = 10;
 const FIRST_SEND_NODE: u32 = 30;
 const FIRST_AUX_EFFECT_NODE: u32 = 40;
 const FIRST_AUX_RETURN_NODE: u32 = 70;
+const FIRST_MASTER_EFFECT_NODE: u32 = 80;
 const MASTER_NODE: u32 = 90;
 const SINK_NODE: u32 = 100;
 
@@ -295,6 +296,12 @@ impl OwnedAudioGraph {
         })
     }
 
+    pub(crate) fn master_meter(&self) -> Option<AuxMeterSnapshot> {
+        Some(AuxMeterSnapshot {
+            output: self.callback.plan.meter(MASTER_NODE)?.load(),
+        })
+    }
+
     /// Publish a validated structural rack change while transport and all
     /// recording are stopped. JACK callback execution is joined before the
     /// plan is mutated; compatible effect IDs retain their runtime state.
@@ -510,6 +517,23 @@ fn managed_graph_definition(
         });
     }
 
+    let mut master_previous = MASTER_NODE;
+    for (index, effect_id) in aux_routing.master_rack.order.iter().copied().enumerate() {
+        let node_id = FIRST_MASTER_EFFECT_NODE + index as u32;
+        nodes.push(Node {
+            id: node_id,
+            layout: ChannelLayout::Stereo,
+            kind: NodeKind::Processor { effect_id },
+        });
+        edges.push(Edge {
+            id: edges.len() as u32 + 1,
+            from: master_previous,
+            to: node_id,
+        });
+        master_previous = node_id;
+    }
+    effects.extend(aux_routing.master_rack.effects.iter().cloned());
+
     nodes.push(Node {
         id: SINK_NODE,
         layout: ChannelLayout::Stereo,
@@ -524,7 +548,7 @@ fn managed_graph_definition(
     });
     edges.push(Edge {
         id: edges.len() as u32 + 1,
-        from: MASTER_NODE,
+        from: master_previous,
         to: SINK_NODE,
     });
     GraphDefinition {
@@ -539,7 +563,7 @@ fn managed_graph_definition(
             source_node: SOURCE_NODE,
             effects: rack.order.clone(),
         }],
-        master_chain: vec![],
+        master_chain: aux_routing.master_rack.order.clone(),
         aux_buses,
         sends,
         monitoring: Monitoring::default(),
@@ -801,12 +825,18 @@ mod tests {
         let reverb = routing
             .add_effect(&rack, aux, crate::audio_graph::EffectKind::Reverb)
             .unwrap();
+        let master = routing.next_effect_id(&rack).unwrap();
+        routing
+            .master_rack
+            .add_with_id(crate::audio_graph::EffectKind::Compressor, master)
+            .unwrap();
         routing
             .set_send(&rack, aux, -18.0, crate::audio_graph::SendPoint::PostInsert)
             .unwrap();
         let graph = managed_graph_definition(48_000, 128, &destinations, &rack, &routing);
         graph.validate().unwrap();
         assert_eq!(graph.aux_buses[0].effects, [reverb]);
+        assert_eq!(graph.master_chain, [master]);
         assert_eq!(graph.sends[0].level_db, -18.0);
         assert_eq!(
             graph

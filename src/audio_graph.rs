@@ -272,6 +272,8 @@ pub struct ProjectAuxSend {
 #[serde(deny_unknown_fields)]
 pub struct ProjectAuxRouting {
     #[serde(default)]
+    pub master_rack: InsertRack,
+    #[serde(default)]
     pub buses: Vec<ProjectAuxBus>,
     #[serde(default)]
     pub sends: Vec<ProjectAuxSend>,
@@ -282,6 +284,7 @@ impl ProjectAuxRouting {
         source_rack
             .effects
             .iter()
+            .chain(self.master_rack.effects.iter())
             .chain(self.buses.iter().flat_map(|bus| bus.rack.effects.iter()))
             .map(|effect| effect.id)
             .max()
@@ -293,6 +296,7 @@ impl ProjectAuxRouting {
 
     pub fn validate(&self, source_rack: &InsertRack) -> Result<(), GraphError> {
         source_rack.validate()?;
+        self.master_rack.validate()?;
         if self.buses.len() > MAX_AUX_BUSES || self.sends.len() > MAX_AUX_BUSES {
             return Err(GraphError::new("aux bus bound exceeded"));
         }
@@ -302,7 +306,16 @@ impl ProjectAuxRouting {
             .iter()
             .map(|effect| effect.id)
             .collect::<BTreeSet<_>>();
-        let mut effect_count = source_rack.effects.len();
+        for effect in &self.master_rack.effects {
+            if !effect_ids.insert(effect.id) {
+                return Err(GraphError::new("effect IDs must be globally unique"));
+            }
+        }
+        let mut effect_count = source_rack
+            .effects
+            .len()
+            .checked_add(self.master_rack.effects.len())
+            .ok_or_else(|| GraphError::new("effect count overflow"))?;
         for bus in &self.buses {
             if bus.id == 0 || !ids.insert(bus.id) {
                 return Err(GraphError::new("aux IDs must be unique and non-zero"));
@@ -1119,6 +1132,11 @@ mod tests {
         let mut source = InsertRack::default();
         let source_id = source.add(EffectKind::Eq).unwrap();
         let mut routing = ProjectAuxRouting::default();
+        let master_id = routing.next_effect_id(&source).unwrap();
+        routing
+            .master_rack
+            .add_with_id(EffectKind::Compressor, master_id)
+            .unwrap();
         let first = routing.add_bus().unwrap();
         let second = routing.add_bus().unwrap();
         let reverb = routing
@@ -1127,7 +1145,7 @@ mod tests {
         let delay = routing
             .add_effect(&source, second, EffectKind::Delay)
             .unwrap();
-        assert!(reverb > source_id && delay > reverb);
+        assert!(master_id > source_id && reverb > master_id && delay > reverb);
         for bus in &routing.buses {
             let effect = bus.rack.effects.first().unwrap();
             assert_eq!(effect.parameters.get("dry_percent"), Some(&0.0));

@@ -151,7 +151,6 @@ fn percentile_nanoseconds(histogram: &[u64], percentile: u64, maximum: u64) -> u
 
 enum Operation {
     Source,
-    Sum,
     Pass,
     Fader(Box<RuntimeFader>),
     Effect(Box<EffectSlot>),
@@ -277,7 +276,9 @@ impl GraphPlan {
                     source_nodes.push(id);
                     Operation::Source
                 }
-                NodeKind::StereoMixer => Operation::Sum,
+                NodeKind::StereoMixer => {
+                    Operation::Fader(Box::new(RuntimeFader::new(0.0, maximum_frames)?))
+                }
                 NodeKind::Processor { effect_id } => {
                     let effect = effects
                         .get(effect_id)
@@ -495,7 +496,7 @@ impl GraphPlan {
                 }
             }
             match &mut self.nodes[node_index].operation {
-                Operation::Source | Operation::Sum | Operation::Pass | Operation::Sink => {}
+                Operation::Source | Operation::Pass | Operation::Sink => {}
                 Operation::Fader(fader) => fader.process(&mut self.buffers[target][..frames]),
                 Operation::Effect(slot) => slot.process(&mut self.buffers[target][..frames]),
             }

@@ -85,7 +85,8 @@ fn fx_target_label(target: usize) -> &'static str {
     match target {
         0 => "SOURCE",
         1 => "AUX 1",
-        _ => "AUX 2",
+        2 => "AUX 2",
+        _ => "MASTER",
     }
 }
 
@@ -103,11 +104,13 @@ fn project_fx_rack<'a>(
 ) -> Option<&'a InsertRack> {
     if target == 0 {
         Some(source)
-    } else {
+    } else if target <= MAX_AUX_BUSES {
         aux.buses
             .iter()
             .find(|bus| usize::from(bus.id) == target)
             .map(|bus| &bus.rack)
+    } else {
+        Some(&aux.master_rack)
     }
 }
 
@@ -118,12 +121,18 @@ fn project_fx_rack_mut<'a>(
 ) -> Option<&'a mut InsertRack> {
     if target == 0 {
         Some(source)
-    } else {
+    } else if target <= MAX_AUX_BUSES {
         aux.buses
             .iter_mut()
             .find(|bus| usize::from(bus.id) == target)
             .map(|bus| &mut bus.rack)
+    } else {
+        Some(&mut aux.master_rack)
     }
+}
+
+fn is_aux_target(target: usize) -> bool {
+    (1..=MAX_AUX_BUSES).contains(&target)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -3285,7 +3294,7 @@ impl App {
         let result = if self.fx_target == 0 {
             aux.next_effect_id(&rack)
                 .and_then(|id| rack.add_with_id(kind, id).map(|()| id))
-        } else {
+        } else if is_aux_target(self.fx_target) {
             let aux_id = self.fx_target as u8;
             while aux.buses.iter().all(|bus| bus.id != aux_id) {
                 if let Err(error) = aux.add_bus() {
@@ -3307,6 +3316,12 @@ impl App {
                 }
             }
             Ok(id)
+        } else {
+            aux.next_effect_id(&rack).and_then(|id| {
+                aux.master_rack.add_with_id(kind, id)?;
+                aux.validate(&rack)?;
+                Ok(id)
+            })
         };
         match result {
             Ok(id) => {
@@ -3336,7 +3351,7 @@ impl App {
         let result = project_fx_rack_mut(&mut rack, &mut aux, self.fx_target)
             .expect("selected effect has a rack")
             .remove(id);
-        if self.fx_target > 0
+        if is_aux_target(self.fx_target)
             && project_fx_rack(&rack, &aux, self.fx_target)
                 .is_some_and(|rack| rack.effects.is_empty())
         {
@@ -3415,7 +3430,7 @@ impl App {
         } else {
             (self.fx_add_kind + 1) % INSERT_EFFECTS.len()
         };
-        if self.fx_target > 0 {
+        if is_aux_target(self.fx_target) {
             while !matches!(
                 INSERT_EFFECTS[next],
                 EffectKind::Delay
@@ -3439,10 +3454,10 @@ impl App {
     }
 
     fn cycle_fx_target(&mut self) {
-        self.fx_target = (self.fx_target + 1) % (MAX_AUX_BUSES + 1);
+        self.fx_target = (self.fx_target + 1) % (MAX_AUX_BUSES + 2);
         self.fx_selected = 0;
         self.fx_parameter = 0;
-        if self.fx_target > 0
+        if is_aux_target(self.fx_target)
             && !matches!(
                 INSERT_EFFECTS[self.fx_add_kind],
                 EffectKind::Delay
@@ -3458,8 +3473,8 @@ impl App {
     }
 
     fn adjust_aux_send(&mut self, direction: i8) {
-        if self.fx_target == 0 {
-            self.status = "source inserts do not have a send level".into();
+        if !is_aux_target(self.fx_target) {
+            self.status = "select AUX 1 or AUX 2 for send level".into();
             return;
         }
         let aux_id = self.fx_target as u8;
@@ -3499,7 +3514,7 @@ impl App {
     }
 
     fn toggle_aux_send_point(&mut self) {
-        if self.fx_target == 0 {
+        if !is_aux_target(self.fx_target) {
             self.status = "select AUX 1 or AUX 2".into();
             return;
         }
@@ -3525,7 +3540,7 @@ impl App {
     }
 
     fn cycle_aux_return(&mut self) {
-        if self.fx_target == 0 {
+        if !is_aux_target(self.fx_target) {
             self.status = "select AUX 1 or AUX 2".into();
             return;
         }
@@ -3561,7 +3576,8 @@ impl App {
         let schema = crate::effect_schema::schema(effect.kind);
         self.fx_parameter = self.fx_parameter.min(schema.len().saturating_sub(1));
         let spec = schema[self.fx_parameter];
-        if self.fx_target > 0 && matches!(spec.name, "dry_percent" | "wet_percent" | "mix_percent")
+        if is_aux_target(self.fx_target)
+            && matches!(spec.name, "dry_percent" | "wet_percent" | "mix_percent")
         {
             self.status = "aux wet/dry controls are fixed at 100% wet".into();
             return;
@@ -5682,7 +5698,7 @@ fn draw_fx_rack<B: Backend>(f: &mut Frame<B>, a: &mut App) {
             rack_length
         )),
     ])];
-    if a.fx_target > 0 {
+    if is_aux_target(a.fx_target) {
         let aux_id = a.fx_target as u8;
         let send = a
             .song
@@ -5714,6 +5730,16 @@ fn draw_fx_rack<B: Backend>(f: &mut Frame<B>, a: &mut App) {
             let rms = meter.output.rms.left.max(meter.output.rms.right);
             lines.push(Spans::from(format!(
                 "RETURN pk {:>5.1} rms {:>5.1} dBFS",
+                meter_db(peak),
+                meter_db(rms)
+            )));
+        }
+    } else if a.fx_target > MAX_AUX_BUSES {
+        if let Some(meter) = a.engine.as_ref().and_then(Engine::master_meter) {
+            let peak = meter.output.peak.left.max(meter.output.peak.right);
+            let rms = meter.output.rms.left.max(meter.output.rms.right);
+            lines.push(Spans::from(format!(
+                "MASTER pk {:>5.1} rms {:>5.1} dBFS",
                 meter_db(peak),
                 meter_db(rms)
             )));
@@ -7694,6 +7720,13 @@ mod tests {
             a.song.aux_routing.sends[0].level_db,
             a.song.aux_routing.sends[1].level_db
         );
+        let second_aux_effect = a.selected_effect_id().unwrap();
+        a.cycle_fx_target();
+        a.fx_add_kind = 0;
+        a.add_effect();
+        let master_effect = a.selected_effect_id().unwrap();
+        assert!(master_effect > second_aux_effect);
+        assert_eq!(a.song.aux_routing.master_rack.order, [master_effect]);
         a.song.aux_routing.validate(&a.song.insert_rack).unwrap();
     }
 
