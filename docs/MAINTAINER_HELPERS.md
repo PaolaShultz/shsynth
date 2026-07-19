@@ -21,12 +21,56 @@ assumptions.
 | `render-readme-screenshots.py` | Regenerate or validate real TUI documentation images | Writes tracked PNGs below `docs/images/` only |
 | `generate_cleared_presets.sh` | Reproduce the authored public synthv1 bank | Creates named preset files only when they do not already exist |
 | `generate_demo_songs.py` | Reproduce or validate cleared public-domain demos | `--write` replaces only tracked demo outputs; normal mode is read-only and rejects changes/extras |
+| `capture-minilab-midi.sh` | Passively capture and label MiniLab 3 MIDI evidence | Temporarily stops and restores `amidiminder`; writes one unique log below `/tmp` by default |
 | `shr recorder-stress` | Non-audibly exercise the production multistem buffer/writer without JACK | Creates one unique synthetic take below an explicit destination |
 
 None of the setup, tuning, preset, or screenshot helpers starts JACK, a synth
 engine, MIDI playback, or an audible test. `local.sh` is the exception only in
 the ordinary sense that it launches the application the user explicitly asked
 to run; what the application subsequently starts depends on that user action.
+
+## Passive MiniLab evidence capture: `capture-minilab-midi.sh`
+
+### Invocation
+
+```sh
+./scripts/capture-minilab-midi.sh --check
+./scripts/capture-minilab-midi.sh
+./scripts/capture-minilab-midi.sh --output /tmp/named-minilab-capture.log
+```
+
+`--check` discovers the one connected MiniLab 3, enumerates all of its readable
+ALSA sequencer ports, checks routing safety, and compiles the monitor without
+opening a MIDI port or changing a service. A real capture writes a unique
+timestamped log below `/tmp` unless `--output` names a new file. Existing files
+are never replaced. While it runs, any non-empty line typed at the terminal is
+recorded as a timestamped operator marker; `Ctrl-C` ends the capture.
+
+The log records receive time and total order, ALSA client and port,
+reconstructed raw MIDI bytes and status, decoded message type and channel, and
+the relevant note, velocity, pressure, controller, program, or pitch-bend
+value. It preserves SysEx bytes and MIDI realtime events as well. The monitor
+subscribes to every readable port on the selected MiniLab client but never
+creates a MIDI output or forwards a captured event.
+
+### Safety boundary
+
+The helper refuses to run when more than one MiniLab matches, an SHR or synthv1
+process is active, a MiniLab ALSA route leads somewhere other than JACK's own
+sequencer backend, or a MiniLab JACK MIDI port has an active graph connection.
+It reports the exact client and ports before opening them. If the system
+`amidiminder` service is active, the helper temporarily stops it so the newly
+created monitor cannot be auto-connected to unrelated MIDI hardware, then
+restores it on every normal, error, signal, or `Ctrl-C` exit. Existing MIDI and
+JACK connections are not removed. The helper does not start or stop JACK, open
+an audio device, launch SHR-DAW or a synth, transmit MIDI or SysEx, or read or
+write anything below `user/`.
+
+The small C monitor is compiled into a unique temporary directory for each run
+and removed on exit. This avoids adding a persistent binary while using ALSA's
+sequencer API directly enough to retain source-port identity, message ordering,
+realtime events, and raw status bytes that a formatted `aseqdump` transcript
+would otherwise obscure.
 
 ## Repository-local setup: `setup-local.sh`
 
