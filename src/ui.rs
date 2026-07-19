@@ -44,11 +44,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CPU_TEMPERATURE_REFRESH: Duration = Duration::from_secs(10);
 const HELP_TEXT_WIDTH: usize = 38;
-const INSERT_EFFECTS: [EffectKind; 8] = [
+const INSERT_EFFECTS: [EffectKind; 12] = [
     EffectKind::Eq,
     EffectKind::Compressor,
     EffectKind::Distortion,
     EffectKind::Delay,
+    EffectKind::Chorus,
+    EffectKind::Flanger,
+    EffectKind::Phaser,
+    EffectKind::TremoloPan,
     EffectKind::Gate,
     EffectKind::Filter,
     EffectKind::Crusher,
@@ -62,6 +66,10 @@ fn effect_kind_label(kind: EffectKind) -> &'static str {
         EffectKind::Compressor => "COMPRESSOR",
         EffectKind::Distortion => "DISTORTION",
         EffectKind::Delay => "DELAY",
+        EffectKind::Chorus => "CHORUS",
+        EffectKind::Flanger => "FLANGER",
+        EffectKind::Phaser => "PHASER",
+        EffectKind::TremoloPan => "TREM/PAN",
         EffectKind::Filter => "FILTER",
         EffectKind::Gate => "GATE",
         EffectKind::Crusher => "CRUSHER",

@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 pub const COMPRESSOR_GAIN_TABLE_STEPS: usize = 2_048;
+pub const MODULATION_TABLE_STEPS: usize = 1_024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParameterType {
@@ -301,6 +302,17 @@ pub fn minimum_runtime_memory_bytes(
         EffectKind::Delay => 2usize
             .saturating_mul((sample_rate as usize).saturating_mul(2).saturating_add(2))
             .saturating_mul(std::mem::size_of::<f32>()),
+        EffectKind::Chorus => 2usize
+            .saturating_mul(((sample_rate as usize).saturating_mul(45) / 1_000).saturating_add(3))
+            .saturating_mul(std::mem::size_of::<f32>()),
+        EffectKind::Flanger => 2usize
+            .saturating_mul(((sample_rate as usize).saturating_mul(16) / 1_000).saturating_add(3))
+            .saturating_mul(std::mem::size_of::<f32>()),
+        EffectKind::Phaser => {
+            (MODULATION_TABLE_STEPS + 1).saturating_mul(std::mem::size_of::<f32>())
+        }
+        EffectKind::TremoloPan => (MODULATION_TABLE_STEPS + 1)
+            .saturating_mul(std::mem::size_of::<crate::dsp::StereoFrame>()),
         _ => 0,
     };
     if crate::audio_graph::is_insert_effect(kind) {

@@ -244,6 +244,10 @@ pub const fn is_insert_effect(kind: EffectKind) -> bool {
             | EffectKind::Compressor
             | EffectKind::Distortion
             | EffectKind::Delay
+            | EffectKind::Chorus
+            | EffectKind::Flanger
+            | EffectKind::Phaser
+            | EffectKind::TremoloPan
             | EffectKind::Filter
             | EffectKind::Gate
             | EffectKind::Crusher

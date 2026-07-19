@@ -7,6 +7,9 @@ mod distortion;
 mod eq;
 mod filter;
 mod gate;
+mod modulated_delay;
+mod phaser;
+mod tremolo_pan;
 
 use crate::audio_graph::{EffectId, EffectInstance, EffectKind};
 use crate::dsp::{db_to_gain, AtomicMeter, MeterAccumulator, SmoothedValue, StereoFrame};
@@ -22,6 +25,9 @@ use distortion::Distortion;
 use eq::Eq;
 use filter::Filter;
 use gate::Gate;
+use modulated_delay::ModulatedDelay;
+use phaser::Phaser;
+use tremolo_pan::TremoloPan;
 
 const PARAMETER_SMOOTH_SAMPLES: u32 = 64;
 const BYPASS_FADE_MILLISECONDS: f32 = 5.0;
@@ -56,6 +62,10 @@ enum Processor {
     Compressor(Box<Compressor>),
     Distortion(Box<Distortion>),
     Delay(Box<Delay>),
+    Chorus(Box<ModulatedDelay>),
+    Flanger(Box<ModulatedDelay>),
+    Phaser(Box<Phaser>),
+    TremoloPan(Box<TremoloPan>),
     Crusher(Box<Crusher>),
     Gate(Box<Gate>),
     Filter(Box<Filter>),
@@ -75,6 +85,22 @@ impl Processor {
                 sample_rate,
             )?))),
             EffectKind::Delay => Ok(Self::Delay(Box::new(Delay::compile(effect, sample_rate)?))),
+            EffectKind::Chorus => Ok(Self::Chorus(Box::new(ModulatedDelay::compile(
+                effect,
+                sample_rate,
+            )?))),
+            EffectKind::Flanger => Ok(Self::Flanger(Box::new(ModulatedDelay::compile(
+                effect,
+                sample_rate,
+            )?))),
+            EffectKind::Phaser => Ok(Self::Phaser(Box::new(Phaser::compile(
+                effect,
+                sample_rate,
+            )?))),
+            EffectKind::TremoloPan => Ok(Self::TremoloPan(Box::new(TremoloPan::compile(
+                effect,
+                sample_rate,
+            )?))),
             EffectKind::Crusher => Ok(Self::Crusher(Box::new(Crusher::compile(effect)?))),
             EffectKind::Gate => Ok(Self::Gate(Box::new(Gate::compile(effect, sample_rate)?))),
             EffectKind::Filter => Ok(Self::Filter(Box::new(Filter::compile(
@@ -96,6 +122,9 @@ impl Processor {
             Self::Compressor(effect) => effect.process(frame),
             Self::Distortion(effect) => effect.process(frame),
             Self::Delay(effect) => effect.process(frame),
+            Self::Chorus(effect) | Self::Flanger(effect) => effect.process(frame),
+            Self::Phaser(effect) => effect.process(frame),
+            Self::TremoloPan(effect) => effect.process(frame),
             Self::Crusher(effect) => effect.process(frame),
             Self::Gate(effect) => effect.process(frame),
             Self::Filter(effect) => effect.process(frame),
@@ -109,6 +138,9 @@ impl Processor {
             Self::Compressor(effect) => effect.set_parameter(name, value),
             Self::Distortion(effect) => effect.set_parameter(name, value),
             Self::Delay(effect) => effect.set_parameter(name, value),
+            Self::Chorus(effect) | Self::Flanger(effect) => effect.set_parameter(name, value),
+            Self::Phaser(effect) => effect.set_parameter(name, value),
+            Self::TremoloPan(effect) => effect.set_parameter(name, value),
             Self::Crusher(effect) => effect.set_parameter(name, value),
             Self::Gate(effect) => effect.set_parameter(name, value),
             Self::Filter(effect) => effect.set_parameter(name, value),
@@ -122,6 +154,9 @@ impl Processor {
             Self::Compressor(effect) => effect.reset(),
             Self::Distortion(effect) => effect.reset(),
             Self::Delay(effect) => effect.reset(),
+            Self::Chorus(effect) | Self::Flanger(effect) => effect.reset(),
+            Self::Phaser(effect) => effect.reset(),
+            Self::TremoloPan(effect) => effect.reset(),
             Self::Crusher(effect) => effect.reset(),
             Self::Gate(effect) => effect.reset(),
             Self::Filter(effect) => effect.reset(),
@@ -135,6 +170,10 @@ impl Processor {
             | Self::Eq(_)
             | Self::Distortion(_)
             | Self::Delay(_)
+            | Self::Chorus(_)
+            | Self::Flanger(_)
+            | Self::Phaser(_)
+            | Self::TremoloPan(_)
             | Self::Crusher(_)
             | Self::Gate(_)
             | Self::Filter(_) => None,
