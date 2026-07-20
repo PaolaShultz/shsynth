@@ -287,6 +287,80 @@ ask_yes_no() {
   done
 }
 
+unit_load_state() {
+  local scope=$1 unit=$2
+  if [[ "$scope" == user ]]; then
+    systemctl --user show "$unit" --property=LoadState --value 2>/dev/null || true
+  else
+    systemctl show "$unit" --property=LoadState --value 2>/dev/null || true
+  fi
+}
+
+unit_is_masked() {
+  local scope=$1 unit=$2 state
+  if [[ "$scope" == user ]]; then
+    state="$(systemctl --user is-enabled "$unit" 2>/dev/null || true)"
+  else
+    state="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+  fi
+  [[ "$state" == masked || "$state" == masked-runtime ]]
+}
+
+configure_exclusive_midi_services() {
+  command -v systemctl >/dev/null 2>&1 || return 0
+
+  local fluid_state amidiminder_state fluid_unsafe=false amidiminder_unsafe=false
+  fluid_state="$(unit_load_state user fluidsynth.service)"
+  amidiminder_state="$(unit_load_state system amidiminder.service)"
+  if [[ "$fluid_state" != not-found && -n "$fluid_state" ]] && \
+     ! unit_is_masked user fluidsynth.service; then
+    fluid_unsafe=true
+  fi
+  if [[ "$amidiminder_state" != not-found && -n "$amidiminder_state" ]] && \
+     ! unit_is_masked system amidiminder.service; then
+    amidiminder_unsafe=true
+  fi
+  if ! $fluid_unsafe && ! $amidiminder_unsafe; then
+    return 0
+  fi
+
+  printf '\nExclusive SHR MIDI routing\n'
+  printf '%s\n' \
+    'Some distributions start a standalone FluidSynth or automatically connect' \
+    'every hardware MIDI port to every application. That can load a large GM bank,' \
+    'double notes, bypass SHR pickup/routing, and send MIDI to unintended devices.' \
+    'The recommended cleanup masks only fluidsynth.service and amidiminder.service.' \
+    'It keeps the FluidSynth program available for SHR to start and stop on demand.'
+  if ! ask_yes_no 'Disable these conflicting background services now?' yes; then
+    printf '%s\n' \
+      'WARNING: automatic FluidSynth/MIDI services remain available outside SHR.' \
+      'Do not connect the controller to the same instrument through another router.' >&2
+    return 0
+  fi
+
+  if $fluid_unsafe; then
+    systemctl --user daemon-reload
+    systemctl --user mask --now fluidsynth.service
+    unit_is_masked user fluidsynth.service || {
+      printf 'Could not verify the per-user FluidSynth service mask.\n' >&2
+      return 1
+    }
+    printf 'Stopped and masked the standalone per-user FluidSynth service.\n'
+  fi
+  if $amidiminder_unsafe; then
+    if ((EUID == 0)); then
+      systemctl mask --now amidiminder.service
+    else
+      sudo systemctl mask --now amidiminder.service
+    fi
+    unit_is_masked system amidiminder.service || {
+      printf 'Could not verify the amidiminder service mask.\n' >&2
+      return 1
+    }
+    printf 'Stopped and masked amidiminder; it can no longer create automatic MIDI routes.\n'
+  fi
+}
+
 choose_note_names() {
   local current default_choice answer
   current="$(config_value "$RUNTIME_CONFIG" display.note_names)"
@@ -387,6 +461,7 @@ printf 'SHR-DAW hardware setup\n'
 printf 'No audio server, synth engine, or audible test will be started.\n'
 printf 'Starter loops: %s\n' "$LOOP_INBOX"
 
+configure_exclusive_midi_services
 choose_note_names
 
 sample_rate=48000

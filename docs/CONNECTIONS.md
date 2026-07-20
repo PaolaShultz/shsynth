@@ -38,6 +38,11 @@ Do not also connect the controller directly to the same synth with a desktop
 MIDI patching tool. Two paths can cause doubled notes. Use `shr-setup` or the
 configuration files to choose the route in one place.
 
+Some distributions enable a standalone FluidSynth daemon or `amidiminder`,
+which connects hardware and application MIDI ports broadly. Accept the
+recommended exclusive-routing cleanup in `shr-setup`; SHR can still launch its
+own configured FluidSynth when selected.
+
 ## Software instruments
 
 SHR-DAW supports synthv1, Yoshimi, and FluidSynth as separately installed

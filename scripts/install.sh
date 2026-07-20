@@ -23,9 +23,19 @@ if $INSTALL_DEPS; then
     exit 1
   }
   sudo apt-get update
-  sudo apt-get install -y \
+  sudo apt-get install -y --no-install-recommends \
     alsa-utils build-essential ca-certificates curl jackd2 libasound2-dev \
     fluidsynth pkg-config python3 sox synthv1 timgm6mb-soundfont unzip yoshimi yoshimi-data
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user daemon-reload
+    systemctl --user mask --now fluidsynth.service
+    [[ "$(systemctl --user is-enabled fluidsynth.service 2>/dev/null || true)" == masked ]] || {
+      printf 'Could not verify the per-user FluidSynth service mask.\n' >&2
+      exit 1
+    }
+    printf '%s\n' \
+      'Masked the standalone FluidSynth service; SHR can still start FluidSynth on demand.'
+  fi
 fi
 
 version_ok() {

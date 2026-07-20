@@ -37,6 +37,12 @@ audio, WAV loops, effects, and live recording require a running JACK server;
 SHR-DAW never starts or restarts it implicitly. Continue with
 [First run](docs/FIRST_RUN.md).
 
+During interactive setup, accept the recommended exclusive-routing cleanup.
+It prevents distribution FluidSynth and automatic MIDI-patching services from
+loading a background sound bank, doubling notes, or connecting unintended
+devices. FluidSynth remains available and is started only when SHR loads one of
+its sounds.
+
 ## At a glance
 
 - Browse synthv1, Yoshimi, and FluidSynth sounds without layering managed

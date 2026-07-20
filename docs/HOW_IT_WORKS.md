@@ -127,6 +127,13 @@ records enough process identity to stop only the engine it started. It neither
 layers managed engines nor kills an unrelated synthv1, Yoshimi, or FluidSynth
 process opened by the user.
 
+SHR's FluidSynth process uses JACK audio, ALSA sequencer MIDI, and its piped
+command input; it does not open FluidSynth's TCP server. Interactive setup also
+offers to mask the distribution's always-running FluidSynth unit and blanket
+`amidiminder` patcher. This keeps a controller from reaching the same synth or
+hardware destination through an unowned background route while leaving all
+three engines available on demand.
+
 Commands, client names, preset roots, SoundFonts, MIDI ports, and JACK ports
 are configuration. The engine code does not assume the development hardware.
 The three catalogs also remain separate: a synthv1 XML preset is not treated as

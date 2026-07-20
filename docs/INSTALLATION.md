@@ -28,7 +28,10 @@ From the project directory, run:
 The installer:
 
 - installs build, JACK, and ALSA tools;
-- installs synthv1, Yoshimi, FluidSynth, and a small default SoundFont;
+- installs synthv1, Yoshimi, FluidSynth, and the small TimGM SoundFont without
+  recommended desktop frontends or the much larger FluidR3 bank;
+- stops and masks the package-enabled per-user FluidSynth daemon while leaving
+  the FluidSynth executable available to SHR;
 - installs/selects the official Rust 1.85 toolchain when the current Cargo is
   older, runs the locked tests, and builds the locked release version;
 - installs commands, templates, the 21 allowlisted presets, four allowlisted
@@ -36,6 +39,25 @@ The installer:
   device/controller profiles, drum data, documentation, and
   all 80 menu-manual images below the selected prefix (normally `/usr/local`);
 - opens the routing wizard.
+
+The dependency installer always masks the exact per-user `fluidsynth.service`
+that its package enables. At the start of interactive routing, setup checks that
+mask and detects the system-wide `amidiminder.service` blanket MIDI patcher.
+When either known conflict remains, the recommended choice stops and masks only
+those exact units. It does not uninstall FluidSynth, stop JACK, disconnect
+arbitrary routes, or prevent SHR from launching its own FluidSynth process when
+a SoundFont sound is loaded. The prompt is skipped when both units are absent or
+already masked.
+
+To deliberately restore those distribution services later:
+
+```sh
+systemctl --user unmask fluidsynth.service
+sudo systemctl unmask amidiminder.service
+```
+
+Unmasking permits them to run again; start or enable them separately only when
+their automatic audio/MIDI behavior is actually wanted.
 
 Use `--no-deps` to keep the installer from installing system packages. Use
 `--no-config` to skip the routing wizard:

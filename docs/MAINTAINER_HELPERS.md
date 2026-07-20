@@ -15,8 +15,8 @@ assumptions.
 |---|---|---|
 | `setup-local.sh` | Configure this checkout inside ignored private storage | Writes below `user/` by default; may run the interactive hardware wizard |
 | `local.sh` | Run the checkout without using normal home-directory state | Writes runtime data below `user/` by default |
-| `setup.sh` / installed `shr-setup` | Seed loops/demos and configure display/MIDI/JACK choices | Backs up and rewrites owned configuration; optionally downloads private loops, writes `~/.jackdrc`, and installs CPU tuning after confirmation |
-| `install.sh` | Install dependencies and SHR-DAW on Debian/Raspberry Pi OS | May use `sudo apt-get`, rustup, `sudo make install-files`, and the setup wizard |
+| `setup.sh` / installed `shr-setup` | Seed loops/demos and configure display/MIDI/JACK choices | Backs up and rewrites owned configuration; optionally masks two conflicting auto-services, downloads private loops, writes `~/.jackdrc`, and installs CPU tuning after confirmation |
+| `install.sh` | Install dependencies and SHR-DAW on Debian/Raspberry Pi OS | May use `sudo apt-get --no-install-recommends`, rustup, `sudo make install-files`, and the setup wizard |
 | `audio-performance.sh` / installed `shr-audio-tune` | Reversibly reserve one CPU for audio | Manages specific boot, systemd, governor, and JACK-affinity settings; requires reboot for isolation |
 | `render-readme-screenshots.py` | Regenerate or validate real TUI documentation images | Writes tracked PNGs below `docs/images/` only |
 | `generate_cleared_presets.sh` | Reproduce the authored public synthv1 bank | Creates named preset files only when they do not already exist |
@@ -192,22 +192,25 @@ download, or hardware choices in automation.
 Before changing configuration, the wizard creates unique timestamped backups of
 both `shsynth.conf` and `controller.conf`. It then:
 
-1. asks whether note names use English `B` or German `H`/`B` spelling;
-2. optionally selects an ALSA interface and writes a backed-up `~/.jackdrc` for
+1. when present and not already masked, offers the recommended exclusive-MIDI
+   cleanup for exactly the per-user `fluidsynth.service` and system
+   `amidiminder.service`;
+2. asks whether note names use English `B` or German `H`/`B` spelling;
+3. optionally selects an ALSA interface and writes a backed-up `~/.jackdrc` for
    the user's next manual JACK restart;
-3. selects the controller input and writes the same exact match to runtime and
+4. selects the controller input and writes the same exact match to runtime and
    controller configuration, or explicitly keeps keyboard-only operation;
-4. runs non-audible `shr pads auto`, optionally followed by `shr pads learn` if
+5. runs non-audible `shr pads auto`, optionally followed by `shr pads learn` if
    no reviewed profile matches;
-5. discovers physical JACK playback ports, writes the same preferred stereo
+6. discovers physical JACK playback ports, writes the same preferred stereo
    pair for synth and loop playback, then optionally records a named internal
    fallback and a distinct final analogue-headphone fallback;
-6. optionally downloads four MusicRadar 80s drum beats, converts them to the
+7. optionally downloads four MusicRadar 80s drum beats, converts them to the
    chosen WAV rate with SoX, and records their source/redistribution terms;
-7. optionally configures a distinct stereo capture pair and label;
-8. optionally configures an external MIDI destination and data-driven device
+8. optionally configures a distinct stereo capture pair and label;
+9. optionally configures an external MIDI destination and data-driven device
    profile;
-9. on systems with at least four CPUs, optionally invokes `shr-audio-tune` and
+10. on systems with at least four CPUs, optionally invokes `shr-audio-tune` and
    records the selected engine CPU.
 
 ### Design decisions
@@ -226,6 +229,14 @@ both `shsynth.conf` and `controller.conf`. It then:
 - The wizard may write `~/.jackdrc` only after an explicit opt-in and backup.
   It never starts or restarts JACK because doing that during a live session can
   interrupt or produce audible output.
+- The exclusive-routing prompt defaults to yes but remains explicit because
+  `amidiminder` is a system-wide service that another application might use.
+  It stops and persistently masks only `fluidsynth.service` and
+  `amidiminder.service`, verifies both masks, and leaves packages, SoundFonts,
+  JACK, unrelated synths, and arbitrary ALSA subscriptions untouched. The user
+  FluidSynth mask does not prevent SHR from executing the binary directly.
+  Restore with `systemctl --user unmask fluidsynth.service` and
+  `sudo systemctl unmask amidiminder.service`; setup does not start either unit.
 - Controller learning is non-audible: learned MIDI is not forwarded to a synth.
 - Existing configuration is backed up rather than silently discarded.
 - Hardware discovery never overwrites a remembered route merely because that
@@ -256,10 +267,13 @@ Options:
 - `-h`, `--help` prints usage.
 
 With dependencies enabled, it requires a Debian-style `apt-get` system and uses
-`sudo` to install the build toolchain, ALSA/JACK utilities and headers, SoX and
-unzip for optional loop installation, Python 3 for demo validation/seeding, the
-three supported software instruments,
-and their packaged data. It requires
+`sudo` with `--no-install-recommends` to install the build toolchain, ALSA/JACK
+utilities and headers, SoX and unzip for optional loop installation, Python 3
+for demo validation/seeding, the three supported software instruments, and
+their explicitly named packaged data. Avoiding recommendations is deliberate:
+the FluidSynth CLI recommends Qsynth, which in turn recommends the roughly
+142 MiB FluidR3 GM bank, while SHR explicitly installs and configures the much
+smaller TimGM bank. It requires
 Rust 1.85 or newer; when necessary it installs the official minimal rustup
 toolchain for the current user and runs Cargo as `cargo +1.85.0`.
 
@@ -274,9 +288,17 @@ test/build. Dependencies are installed rather than quietly skipping parts of
 the application. `--no-deps` and `--no-config` exist for maintainers and package
 builders who have already satisfied those responsibilities.
 
-The installer does not start JACK or any synth. Package installation may enable
-distribution services according to the OS packages, but SHR-DAW itself does
-not assume that the audio interface is connected or safe to restart.
+Immediately after dependency installation, the installer reloads the current
+user manager, stops and masks the exact package-enabled `fluidsynth.service`,
+and verifies the persistent mask. This is not optional because an unowned
+FluidSynth can load a large bank, open audio and MIDI devices, and layer with
+SHR. The mask does not prevent direct execution of the FluidSynth binary.
+
+The installer does not start JACK or a synth. The normal interactive setup that
+follows detects and offers to mask `amidiminder` before hardware routing. A
+non-interactive setup or `--no-config` makes no additional system-wide service
+change; package builders and automated installers must establish their intended
+MIDI auto-patching policy separately.
 
 ## Audio CPU tuning: `audio-performance.sh` / `shr-audio-tune`
 

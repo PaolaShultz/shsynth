@@ -855,7 +855,6 @@ fn backend_command(preset: &Preset, state: &Path, config: &RuntimeConfig) -> Res
             command.args([
                 "--audio-driver=jack",
                 "--midi-driver=alsa_seq",
-                "--server",
                 "--portname",
                 &backend.client_name,
                 "-o",
@@ -2125,6 +2124,31 @@ mod tests {
             fluidsynth_selection(&preset, &[(path, 256)]).unwrap(),
             (258, 9)
         );
+    }
+
+    #[test]
+    fn managed_fluidsynth_uses_jack_without_a_tcp_server() {
+        let preset = Preset {
+            backend: BackendKind::FluidSynth,
+            name: "Program".into(),
+            category: None,
+            id: PresetId::FluidSynth {
+                soundfont: PathBuf::from("configured.sf2"),
+                soundfont_index: 0,
+                bank: 0,
+                program: 0,
+            },
+        };
+        let config = RuntimeConfig::default();
+        let command = backend_command(&preset, Path::new("/tmp/shr-state"), &config).unwrap();
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.iter().any(|arg| arg == "--audio-driver=jack"));
+        assert!(args.iter().any(|arg| arg == "--midi-driver=alsa_seq"));
+        assert!(args.iter().any(|arg| arg == "--load-config"));
+        assert!(!args.iter().any(|arg| arg == "--server"));
     }
 
     #[test]

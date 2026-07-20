@@ -237,6 +237,24 @@ engine ownership and shutdown behavior. The repository helpers above are
 intentionally development/local-checkout commands. The `shsynth` state, data,
 configuration, and shared-data paths remain unchanged for compatibility.
 
+The dependency install deliberately uses `--no-install-recommends`: the
+FluidSynth CLI's Qsynth recommendation otherwise pulls in the roughly 142 MiB
+FluidR3 GM bank despite SHR explicitly using the small TimGM bank. Interactive
+setup offers a recommended exclusive-routing cleanup when needed. It stops and
+masks only the per-user distribution `fluidsynth.service` and system
+`amidiminder.service`, preserving the FluidSynth binary for SHR's owned
+on-demand JACK process. The managed FluidSynth command uses its piped shell and
+does not enable the unused TCP server. Dependency installation always applies
+and verifies the per-user FluidSynth mask; non-interactive setup makes no
+additional system-wide service-policy change.
+
+On the current Pi, `/home/patch/.config/systemd/user/fluidsynth.service` and
+`/etc/systemd/system/amidiminder.service` are persistent `/dev/null` masks. The
+unowned daemon and blanket MIDI patcher are stopped, TCP port 9800 is closed,
+and the auto-installed `fluid-soundfont-gm` and Qsynth packages were purged
+without running `autoremove`. `/usr/bin/fluidsynth` and the 5.7 MiB TimGM bank
+remain for SHR's managed on-demand engine. JACK was not restarted.
+
 The controller menu uses a four-page spatial contract on every screen and
 modal context: page 1 is `OPS`; on child screens and editors, `EXIT` is always
 page 4/item 4 and returns one level. MIDI never quits the application. Empty
