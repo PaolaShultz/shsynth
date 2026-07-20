@@ -24,6 +24,11 @@ instrument and its settings decide how strongly that velocity changes sound.
 Recognized major triads use the explicit `maj` label, such as `C maj`, so the
 display does not rely on an omitted suffix to teach the chord quality.
 
+The loaded standalone instrument belongs to the Software Synth workspace.
+Moving between Presets and Playback keeps it running; leaving Presets for Home
+sends All Notes Off and unloads it. FT2 has separate Pattern-owned synth routing
+and never treats this last standalone selection as its instrument.
+
 ## Screens
 
 - **Home** is the startup and navigation root. Turn the master rotary or use

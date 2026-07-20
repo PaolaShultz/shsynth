@@ -14,6 +14,10 @@ encoder, use the arrow keys, or use the mouse wheel to choose a sound. Loading r
 instrument; it never layers engines. synthv1, Yoshimi, and FluidSynth remain
 separate catalogs selected with the Engine page.
 
+Presets and Playback form one Software Synth workspace, so moving between them
+does not reload the sound. Exiting top-level Presets to Home sends All Notes Off
+and unloads only that SHR-owned engine. FT2 does not inherit the selection.
+
 ### OPS — browse and load
 
 ![Populated Presets screen with the OPS controller page](../images/menu/presets-ops.png)

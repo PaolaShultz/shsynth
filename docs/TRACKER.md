@@ -6,17 +6,19 @@ It does not use FT2 code or read XM files.
 
 ## Modes
 
-The normal FT2 screen has a prominent **MODE** controller page. **PLAY** is
-normal performance and playback, **REC** enters the existing hardware-only
-real-time workflow, **EDIT** enters step editing, and **N00B** constrains live
-FT2 MIDI input to a selected root and scale.
+The normal FT2 screen has **PLAY**, hardware-only **REC**, detailed **EDIT**,
+and beginner **N00B** modes. N00B keeps the selected page as the instrument and
+uses one visible musical length: `1/1`, `1/2`, `1/4`, `1/8`, `1/16`, or
+`1/32`. It starts at `1/16`. Choose **LENGTH**, turn the rotary, and click to
+confirm. Note entry writes both the note and its end, then moves to the next
+insertion row. `1/32` uses the existing half-row gate; the longer values use
+the existing row grid and explicit note-off cells. No second timing system or
+new Project format is involved.
 
-N00B supports every chromatic root plus major and natural minor, including
-compact choices such as D# minor. Incoming notes map to the nearest scale tone;
-equal-distance ties map downward, preserving octave position as closely as
-possible. Each output is remembered by input channel/note, including repeated
-notes, so note-off, velocity-zero note-on, mode changes, stop, panic, and exit
-release the note actually played. Command pads remain consumed.
+N00B also keeps page/track selection, delete, note-off, play, save, files, and
+one-level Exit close at hand. **NORMAL** returns to the detailed tracker
+controls. Switching modes never changes existing cells. Command pads and their
+releases remain consumed; ordinary musical MIDI remains musical input.
 
 ## Projects, patterns, and arrangement
 
@@ -27,15 +29,33 @@ the same pattern until you explicitly clone or paste a new pattern.
 
 Each FT2 Pattern owns its own rows, meter, master tempo, pages, page targets,
 per-column MIDI channels/banks/programs, velocity defaults, mutes, percussion
-settings, lane settings, and cell data. A new Project starts with one pattern containing
-portable `MELODY` and `DRUMS` pages, and more pages can be added per pattern.
+settings, lane settings, and cell data. A new Project starts with one pattern
+containing three four-track pages:
+
+1. `Software Synth`, using the first available synthv1 preset;
+2. `MIDI`, using the configured external output, MIDI channel 1, and program 1;
+3. `Drums`, using the configured external output, MIDI channel 10, program 1,
+   and the existing percussion-note mapping.
+
+Channels and programs are zero-based in MIDI bytes and in the in-memory model.
+Every musician-facing screen shows channels 1–16 and programs 1–128.
 
 Each page keeps one MIDI target plus four independent column channel, bank, and
 master-program setups. It also keeps velocity, mute, percussion, and lane
-settings. Columns may share a destination/channel only when their master bank
+settings. A synthv1 target stores its portable preset name in the Pattern; it
+never borrows the sound last chosen in the standalone Software Synth workspace.
+Columns may share a destination/channel only when their master bank
 and program match, because MIDI program selection is channel-wide. Pages play
-together, so one pattern can control several hardware instruments and the
-active SHR-DAW software instrument.
+together, so one pattern can control several hardware instruments and its
+Pattern-owned SHR-DAW software instrument. Because SHR owns only one synth host
+at a time, playback refuses an Arrangement that would require two different
+synthv1 presets instead of sending both through the wrong sound.
+
+Computer-keyboard notes and ordinary incoming musical MIDI audition the
+selected page's target, channel, program, and drum mapping throughout the FT2
+workspace. Changing page, track route, preset, channel, program, or destination
+first ends notes on the old route. Leaving top-level FT2 ends notes and unloads
+its owned synth; child editors return to FT2.
 
 `AUTO · machine default` is a real portable target. Its saved channel, bank,
 program, and setup fields are blank; at playback the machine's configured
@@ -79,7 +99,8 @@ A cell contains:
 - a blank, MIDI note 0–127, or note-off;
 - an inherited gate or a gate from 1–100% of one row;
 - inherited velocity or MIDI velocity 0–127;
-- inherited program or a MIDI program override from 0–127;
+- inherited program or a MIDI program override stored as 0–127 and shown as
+  instrument/program 1–128;
 - one optional command: cut or delay tick 0–15, retrigger count 1–8, or tempo
   20–300 BPM.
 
@@ -90,7 +111,7 @@ in the draft and show an error.
 
 Choosing **PROGRAM** opens a full-height sound browser. A matching MIDI device
 profile adds the instrument's slot labels and sound names. Without a profile,
-all MIDI program numbers 0–127 remain available. Controller notes audition the
+all MIDI programs 1–128 remain available. Controller notes audition the
 draft sound on that page's exact target and selected-column channel. Confirm
 keeps the cell override without changing the column master; cancel restores
 the previous value and selection.
@@ -103,8 +124,8 @@ lane auditions through that column's channel/instrument setup. During
 recording, those notes do not also pass to the loaded software synth. They are
 auditioned only through the page's hardware MIDI target and column channels.
 
-Real-time recording is hardware-page-only. A page targeting the active SHR-DAW
-instrument, or an `AUTO`/preferred page currently resolved to the internal
+Real-time recording is hardware-page-only. A page targeting a Pattern-owned
+synthv1 preset, or an `AUTO`/preferred page currently resolved to the internal
 instrument, cannot enter **REC**. Choose an available hardware MIDI output
 first. **REC END**, **STOP**, **EXIT**, and **PANIC** release auditioned notes.
 
@@ -225,11 +246,23 @@ Projects are readable `.shsong` text files stored below
 `${XDG_DATA_HOME:-~/.local/share}/shsynth/songs/`. Current Project format 4
 stores each Pattern's tempo, meter, pages, four column setups, lanes, setup
 messages, cells, source insert rack, two aux routes, and master rack. Portable
-pages use explicit `default` markers rather than numeric routing. Versions
-0 and 1 gain empty effects routing; version 2 retains its source rack and gains
+pages use explicit `default` markers rather than numeric routing, and
+Pattern-owned synth pages use a portable `synthv1:<preset name>` target.
+Versions 0 and 1 gain empty effects routing; version 2 retains its source rack and gains
 empty aux/master routing. Format 3 routes stay explicit. Version 0 page-wide setups copy the old
 channel/bank/program into all four columns. Unknown newer versions, fields, or
-invalid effect shapes are not loaded or overwritten.
+invalid effect shapes are not loaded or overwritten. Older
+`ActiveInstrument` routes are assigned the first available synthv1 preset in
+memory and are not rewritten until the musician explicitly saves the Project.
+
+If an empty Pattern's routing differs from the current new-Pattern template,
+**SAVE** asks: “Save this routing as the default for new patterns?” Confirming
+updates the private template; cancelling saves the Project but keeps the old
+template. A Pattern with notes never changes that template implicitly, and no
+prompt appears when routing is unchanged. The template is stored outside the
+repository at
+`${XDG_DATA_HOME:-~/.local/share}/shsynth/ft2-routing-defaults.shsong` and is
+used by every subsequently created Project or Pattern.
 
 ## Cleared demo songs
 

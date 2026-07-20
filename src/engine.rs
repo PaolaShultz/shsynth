@@ -67,7 +67,6 @@ pub struct TrackerRouteConfig<'a> {
     pub start_column: usize,
     pub percussion: bool,
     pub audition_note: Option<u8>,
-    pub scale: Option<crate::scale::Scale>,
     pub external: &'a crate::config::ExternalMidiConfig,
 }
 
@@ -79,7 +78,6 @@ pub struct TrackerRoute {
     start_column: usize,
     note_map: [u8; 128],
     bank_select: crate::config::BankSelectMode,
-    scale: Option<crate::scale::Scale>,
     revision: u64,
 }
 
@@ -111,7 +109,6 @@ impl Default for TrackerRoute {
             start_column: 0,
             note_map: std::array::from_fn(|note| note as u8),
             bank_select: crate::config::BankSelectMode::Off,
-            scale: None,
             revision: 0,
         }
     }
@@ -121,12 +118,18 @@ impl TrackerRoute {
     pub fn configure(&mut self, config: TrackerRouteConfig<'_>) {
         self.revision = self.revision.wrapping_add(1);
         self.enabled = config.enabled;
+        let software_synth = matches!(
+            &config.target,
+            crate::sequencer::PageTarget::ActiveInstrument
+                | crate::sequencer::PageTarget::Synthv1(_)
+        );
         self.target = config.target;
         self.columns = config
             .columns
             .map(|(channel, selection)| TrackerColumnRoute {
                 channel,
-                program: config.external.program_changes.then_some(selection.0),
+                program: (config.external.program_changes && !software_synth)
+                    .then_some(selection.0),
                 bank_msb: selection.1,
                 bank_lsb: selection.2,
             });
@@ -134,7 +137,6 @@ impl TrackerRoute {
             .start_column
             .min(crate::sequencer::LANES_PER_PAGE - 1);
         self.note_map = std::array::from_fn(|note| note as u8);
-        self.scale = config.scale;
         self.bank_select = config.external.bank_select;
         if config.percussion {
             if let Some(note) = config.audition_note {
@@ -146,11 +148,6 @@ impl TrackerRoute {
                 }
             }
         }
-        if let Some(scale) = self.scale.filter(|_| !config.percussion) {
-            for note in &mut self.note_map {
-                *note = scale.map(*note);
-            }
-        }
     }
 
     fn mapped_note(&self, note: u8) -> Option<u8> {
@@ -159,6 +156,15 @@ impl TrackerRoute {
 
     fn column(&self, index: usize) -> TrackerColumnRoute {
         self.columns[index % crate::sequencer::LANES_PER_PAGE]
+    }
+
+    pub(crate) fn destinations(&self) -> Vec<(crate::sequencer::PageTarget, u8)> {
+        self.columns
+            .iter()
+            .map(|column| (self.target.clone(), column.channel))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     #[cfg(test)]
@@ -1001,7 +1007,7 @@ fn connect_midi_input(
     let output2 = Arc::clone(&output);
     let mut pad_locked = false;
     let mut lock_pressed = false;
-    let mut preview_notes = crate::scale::NoteLifecycle::default();
+    let mut preview_notes = crate::note_lifecycle::NoteLifecycle::default();
     let mut preview_next_column = 0usize;
     let mut preview_programs = std::collections::BTreeMap::new();
     let mut locked_pad_notes = std::collections::HashMap::new();
@@ -1838,7 +1844,6 @@ mod tests {
             start_column: 0,
             percussion: true,
             audition_note: None,
-            scale: None,
             external: &config,
         });
         assert!(route.enabled);
@@ -1863,32 +1868,9 @@ mod tests {
             start_column: 0,
             percussion: true,
             audition_note: None,
-            scale: None,
             external: &config,
         });
         assert!(!tracker_edit_consumes_note(Some(&route), &[0x90, 60, 100]));
-    }
-
-    #[test]
-    fn noob_route_applies_scale_only_to_melodic_pages() {
-        let config = RuntimeConfig::default().external_midi;
-        let scale = crate::scale::Scale {
-            root: 3,
-            kind: crate::scale::ScaleKind::NaturalMinor,
-        };
-        let mut route = TrackerRoute::default();
-        route.configure(TrackerRouteConfig {
-            enabled: true,
-            target: crate::sequencer::PageTarget::ConfiguredExternal,
-            columns: [(4, (0, 0, 0)); crate::sequencer::LANES_PER_PAGE],
-            start_column: 0,
-            percussion: false,
-            audition_note: None,
-            scale: Some(scale),
-            external: &config,
-        });
-        assert_eq!(route.mapped_note(64), Some(scale.map(64)));
-        assert_eq!(route.mapped_note(127), Some(126));
     }
 
     #[test]
@@ -1902,12 +1884,51 @@ mod tests {
             start_column: 0,
             percussion: true,
             audition_note: Some(42),
-            scale: None,
             external: &config,
         });
         assert_eq!(route.mapped_note(36), Some(42));
         assert_eq!(route.mapped_note(60), Some(42));
         assert_eq!(route.mapped_note(96), Some(42));
+    }
+
+    #[test]
+    fn live_route_switch_exposes_the_exact_old_route_for_note_cleanup() {
+        let config = RuntimeConfig::default().external_midi;
+        let mut route = TrackerRoute::default();
+        route.configure(TrackerRouteConfig {
+            enabled: true,
+            target: crate::sequencer::PageTarget::Synthv1("Pattern Sound".into()),
+            columns: [(0, (0, 0, 0)); crate::sequencer::LANES_PER_PAGE],
+            start_column: 0,
+            percussion: false,
+            audition_note: None,
+            external: &config,
+        });
+        assert_eq!(
+            route.destinations(),
+            vec![(
+                crate::sequencer::PageTarget::Synthv1("Pattern Sound".into()),
+                0
+            )]
+        );
+        assert_eq!(route.preview_state().1, None);
+
+        let old = route.destinations();
+        route.configure(TrackerRouteConfig {
+            enabled: true,
+            target: crate::sequencer::PageTarget::ConfiguredExternal,
+            columns: [(5, (8, 0, 0)); crate::sequencer::LANES_PER_PAGE],
+            start_column: 0,
+            percussion: false,
+            audition_note: None,
+            external: &config,
+        });
+        assert_eq!(old[0].1, 0);
+        assert_eq!(
+            route.destinations(),
+            vec![(crate::sequencer::PageTarget::ConfiguredExternal, 5)]
+        );
+        assert_eq!(route.preview_state().1, Some(8));
     }
 
     #[test]

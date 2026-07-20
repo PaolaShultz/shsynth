@@ -20,11 +20,10 @@ use crate::performance_meter::{
 };
 use crate::preset::{BackendKind, Catalog, Preset};
 use crate::recording::{self, Recorder, TimedEvent};
-use crate::scale::{Scale, ScaleKind};
 use crate::sequencer::{
     self, Cell, Command, GestureCapture, Note, PageTarget, Song, LANES_PER_PAGE,
 };
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, MouseButton, MouseEvent, MouseEventKind},
     execute,
@@ -291,6 +290,74 @@ enum TrackerMode {
     Noob,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NoobLength {
+    Whole,
+    Half,
+    Quarter,
+    Eighth,
+    Sixteenth,
+    ThirtySecond,
+}
+
+impl Default for NoobLength {
+    fn default() -> Self {
+        Self::Sixteenth
+    }
+}
+
+impl NoobLength {
+    const ALL: [Self; 6] = [
+        Self::Whole,
+        Self::Half,
+        Self::Quarter,
+        Self::Eighth,
+        Self::Sixteenth,
+        Self::ThirtySecond,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Whole => "1/1",
+            Self::Half => "1/2",
+            Self::Quarter => "1/4",
+            Self::Eighth => "1/8",
+            Self::Sixteenth => "1/16",
+            Self::ThirtySecond => "1/32",
+        }
+    }
+
+    const fn denominator(self) -> usize {
+        match self {
+            Self::Whole => 1,
+            Self::Half => 2,
+            Self::Quarter => 4,
+            Self::Eighth => 8,
+            Self::Sixteenth => 16,
+            Self::ThirtySecond => 32,
+        }
+    }
+
+    fn turn(self, direction: i8) -> Self {
+        let current = Self::ALL
+            .iter()
+            .position(|length| *length == self)
+            .unwrap_or(4);
+        let next = if direction < 0 {
+            current.saturating_sub(1)
+        } else {
+            (current + 1).min(Self::ALL.len() - 1)
+        };
+        Self::ALL[next]
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum EngineOwner {
+    SoftwareSynth,
+    Tracker(String),
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum IdeaMode {
     #[default]
@@ -351,17 +418,6 @@ const HOME_ENTRIES: [HomeEntry; 9] = [
     },
 ];
 
-impl TrackerMode {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Play => "PLAY",
-            Self::Rec => "REC",
-            Self::Edit => "EDIT",
-            Self::Noob => "N00B",
-        }
-    }
-}
-
 struct App {
     catalogs: Vec<Catalog>,
     backend_index: usize,
@@ -372,6 +428,8 @@ struct App {
     home_offset: usize,
     screen: Screen,
     engine: Option<Engine>,
+    engine_owner: Option<EngineOwner>,
+    engine_state: PathBuf,
     playing: Option<Preset>,
     values: HashMap<u8, f32>,
     original_values: HashMap<u8, f32>,
@@ -422,11 +480,14 @@ struct App {
     note_editor: Option<NoteEditor>,
     audition_release_revision: u64,
     tracker_octave: u8,
-    noob_scale: Scale,
-    noob_draft: Scale,
+    noob_length: NoobLength,
+    noob_length_draft: NoobLength,
     tracker_gesture: GestureCapture,
     tracker_gesture_anchor: Option<(usize, usize, usize, usize)>,
     confirm_song_save: Option<String>,
+    confirm_routing_defaults: bool,
+    routing_defaults: Vec<sequencer::Page>,
+    routing_defaults_path: PathBuf,
     confirm_new_project: bool,
     confirm_loop_remove: bool,
     confirm_song_delete: Option<String>,
@@ -556,6 +617,55 @@ struct AudioPorts {
     capture_sources: Vec<String>,
 }
 
+fn is_tracker_screen(screen: Screen) -> bool {
+    matches!(
+        screen,
+        Screen::Tracker
+            | Screen::TrackerFiles
+            | Screen::TrackerArrange
+            | Screen::TrackerPages
+            | Screen::TrackerTools
+            | Screen::TrackerNoob
+            | Screen::TrackerLoop
+            | Screen::TrackerLoopAlign
+    )
+}
+
+fn take_engine_when_owned<T>(
+    engine: &mut Option<T>,
+    owner: &mut Option<EngineOwner>,
+    matches: impl FnOnce(&EngineOwner) -> bool,
+) -> Option<T> {
+    if owner.as_ref().is_some_and(matches) {
+        *owner = None;
+        engine.take()
+    } else {
+        None
+    }
+}
+
+fn arrangement_synth_name(song: &Song, start_order: usize) -> Result<Option<String>> {
+    let names = song
+        .order
+        .iter()
+        .skip(start_order)
+        .filter_map(|number| song.patterns.get(number))
+        .flat_map(|pattern| pattern.pages.iter())
+        .filter(|page| page.enabled)
+        .filter_map(|page| match &page.target {
+            PageTarget::Synthv1(name) => Some(name.clone()),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    if names.len() > 1 {
+        bail!(
+            "arrangement uses multiple synth presets ({}) · play one preset per arrangement",
+            names.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+    Ok(names.into_iter().next())
+}
+
 fn first_letter_index<I, S>(items: I, letter: char) -> Option<usize>
 where
     I: IntoIterator<Item = S>,
@@ -579,6 +689,8 @@ impl App {
         tracker_io: TrackerIo,
         mut config: RuntimeConfig,
         audio_ports: AudioPorts,
+        engine_state: PathBuf,
+        routing_defaults_path: PathBuf,
     ) -> Self {
         let backend_index = catalogs
             .iter()
@@ -592,7 +704,22 @@ impl App {
         if let Some(profile) = device_profiles.by_id(&config.external_midi.profile) {
             profile.apply_midi_selection(&mut config.external_midi);
         }
-        let song = Song::new(&config.external_midi);
+        let first_synthv1 = catalogs
+            .iter()
+            .find(|catalog| catalog.backend == BackendKind::Synthv1)
+            .and_then(|catalog| catalog.presets.first())
+            .map(|preset| preset.name.as_str())
+            .unwrap_or("Unavailable synthv1 preset");
+        let factory_routing = sequencer::factory_routing_pages(first_synthv1);
+        let mut routing_defaults =
+            sequencer::load_routing_defaults(&routing_defaults_path, &factory_routing)
+                .unwrap_or(factory_routing);
+        for page in &mut routing_defaults {
+            if page.target == PageTarget::ActiveInstrument {
+                page.target = PageTarget::Synthv1(first_synthv1.to_owned());
+            }
+        }
+        let song = Song::new_with_pages(&config.external_midi, routing_defaults.clone());
         let transport_clock = Arc::new(crate::loop_player::TransportClock::new(
             &config.controller_clock,
             config.external_midi.default_tempo,
@@ -624,6 +751,8 @@ impl App {
             home_offset: 0,
             screen: Screen::Home,
             engine: None,
+            engine_owner: None,
+            engine_state,
             playing: None,
             values: HashMap::new(),
             original_values: HashMap::new(),
@@ -674,11 +803,14 @@ impl App {
             note_editor: None,
             audition_release_revision: 0,
             tracker_octave: 4,
-            noob_scale: Scale::default(),
-            noob_draft: Scale::default(),
+            noob_length: NoobLength::default(),
+            noob_length_draft: NoobLength::default(),
             tracker_gesture: GestureCapture::default(),
             tracker_gesture_anchor: None,
             confirm_song_save: None,
+            confirm_routing_defaults: false,
+            routing_defaults,
+            routing_defaults_path,
             confirm_new_project: false,
             confirm_loop_remove: false,
             confirm_song_delete: None,
@@ -908,7 +1040,9 @@ impl App {
     }
 
     fn menu_context(&self) -> MenuContext {
-        if self.screen == Screen::FxRack && self.fx_type_edit.is_some() {
+        if self.confirm_routing_defaults {
+            MenuContext::RoutingDefaults
+        } else if self.screen == Screen::FxRack && self.fx_type_edit.is_some() {
             MenuContext::FxType
         } else if self.screen == Screen::FxRack && self.selected_effect_id().is_none() {
             MenuContext::FxEmpty
@@ -918,6 +1052,8 @@ impl App {
             MenuContext::TrackerRecord
         } else if self.screen == Screen::Tracker && self.tracker_mode == TrackerMode::Edit {
             MenuContext::TrackerEdit
+        } else if self.screen == Screen::Tracker && self.tracker_mode == TrackerMode::Noob {
+            MenuContext::TrackerNoob
         } else if self.screen == Screen::TrackerFiles && self.confirm_pattern_clear {
             MenuContext::PatternClear
         } else if self.screen == Screen::TrackerFiles {
@@ -940,6 +1076,16 @@ impl App {
     }
 
     fn set_screen(&mut self, screen: Screen) {
+        let previous = self.screen;
+        let previous_tracker = is_tracker_screen(previous)
+            || (previous == Screen::Help && is_tracker_screen(self.help_previous));
+        let next_tracker =
+            is_tracker_screen(screen) || (screen == Screen::Help && previous_tracker);
+        let previous_software = matches!(previous, Screen::Presets | Screen::Playback)
+            || (previous == Screen::Help
+                && matches!(self.help_previous, Screen::Presets | Screen::Playback));
+        let next_software = matches!(screen, Screen::Presets | Screen::Playback)
+            || (screen == Screen::Help && previous_software);
         if self.screen != screen {
             if self.screen == Screen::TrackerFiles && self.song_previewing {
                 self.stop_song_preview();
@@ -952,6 +1098,134 @@ impl App {
             .store(screen == Screen::FxEditor, Ordering::Relaxed);
         if screen == Screen::FxEditor {
             self.arm_fx_pickup();
+        }
+        if previous != screen {
+            if previous_software && !next_software {
+                self.unload_owned_engine(|owner| *owner == EngineOwner::SoftwareSynth);
+            }
+            if previous_tracker && !next_tracker {
+                self.disable_tracker_route();
+                self.unload_owned_engine(|owner| matches!(owner, EngineOwner::Tracker(_)));
+            }
+            if !previous_tracker && next_tracker {
+                self.unload_owned_engine(|owner| *owner == EngineOwner::SoftwareSynth);
+                self.ensure_tracker_engine();
+            }
+        }
+    }
+
+    fn tracker_workspace_active(&self) -> bool {
+        is_tracker_screen(self.screen)
+            || (self.screen == Screen::Help && is_tracker_screen(self.help_previous))
+    }
+
+    fn unload_owned_engine(&mut self, matches: impl FnOnce(&EngineOwner) -> bool) {
+        if self.engine_owner.as_ref().is_some_and(matches) {
+            if let Some(engine) = self.engine.as_ref() {
+                engine.panic();
+            }
+            drop(take_engine_when_owned(
+                &mut self.engine,
+                &mut self.engine_owner,
+                |_| true,
+            ));
+            self.performance_meter
+                .set_audio_unavailable(AudioAvailability::Stopped);
+            self.playing = None;
+        }
+    }
+
+    fn disable_tracker_route(&self) {
+        if let Ok(mut route) = self.tracker_route.lock() {
+            let external = self.tracker_external_config();
+            route.configure(crate::engine::TrackerRouteConfig {
+                enabled: false,
+                target: PageTarget::ConfiguredExternal,
+                columns: [(0, (0, 0, 0)); LANES_PER_PAGE],
+                start_column: 0,
+                percussion: false,
+                audition_note: None,
+                external: &external,
+            });
+        }
+    }
+
+    fn tracker_synth_name(&self) -> Option<String> {
+        self.current_pattern()?
+            .pages
+            .iter()
+            .find_map(|page| match &page.target {
+                PageTarget::Synthv1(name) => Some(name.clone()),
+                _ => None,
+            })
+    }
+
+    fn synthv1_preset(&self, name: &str) -> Option<Preset> {
+        self.catalogs
+            .iter()
+            .find(|catalog| catalog.backend == BackendKind::Synthv1)?
+            .presets
+            .iter()
+            .find(|preset| preset.name == name)
+            .cloned()
+    }
+
+    fn first_synthv1_name(&self) -> Option<String> {
+        self.catalogs
+            .iter()
+            .find(|catalog| catalog.backend == BackendKind::Synthv1)?
+            .presets
+            .first()
+            .map(|preset| preset.name.clone())
+    }
+
+    fn ensure_tracker_engine(&mut self) -> bool {
+        let Some(name) = self.tracker_synth_name() else {
+            self.unload_owned_engine(|owner| matches!(owner, EngineOwner::Tracker(_)));
+            return true;
+        };
+        self.ensure_tracker_engine_for(&name)
+    }
+
+    fn ensure_tracker_engine_for(&mut self, name: &str) -> bool {
+        let same_owner = self
+            .engine_owner
+            .as_ref()
+            .is_some_and(|owner| owner == &EngineOwner::Tracker(name.to_owned()));
+        if same_owner && self.engine.as_mut().is_some_and(|engine| engine.alive()) {
+            return true;
+        }
+        let Some(preset) = self.synthv1_preset(name) else {
+            self.unload_owned_engine(|owner| matches!(owner, EngineOwner::Tracker(_)));
+            self.status = format!("FT2 synth preset missing · {name}");
+            return false;
+        };
+        self.release_tracker_audition();
+        if let Some(engine) = self.engine.as_ref() {
+            engine.panic();
+        }
+        self.engine.take();
+        self.engine_owner = None;
+        match Engine::start_with_routing(
+            &preset,
+            &self.engine_state,
+            Arc::clone(&self.midi_output),
+            &self.config,
+            &self.song.insert_rack,
+            &self.song.aux_routing,
+        ) {
+            Ok(engine) => {
+                self.engine = Some(engine);
+                self.engine_owner = Some(EngineOwner::Tracker(name.to_owned()));
+                if let Ok(mut backend) = self.midi_backend.lock() {
+                    *backend = BackendKind::Synthv1;
+                }
+                true
+            }
+            Err(error) => {
+                self.status = format!("FT2 SYNTH START FAILED: {error:#}");
+                false
+            }
         }
     }
 
@@ -1106,6 +1380,7 @@ impl App {
             }
         }
         self.engine.take();
+        self.engine_owner = None;
         self.performance_meter
             .set_audio_unavailable(AudioAvailability::Stopped);
         let _ = engine::stop_managed(state);
@@ -1258,11 +1533,10 @@ impl App {
             .is_some_and(|page| page.target == PageTarget::Default)
         {
             self.release_tracker_audition();
-            let target = if self.engine.is_some() {
-                PageTarget::ActiveInstrument
-            } else {
-                PageTarget::ConfiguredExternal
-            };
+            let target = self
+                .tracker_synth_name()
+                .map(PageTarget::Synthv1)
+                .unwrap_or(PageTarget::ConfiguredExternal);
             if let Some(page) = self.current_page_mut() {
                 page.target = target;
             }
@@ -1550,7 +1824,9 @@ impl App {
             NoteEditorField::Channel => self.current_page().map(|page| {
                 format!(
                     "MIDI channel {}",
-                    page.runtime_channel(self.tracker_track, &self.config.external_midi) + 1
+                    sequencer::musician_channel(
+                        page.runtime_channel(self.tracker_track, &self.config.external_midi)
+                    )
                 )
             }),
             NoteEditorField::DefaultProgram => Some(self.tracker_instrument_label()),
@@ -1712,14 +1988,14 @@ impl App {
         self.status = format!("ADD {rows} · note entry and delete advance {rows} row(s)");
     }
     fn tracker_skip(&mut self) {
-        if self.tracker_mode == TrackerMode::Edit {
+        if matches!(self.tracker_mode, TrackerMode::Edit | TrackerMode::Noob) {
             self.cancel_tracker_gesture();
             self.advance_tracker_row();
             self.status = format!("BLANK/SKIP · advanced {} row(s)", self.tracker_advance);
         }
     }
     fn tracker_erase(&mut self) {
-        if self.tracker_mode != TrackerMode::Edit {
+        if !matches!(self.tracker_mode, TrackerMode::Edit | TrackerMode::Noob) {
             return;
         }
         self.cancel_tracker_gesture();
@@ -1739,7 +2015,8 @@ impl App {
             for channel in page
                 .columns
                 .iter()
-                .map(|column| column.channel)
+                .enumerate()
+                .map(|(lane, _)| page.runtime_channel(lane, &self.config.external_midi))
                 .collect::<std::collections::BTreeSet<_>>()
             {
                 self.tracker_live_input.cancel(&page.target, channel);
@@ -1747,7 +2024,11 @@ impl App {
         }
     }
     fn tracker_single_note(&mut self, note: u8, velocity: u8) {
-        if self.tracker_mode != TrackerMode::Edit {
+        if !matches!(self.tracker_mode, TrackerMode::Edit | TrackerMode::Noob) {
+            return;
+        }
+        if self.tracker_mode == TrackerMode::Noob {
+            self.write_noob_notes(&[(note, velocity)]);
             return;
         }
         if let Some(cell) = self.tracker_cell_mut() {
@@ -1778,6 +2059,14 @@ impl App {
                 self.tracker_page,
                 self.tracker_track,
             ));
+        if self.tracker_mode == TrackerMode::Noob {
+            self.tracker_order = order;
+            self.tracker_row = row_index;
+            self.tracker_page = page_index;
+            self.tracker_track = first_lane;
+            self.write_noob_notes(&gesture.notes);
+            return;
+        }
         let pattern_number = self.song.order.get(order).copied().unwrap_or(0);
         if let Some(row) = self
             .song
@@ -1820,50 +2109,114 @@ impl App {
         self.sync_tracker_route();
     }
 
-    fn open_noob_setup(&mut self) {
+    fn toggle_noob_mode(&mut self) {
         self.tracker_stop();
-        self.noob_draft = self.noob_scale;
+        self.set_screen(Screen::Tracker);
+        let enabled = self.tracker_mode != TrackerMode::Noob;
+        self.set_tracker_mode(if enabled {
+            TrackerMode::Noob
+        } else {
+            TrackerMode::Play
+        });
+        self.status = if enabled {
+            format!(
+                "N00b Mode on · length {} · selected page owns the sound",
+                self.noob_length.label()
+            )
+        } else {
+            "N00b Mode off · normal tracker controls restored".into()
+        };
+    }
+
+    fn open_noob_length(&mut self) {
+        self.noob_length_draft = self.noob_length;
         self.set_screen(Screen::TrackerNoob);
         self.reset_context_page();
-        self.status = "choose root and MAJOR/MINOR · DONE enables N00B".into();
+        self.status = "NOTE LENGTH · turn encoder · press to confirm".into();
     }
 
-    fn adjust_noob_root(&mut self, direction: i8) {
-        self.noob_draft.root = if direction < 0 {
-            (self.noob_draft.root + 11) % 12
-        } else {
-            (self.noob_draft.root + 1) % 12
-        };
+    fn adjust_noob_length(&mut self, direction: i8) {
+        self.noob_length_draft = self.noob_length_draft.turn(direction);
         self.status = format!(
-            "N00B {} {}",
-            crate::scale::note_name(self.noob_draft.root),
-            self.noob_draft.kind.label()
+            "NOTE LENGTH {} · press to confirm",
+            self.noob_length_draft.label()
         );
     }
 
-    fn toggle_noob_scale(&mut self) {
-        self.noob_draft.kind = match self.noob_draft.kind {
-            ScaleKind::Major => ScaleKind::NaturalMinor,
-            ScaleKind::NaturalMinor => ScaleKind::Major,
-        };
-        self.status = format!(
-            "N00B {} {}",
-            crate::scale::note_name(self.noob_draft.root),
-            self.noob_draft.kind.label()
-        );
+    fn cancel_noob_length(&mut self) {
+        self.noob_length_draft = self.noob_length;
+        self.set_screen(Screen::Tracker);
+        self.status = format!("N00b length unchanged · {}", self.noob_length.label());
     }
 
-    fn confirm_noob(&mut self) {
-        self.noob_scale = self.noob_draft;
+    fn confirm_noob_length(&mut self) {
+        self.noob_length = self.noob_length_draft;
         self.set_screen(Screen::Tracker);
         self.set_tracker_mode(TrackerMode::Noob);
+        self.status = format!("N00b Mode · note length {}", self.noob_length.label());
+    }
+
+    fn noob_row_span_and_gate(&self) -> (usize, u8) {
+        let numerator = usize::from(self.song.steps_per_beat) * 4;
+        let denominator = self.noob_length.denominator();
+        if numerator < denominator {
+            return (1, ((numerator * 100) / denominator).clamp(1, 100) as u8);
+        }
+        (numerator.div_ceil(denominator).max(1), 100)
+    }
+
+    fn write_noob_notes(&mut self, notes: &[(u8, u8)]) {
+        let pattern_number = self.tracker_pattern_number();
+        let row_index = self.tracker_row;
+        let page_index = self.tracker_page;
+        let first_lane = self.tracker_track;
+        let (span, gate) = self.noob_row_span_and_gate();
+        let Some(pattern) = self.song.patterns.get_mut(&pattern_number) else {
+            return;
+        };
+        let page_start = page_index * LANES_PER_PAGE;
+        for (offset, (note, velocity)) in notes.iter().copied().enumerate() {
+            let lane = page_start + (first_lane + offset) % LANES_PER_PAGE;
+            if let Some(cell) = pattern
+                .rows
+                .get_mut(row_index)
+                .and_then(|row| row.get_mut(lane))
+            {
+                *cell = Cell {
+                    note: Note::On(note),
+                    velocity: Some(velocity),
+                    gate: Some(gate),
+                    ..Cell::default()
+                };
+            }
+            let end = row_index.saturating_add(span);
+            if gate == 100 && end < pattern.rows.len() {
+                if let Some(cell) = pattern.rows.get_mut(end).and_then(|row| row.get_mut(lane)) {
+                    if !matches!(cell.note, Note::On(_)) {
+                        cell.note = Note::Off;
+                        cell.velocity = None;
+                        cell.program = None;
+                        cell.gate = None;
+                        if matches!(cell.command, Command::Retrigger(_)) {
+                            cell.command = Command::None;
+                        }
+                    }
+                }
+            }
+        }
+        if !pattern.rows.is_empty() {
+            self.tracker_row = (row_index + span).min(pattern.rows.len() - 1);
+        }
         self.status = format!(
-            "N00B {} {} · nearest note, ties down",
-            crate::scale::note_name(self.noob_scale.root),
-            self.noob_scale.kind.label()
+            "N00b note entered · length {} · next row {:02X}",
+            self.noob_length.label(),
+            self.tracker_row
         );
     }
-    fn sync_tracker_route(&self) {
+    fn sync_tracker_route(&mut self) {
+        if self.tracker_workspace_active() {
+            self.ensure_tracker_engine();
+        }
         let Some(page) = self.current_page() else {
             return;
         };
@@ -1891,17 +2244,16 @@ impl App {
                 })
         });
         if let Ok(mut route) = self.tracker_route.lock() {
+            for (target, channel) in route.destinations() {
+                self.tracker_live_input.cancel(&target, channel);
+            }
             route.configure(crate::engine::TrackerRouteConfig {
-                enabled: self.screen == Screen::Tracker
-                    && (matches!(self.tracker_mode, TrackerMode::Edit | TrackerMode::Noob)
-                        || self.note_editor.is_some()
-                        || self.tracker_recording.is_some()),
+                enabled: self.tracker_workspace_active(),
                 target: page.target.clone(),
                 columns,
                 start_column: self.tracker_track,
                 percussion: page.percussion || columns[self.tracker_track].0 == 9,
                 audition_note,
-                scale: (self.tracker_mode == TrackerMode::Noob).then_some(self.noob_scale),
                 external: &external,
             });
         }
@@ -1922,7 +2274,7 @@ impl App {
                 .device_profiles
                 .by_id(&self.config.external_midi.profile),
             PageTarget::Midi(port) => self.device_profiles.matching_port(port),
-            PageTarget::ActiveInstrument => None,
+            PageTarget::ActiveInstrument | PageTarget::Synthv1(_) => None,
         }
     }
 
@@ -1940,7 +2292,7 @@ impl App {
             .unwrap_or_else(|| {
                 format!(
                     "GM {:03} {}",
-                    u16::from(program) + 1,
+                    sequencer::musician_program(program),
                     crate::gm::melodic_program(program)
                 )
             })
@@ -1970,7 +2322,6 @@ impl App {
         }
     }
 
-    #[cfg(test)]
     fn tracker_program_messages(&self, program: u8) -> Vec<Vec<u8>> {
         let external = self.tracker_external_config();
         if !external.program_changes {
@@ -1979,20 +2330,45 @@ impl App {
         let Some(page) = self.current_page() else {
             return Vec::new();
         };
+        if matches!(
+            page.target,
+            PageTarget::ActiveInstrument | PageTarget::Synthv1(_)
+        ) {
+            return Vec::new();
+        }
         let column = page.column(self.tracker_track);
+        let channel = page.runtime_channel(self.tracker_track, &self.config.external_midi);
         let mut messages = Vec::new();
         match external.bank_select {
             crate::config::BankSelectMode::Off => {}
             crate::config::BankSelectMode::Cc0 => {
-                messages.push(vec![0xb0 | column.channel, 0, column.bank_msb]);
+                messages.push(vec![0xb0 | channel, 0, column.bank_msb]);
             }
             crate::config::BankSelectMode::Cc0Cc32 => {
-                messages.push(vec![0xb0 | column.channel, 0, column.bank_msb]);
-                messages.push(vec![0xb0 | column.channel, 32, column.bank_lsb]);
+                messages.push(vec![0xb0 | channel, 0, column.bank_msb]);
+                messages.push(vec![0xb0 | channel, 32, column.bank_lsb]);
             }
         }
-        messages.push(vec![0xc0 | column.channel, program]);
+        messages.push(vec![0xc0 | channel, program]);
         messages
+    }
+
+    fn audition_keyboard_note(&self, note: u8, velocity: u8) {
+        let Some(page) = self.current_page() else {
+            return;
+        };
+        let target = page.target.clone();
+        let channel = page.runtime_channel(self.tracker_track, &self.config.external_midi);
+        for message in self.tracker_program_messages(page.column(self.tracker_track).program) {
+            self.tracker_live_input.send(&target, &message);
+        }
+        self.tracker_live_input
+            .send(&target, &[0x90 | channel, note, velocity]);
+        let input = self.tracker_live_input.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(180));
+            input.send(&target, &[0x80 | channel, note, 0]);
+        });
     }
     fn move_tracker_lane(&mut self, direction: i8) {
         let current = self.tracker_page * LANES_PER_PAGE + self.tracker_track;
@@ -2025,7 +2401,14 @@ impl App {
         self.move_tracker_page(1);
     }
     fn refresh_page_targets(&mut self) {
-        let mut targets = vec![PageTarget::Default, PageTarget::ActiveInstrument];
+        let mut targets = vec![PageTarget::Default];
+        targets.extend(
+            self.catalogs
+                .iter()
+                .filter(|catalog| catalog.backend == BackendKind::Synthv1)
+                .flat_map(|catalog| catalog.presets.iter())
+                .map(|preset| PageTarget::Synthv1(preset.name.clone())),
+        );
         if !self.config.external_midi.output_match.is_empty() {
             targets.push(PageTarget::ConfiguredExternal);
         }
@@ -2074,20 +2457,22 @@ impl App {
                         )
                         .is_ok())
             }
-            PageTarget::ActiveInstrument => self.engine.is_some(),
-            PageTarget::ConfiguredExternal => {
+            PageTarget::ActiveInstrument => false,
+            PageTarget::Synthv1(name) => {
                 self.engine.is_some()
-                    || (self.config.external_midi.enabled
-                        && sequencer::matching_output_index(
-                            &self.available_page_outputs,
-                            &self.config.external_midi.output_match,
-                            true,
-                        )
-                        .is_ok())
+                    && self.engine_owner.as_ref() == Some(&EngineOwner::Tracker(name.clone()))
+            }
+            PageTarget::ConfiguredExternal => {
+                self.config.external_midi.enabled
+                    && sequencer::matching_output_index(
+                        &self.available_page_outputs,
+                        &self.config.external_midi.output_match,
+                        true,
+                    )
+                    .is_ok()
             }
             PageTarget::Midi(name) => {
                 sequencer::matching_output_index(&self.available_page_outputs, name, false).is_ok()
-                    || self.engine.is_some()
                     || (self.config.external_midi.enabled
                         && sequencer::matching_output_index(
                             &self.available_page_outputs,
@@ -2100,7 +2485,7 @@ impl App {
     }
     fn target_has_hardware_route(&self, target: &PageTarget) -> bool {
         match target {
-            PageTarget::ActiveInstrument => false,
+            PageTarget::ActiveInstrument | PageTarget::Synthv1(_) => false,
             PageTarget::Default | PageTarget::ConfiguredExternal => {
                 self.config.external_midi.enabled
                     && sequencer::matching_output_index(
@@ -2128,7 +2513,8 @@ impl App {
         }
         match target {
             PageTarget::Default => "AUTO",
-            PageTarget::ActiveInstrument => "ONLINE",
+            PageTarget::ActiveInstrument => "LEGACY",
+            PageTarget::Synthv1(_) => "ONLINE",
             PageTarget::ConfiguredExternal => {
                 if self.config.external_midi.enabled
                     && sequencer::matching_output_index(
@@ -2140,7 +2526,7 @@ impl App {
                 {
                     "ONLINE"
                 } else {
-                    "FALLBACK"
+                    "OFFLINE"
                 }
             }
             PageTarget::Midi(name) => {
@@ -2193,12 +2579,14 @@ impl App {
         if self.page_manager_mode != PageManagerMode::Pages {
             return;
         }
+        self.release_tracker_audition();
         self.tracker_page = if direction < 0 {
             self.tracker_page.saturating_sub(1)
         } else {
             (self.tracker_page + 1).min(self.current_pages().len().saturating_sub(1))
         };
         self.refresh_page_targets();
+        self.sync_tracker_route();
     }
     fn add_tracker_page(&mut self) {
         if self.page_manager_mode != PageManagerMode::Pages {
@@ -2214,9 +2602,11 @@ impl App {
             .add_page_to_pattern(self.tracker_pattern_number(), target, channel)
         {
             Ok(page) => {
+                self.release_tracker_audition();
                 self.tracker_page = page;
                 self.tracker_track = 0;
                 self.refresh_page_targets();
+                self.sync_tracker_route();
                 self.status = "page added · four empty lanes · choose target/channel".into();
             }
             Err(error) => self.status = format!("add page: {error}"),
@@ -2262,6 +2652,7 @@ impl App {
         );
     }
     fn confirm_page_field(&mut self) {
+        self.release_tracker_audition();
         let mode = self.page_manager_mode;
         let selected_target = self
             .page_target_candidates
@@ -2288,6 +2679,7 @@ impl App {
         }
         self.page_manager_mode = PageManagerMode::Pages;
         self.reset_context_page();
+        self.sync_tracker_route();
         self.status = "page route updated · DONE to keep or CANCEL to restore".into();
     }
     fn cancel_page_field(&mut self) {
@@ -2402,6 +2794,15 @@ impl App {
                 "tracker has no notes from this position · enable EDIT and enter notes".into();
             return;
         }
+        match arrangement_synth_name(&self.song, order) {
+            Ok(Some(name)) if !self.ensure_tracker_engine_for(&name) => return,
+            Ok(Some(_)) => {}
+            Ok(None) => self.unload_owned_engine(|owner| matches!(owner, EngineOwner::Tracker(_))),
+            Err(error) => {
+                self.status = format!("tracker cannot play: {error}");
+                return;
+            }
+        }
         self.sequencer.play(&self.song, order, row);
         let offline = self
             .song
@@ -2508,7 +2909,8 @@ impl App {
             for channel in page
                 .columns
                 .iter()
-                .map(|column| column.channel)
+                .enumerate()
+                .map(|(lane, _)| page.runtime_channel(lane, &self.config.external_midi))
                 .collect::<std::collections::BTreeSet<_>>()
             {
                 self.tracker_live_input.cancel(&page.target, channel);
@@ -2936,6 +3338,52 @@ impl App {
         }
     }
     fn save_song(&mut self) {
+        if self.confirm_routing_defaults {
+            self.finish_routing_defaults_prompt(true);
+            return;
+        }
+        let should_ask = self.should_prompt_routing_defaults();
+        if should_ask {
+            self.confirm_routing_defaults = true;
+            self.reset_context_page();
+            self.status = "Save this routing as the default for new patterns?".into();
+            return;
+        }
+        self.save_song_file();
+    }
+
+    fn should_prompt_routing_defaults(&self) -> bool {
+        self.current_pattern().is_some_and(|pattern| {
+            !sequencer::pattern_has_note_events(pattern) && pattern.pages != self.routing_defaults
+        })
+    }
+
+    fn resolve_routing_defaults_choice(&mut self, confirm: bool) -> Result<()> {
+        self.confirm_routing_defaults = false;
+        if confirm {
+            let pages = self
+                .current_pattern()
+                .map(|pattern| pattern.pages.clone())
+                .context("current Pattern is unavailable")?;
+            sequencer::save_routing_defaults(&self.routing_defaults_path, &pages)?;
+            self.routing_defaults = pages;
+        }
+        self.reset_context_page();
+        Ok(())
+    }
+
+    fn finish_routing_defaults_prompt(&mut self, confirm: bool) {
+        if !self.confirm_routing_defaults {
+            return;
+        }
+        if let Err(error) = self.resolve_routing_defaults_choice(confirm) {
+            self.status = format!("routing defaults: {error}");
+            return;
+        }
+        self.save_song_file();
+    }
+
+    fn save_song_file(&mut self) {
         let stem = sequencer::safe_name(&self.song.name);
         let confirmed = self.confirm_song_save.as_deref() == Some(&stem);
         match sequencer::save(&sequencer::songs_dir(), &self.song, confirmed) {
@@ -2981,7 +3429,8 @@ impl App {
         self.sequencer.stop();
         self.song_previewing = false;
         self.unload_loop_player();
-        let mut song = Song::new(&self.config.external_midi);
+        let mut song =
+            Song::new_with_pages(&self.config.external_midi, self.routing_defaults.clone());
         song.name = name.clone();
         if let Err(status) = self.publish_fx_routing_runtime(&song.insert_rack, &song.aux_routing) {
             self.confirm_new_project = false;
@@ -3128,7 +3577,10 @@ impl App {
         };
         self.tracker_stop();
         match sequencer::load(&sequencer::songs_dir(), &name) {
-            Ok(song) => {
+            Ok(mut song) => {
+                if let Some(first) = self.first_synthv1_name() {
+                    sequencer::upgrade_legacy_synth_routes(&mut song, &first);
+                }
                 if let Err(status) =
                     self.publish_fx_routing_runtime(&song.insert_rack, &song.aux_routing)
                 {
@@ -3325,10 +3777,11 @@ impl App {
 
     fn create_pattern(&mut self, rows: usize) {
         self.tracker_stop();
-        let pattern = sequencer::Pattern::from_config(
+        let pattern = sequencer::Pattern::from_routing(
             &self.config.external_midi,
             rows,
             self.pattern_clear_beats,
+            &self.routing_defaults,
         );
         let number = match self.song.append_pattern(pattern) {
             Ok(number) => number,
@@ -3343,6 +3796,7 @@ impl App {
         self.confirm_pattern_clear = false;
         self.pattern_setup_new = false;
         self.set_screen(Screen::Tracker);
+        self.sync_tracker_route();
         self.status = format!(
             "new pattern {number} · {rows} rows · order {:02}/{:02}",
             self.tracker_order + 1,
@@ -3840,6 +4294,7 @@ impl App {
         };
         self.clamp_tracker_cursor();
         self.tracker_row = 0;
+        self.sync_tracker_route();
         self.status = format!(
             "order {:02}/{:02}",
             self.tracker_order + 1,
@@ -3866,6 +4321,7 @@ impl App {
         self.song.order.remove(self.tracker_order);
         self.tracker_order = self.tracker_order.min(self.song.order.len() - 1);
         self.clamp_tracker_cursor();
+        self.sync_tracker_route();
         self.tracker_row = 0;
         self.status = "order entry removed".into();
     }
@@ -3961,6 +4417,7 @@ impl App {
         self.tracker_row = 0;
         self.clamp_tracker_cursor();
         self.set_screen(Screen::Tracker);
+        self.sync_tracker_route();
         self.status = format!("editing pattern {}", self.tracker_pattern_number());
     }
     fn arrangement_play_from_step(&mut self) {
@@ -3971,7 +4428,7 @@ impl App {
         self.toggle_tracker_playback();
     }
     fn tracker_note_off(&mut self) {
-        if self.tracker_mode != TrackerMode::Edit {
+        if !matches!(self.tracker_mode, TrackerMode::Edit | TrackerMode::Noob) {
             return;
         }
         self.cancel_tracker_gesture();
@@ -4005,7 +4462,11 @@ impl App {
             } else {
                 column.program.saturating_add(1).min(127)
             };
-            self.status = format!("{name} column {} program {}", track + 1, column.program);
+            self.status = format!(
+                "{name} column {} instrument/program {}",
+                track + 1,
+                sequencer::musician_program(column.program)
+            );
             self.sync_tracker_route();
         }
     }
@@ -4229,6 +4690,7 @@ impl App {
         self.performance_meter
             .set_audio_unavailable(AudioAvailability::Stopped);
         self.playing = Some(preset);
+        self.engine_owner = Some(EngineOwner::SoftwareSynth);
         self.original_values = original_values;
         self.values = values;
         self.arm_pickup();
@@ -5155,6 +5617,7 @@ impl App {
             return;
         }
         self.engine.take();
+        self.engine_owner = None;
         self.performance_meter
             .set_audio_unavailable(AudioAvailability::Stopped);
         self.playing = None;
@@ -5175,6 +5638,7 @@ impl App {
                     .filter(|route| route.contains("fallback") || route.contains("unavailable"))
                     .cloned();
                 self.engine = Some(e);
+                self.engine_owner = Some(EngineOwner::SoftwareSynth);
                 if let Ok(mut backend) = self.midi_backend.lock() {
                     *backend = p.backend;
                 }
@@ -5570,7 +6034,7 @@ impl App {
             }
         }
         if self.screen == Screen::Tracker
-            && self.tracker_mode == TrackerMode::Edit
+            && matches!(self.tracker_mode, TrackerMode::Edit | TrackerMode::Noob)
             && self.note_editor.is_none()
         {
             self.commit_tracker_gesture(now);
@@ -5754,6 +6218,8 @@ fn app_loop(
             playback: available_audio_ports,
             capture_sources,
         },
+        state.to_path_buf(),
+        sequencer::routing_defaults_path(),
     );
     app.controller_layout = controller_config
         .read()
@@ -5843,10 +6309,7 @@ fn drain(
             MidiEvent::Raw { received, bytes } => {
                 app.held_notes.observe(&bytes);
                 app.recorder.capture(received, &bytes);
-                let tracker_preview = app.screen == Screen::Tracker
-                    && (matches!(app.tracker_mode, TrackerMode::Edit | TrackerMode::Noob)
-                        || app.note_editor.is_some()
-                        || app.tracker_recording.is_some());
+                let tracker_preview = app.tracker_workspace_active();
                 if !tracker_preview {
                     app.sequencer.thru(&bytes);
                 }
@@ -5854,7 +6317,7 @@ fn drain(
                     app.record_tracker_midi(&bytes);
                 }
                 if app.screen == Screen::Tracker
-                    && app.tracker_mode == TrackerMode::Edit
+                    && matches!(app.tracker_mode, TrackerMode::Edit | TrackerMode::Noob)
                     && app.note_editor.is_none()
                 {
                     if !app.tracker_gesture.is_active()
@@ -5945,6 +6408,7 @@ fn dispatch_encoder(
     state: &Path,
     tx: &std::sync::mpsc::Sender<MidiEvent>,
 ) {
+    app.prepare_confirmation_action(Action::Noop);
     if app.screen == Screen::Home {
         match action {
             crate::pads::EncoderAction::Up => app.move_home(-1),
@@ -5965,7 +6429,9 @@ fn dispatch_encoder(
     }
     let value_editor_owns_encoder = app.note_editor.is_some()
         || (app.screen == Screen::TrackerPages && app.page_manager_mode != PageManagerMode::Pages)
-        || app.screen == Screen::FxEditor;
+        || app.screen == Screen::FxEditor
+        || app.screen == Screen::TrackerNoob
+        || app.confirm_routing_defaults;
     if app.controller_layout == ControllerLayout::Four && !value_editor_owns_encoder {
         match action {
             crate::pads::EncoderAction::Select => {
@@ -6026,6 +6492,16 @@ fn perform(
     // modal confirmation owns the rest of the input dispatch.
     if action == Action::StopAll {
         a.stop_all(state);
+        return false;
+    }
+    if a.confirm_routing_defaults {
+        match action {
+            Action::ConfirmRoutingDefaults | Action::Activate | Action::SaveSong => {
+                a.finish_routing_defaults_prompt(true)
+            }
+            Action::CancelRoutingDefaults | Action::Back => a.finish_routing_defaults_prompt(false),
+            _ => {}
+        }
         return false;
     }
     if a.audio_track_name_input.is_some() {
@@ -6164,7 +6640,7 @@ fn perform(
             } else if a.screen == Screen::Help {
                 a.move_help(-1);
             } else if a.screen == Screen::TrackerNoob {
-                a.adjust_noob_root(-1);
+                a.adjust_noob_length(-1);
             } else if a.screen == Screen::TrackerLoopAlign {
                 a.adjust_loop_offset_bars(-1);
             } else if a.screen == Screen::Ideas {
@@ -6215,7 +6691,7 @@ fn perform(
             } else if a.screen == Screen::Help {
                 a.move_help(1);
             } else if a.screen == Screen::TrackerNoob {
-                a.adjust_noob_root(1);
+                a.adjust_noob_length(1);
             } else if a.screen == Screen::TrackerLoopAlign {
                 a.adjust_loop_offset_bars(1);
             } else if a.screen == Screen::Ideas {
@@ -6358,7 +6834,7 @@ fn perform(
             Screen::TrackerArrange => a.arrangement_jump_to_pattern(),
             Screen::TrackerPages => a.confirm_page_manager(),
             Screen::TrackerTools => {}
-            Screen::TrackerNoob => a.confirm_noob(),
+            Screen::TrackerNoob => a.confirm_noob_length(),
             Screen::TrackerLoop => a.import_selected_loop(),
             Screen::TrackerLoopAlign => {
                 a.set_screen(Screen::TrackerLoop);
@@ -6504,6 +6980,10 @@ fn perform(
         Action::BusMute => a.toggle_bus_mute(),
         Action::FinalRecordToggle => a.toggle_final_recording(),
         Action::Back => {
+            if a.screen == Screen::TrackerNoob {
+                a.cancel_noob_length();
+                return false;
+            }
             if a.screen == Screen::FxRack && a.fx_type_edit.is_some() {
                 a.cancel_effect_type_edit();
                 return false;
@@ -6601,11 +7081,12 @@ fn perform(
         Action::TrackerPlayToggle => a.toggle_tracker_playback(),
         Action::TrackerRewind => a.rewind_tracker(),
         Action::TrackerRecordToggle => a.toggle_tracker_recording(),
-        Action::TrackerModeNoob => a.open_noob_setup(),
-        Action::NoobRootDown => a.adjust_noob_root(-1),
-        Action::NoobRootUp => a.adjust_noob_root(1),
-        Action::NoobScale => a.toggle_noob_scale(),
-        Action::ConfirmNoob => a.confirm_noob(),
+        Action::TrackerModeNoob => a.toggle_noob_mode(),
+        Action::OpenNoobLength => a.open_noob_length(),
+        Action::ConfirmNoobLength => a.confirm_noob_length(),
+        Action::CancelNoobLength => a.cancel_noob_length(),
+        Action::ConfirmRoutingDefaults => a.finish_routing_defaults_prompt(true),
+        Action::CancelRoutingDefaults => a.finish_routing_defaults_prompt(false),
         Action::LoopImport => a.import_selected_loop(),
         Action::LoopRemove => a.remove_project_loop(),
         Action::LoopSourceDown => a.adjust_loop_source_bpm(-1),
@@ -7061,13 +7542,16 @@ fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<Mi
     }
     if a.screen == Screen::TrackerNoob {
         let action = match code {
-            KeyCode::Left | KeyCode::Up | KeyCode::Char('-') => Some(Action::NoobRootDown),
-            KeyCode::Right | KeyCode::Down | KeyCode::Char('+') | KeyCode::Char('=') => {
-                Some(Action::NoobRootUp)
+            KeyCode::Left | KeyCode::Up | KeyCode::Char('-') => {
+                a.adjust_noob_length(-1);
+                None
             }
-            KeyCode::Tab | KeyCode::Char('m') | KeyCode::Char('M') => Some(Action::NoobScale),
-            KeyCode::Enter => Some(Action::ConfirmNoob),
-            KeyCode::Esc | KeyCode::Char('b') => Some(Action::Back),
+            KeyCode::Right | KeyCode::Down | KeyCode::Char('+') | KeyCode::Char('=') => {
+                a.adjust_noob_length(1);
+                None
+            }
+            KeyCode::Enter => Some(Action::ConfirmNoobLength),
+            KeyCode::Esc | KeyCode::Char('b') => Some(Action::CancelNoobLength),
             KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Char(' ') => Some(Action::StopAll),
             _ => None,
         };
@@ -7148,10 +7632,14 @@ fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<Mi
                 a.set_tracker_advance(advance);
                 return false;
             }
-            if let Some(semitone) = tracker_key_note(code) {
-                a.tracker_single_note(a.tracker_keyboard_note(semitone), 96);
-                return false;
+        }
+        if let Some(semitone) = tracker_key_note(code) {
+            let note = a.tracker_keyboard_note(semitone);
+            a.audition_keyboard_note(note, 96);
+            if matches!(a.tracker_mode, TrackerMode::Edit | TrackerMode::Noob) {
+                a.tracker_single_note(note, 96);
             }
+            return false;
         }
         match code {
             KeyCode::Left => {
@@ -7170,12 +7658,14 @@ fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<Mi
                 a.cancel_tracker_gesture();
                 a.tracker_order = a.tracker_order.saturating_sub(1);
                 a.tracker_row = 0;
+                a.sync_tracker_route();
                 return false;
             }
             KeyCode::PageDown => {
                 a.cancel_tracker_gesture();
                 a.tracker_order = (a.tracker_order + 1).min(a.song.order.len().saturating_sub(1));
                 a.tracker_row = 0;
+                a.sync_tracker_route();
                 return false;
             }
             KeyCode::Char('-') => {
@@ -7647,6 +8137,20 @@ fn draw<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     draw_pad_buttons(f, a);
     if a.screen != Screen::Playback {
         draw_status_bar(f, a);
+    }
+    if a.confirm_routing_defaults {
+        let z = f.size();
+        let area = rect(z.x + 2, z.y + 4, z.width.saturating_sub(4), 7);
+        f.render_widget(Clear, area);
+        f.render_widget(
+            Paragraph::new(
+                "Save this routing as the default\nfor new patterns?\n\nCONFIRM saves the new default\nCANCEL keeps the previous default",
+            )
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::Yellow))
+            .block(Block::default().borders(Borders::ALL)),
+            area,
+        );
     }
     if let Some(input) = a.project_name_input.as_deref() {
         let z = f.size();
@@ -8629,11 +9133,10 @@ fn draw_tracker_child<B: Backend>(f: &mut Frame<B>, title: &str, details: &str) 
 
 fn draw_noob_setup<B: Backend>(f: &mut Frame<B>, a: &App) {
     let z = f.size();
-    let root = crate::scale::note_name(a.noob_draft.root);
     f.render_widget(
         Paragraph::new(format!(
-            "N00B MODE\n\nRoot  {root}\nScale {}\n\nNearest scale tone\nEqual ties map downward\n\nDONE enables safe input",
-            a.noob_draft.kind.label()
+            "N00b NOTE LENGTH\n\n        {}\n\n1/1  1/2  1/4\n1/8  1/16  1/32\n\nTurn encoder to choose\nPress encoder to confirm\nEXIT cancels",
+            a.noob_length_draft.label()
         ))
         .alignment(Alignment::Center)
         .style(Style::default().fg(Color::Green)),
@@ -9389,7 +9892,7 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     } else if a.tracker_mode == TrackerMode::Rec {
         "REC READY".into()
     } else if a.tracker_mode == TrackerMode::Noob {
-        a.tracker_mode.label().into()
+        format!("N00B {}", a.noob_length.label())
     } else {
         "STOP".into()
     };
@@ -9452,9 +9955,14 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
             let channel = if page.target == PageTarget::Default {
                 "AU".to_owned()
             } else {
-                format!("{:02}", setup.channel + 1)
+                format!("{:02}", sequencer::musician_channel(setup.channel))
             };
-            let compact = format!("{}:{}/{:03}", index + 1, channel, setup.program);
+            let compact = format!(
+                "{}:{}/{:03}",
+                index + 1,
+                channel,
+                sequencer::musician_program(setup.program)
+            );
             header.push_str(&format!(
                 "{:^w$}",
                 truncate(
@@ -9573,7 +10081,7 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
             pattern.pages.len(),
             page.name,
             a.tracker_track + 1,
-            column.channel + 1,
+            sequencer::musician_channel(column.channel),
             truncate(page.target.label(), 10),
             if !page.enabled {
                 "PAGE MUTE"
@@ -9623,7 +10131,7 @@ fn draw_tracker_note_editor<B: Backend>(f: &mut Frame<B>, a: &App, area: Rect) {
             NoteEditorField::Channel,
             format!(
                 "{} · {}",
-                channel + 1,
+                sequencer::musician_channel(channel),
                 if channel == 9 {
                     "GM DRUMS"
                 } else {
@@ -9750,7 +10258,11 @@ fn draw_tracker_program_browser<B: Backend>(f: &mut Frame<B>, a: &App, area: Rec
     ];
     for program in start..end {
         let program = program as u8;
-        let text = format!("{:03}  {}", program, a.tracker_program_label(program));
+        let text = format!(
+            "{:03}  {}",
+            sequencer::musician_program(program),
+            a.tracker_program_label(program)
+        );
         lines.push(Spans::from(Span::styled(
             truncate(&text, usize::from(area.width)),
             if program == selected {
@@ -9775,7 +10287,7 @@ fn draw_tracker_pages<B: Backend>(f: &mut Frame<B>, a: &mut App) {
             {
                 "AUTO".to_owned()
             } else {
-                (column.channel + 1).to_string()
+                sequencer::musician_channel(column.channel).to_string()
             };
             format!(
                 "C{} ch{} b{}/{} {}",
@@ -9816,7 +10328,10 @@ fn draw_tracker_pages<B: Backend>(f: &mut Frame<B>, a: &mut App) {
                     let channel = if page.target == PageTarget::Default {
                         "AU".to_owned()
                     } else {
-                        format!("{:02}", page.column(a.tracker_track).channel + 1)
+                        format!(
+                            "{:02}",
+                            sequencer::musician_channel(page.column(a.tracker_track).channel)
+                        )
                     };
                     let text = format!(
                         "{}{:02} {} {:<6} C{} ch{} p{:03} {}",
@@ -9826,7 +10341,7 @@ fn draw_tracker_pages<B: Backend>(f: &mut Frame<B>, a: &mut App) {
                         truncate(&page.name, 6),
                         a.tracker_track + 1,
                         channel,
-                        page.column(a.tracker_track).program,
+                        sequencer::musician_program(page.column(a.tracker_track).program),
                         truncate(page.target.label(), 7),
                     );
                     Spans::from(Span::styled(
@@ -10564,6 +11079,8 @@ fn screenshot_app(mut config: RuntimeConfig) -> App {
             playback: available_audio_ports,
             capture_sources,
         },
+        PathBuf::from("/none"),
+        PathBuf::from("/none"),
     );
     app.web_help_enabled = false;
     app.playing = app.presets.first().cloned();
@@ -10827,11 +11344,8 @@ fn configure_screenshot_scenario(app: &mut App, scenario: ScreenshotScenario) {
         }
         ScreenshotScenario::TrackerNoob => {
             fill_demo_song(app);
-            app.noob_draft = Scale {
-                root: 4,
-                kind: ScaleKind::NaturalMinor,
-            };
-            app.status = "E natural minor · DONE enables note mapping".into();
+            app.noob_length_draft = NoobLength::Eighth;
+            app.status = "NOTE LENGTH 1/8 · press to confirm".into();
         }
         ScreenshotScenario::LoopLibrary => {
             configure_demo_loop(app);
@@ -11058,6 +11572,9 @@ mod tests {
             .collect()
     }
     fn app(presets: &[Preset]) -> App {
+        app_with_routing_defaults(presets, PathBuf::from("/none"))
+    }
+    fn app_with_routing_defaults(presets: &[Preset], defaults: PathBuf) -> App {
         let catalogs = [Catalog {
             backend: BackendKind::Synthv1,
             presets: presets.to_vec(),
@@ -11086,6 +11603,8 @@ mod tests {
                 playback: available_audio_ports,
                 capture_sources,
             },
+            PathBuf::from("/none"),
+            defaults,
         );
         app.web_help_enabled = false;
         if !app.config.external_midi.output_match.is_empty() {
@@ -12359,7 +12878,7 @@ mod tests {
         assert!(!a.audio_recorder.status().recording);
     }
     #[test]
-    fn tracker_renders_both_page_names_and_compact_stop_label() {
+    fn tracker_renders_the_three_factory_page_names_and_compact_stop_label() {
         let p = presets();
         let mut a = app(&p);
         a.screen = Screen::Tracker;
@@ -12377,7 +12896,7 @@ mod tests {
             .iter()
             .map(|c| c.symbol.as_str())
             .collect::<String>();
-        assert!(text.contains("MELODY"));
+        assert!(text.contains("Software Synth"));
         assert!(text.contains("STOP"));
         assert!(!text.contains("STOP/BACK"));
         assert!(text.contains("137 BPM"));
@@ -12391,7 +12910,17 @@ mod tests {
             .iter()
             .map(|c| c.symbol.as_str())
             .collect::<String>();
-        assert!(text.contains("DRUMS"));
+        assert!(text.contains("MIDI"));
+        a.switch_tracker_page();
+        t.draw(|f| draw(f, &mut a)).unwrap();
+        let text = t
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol.as_str())
+            .collect::<String>();
+        assert!(text.contains("Drums"));
     }
     #[test]
     fn page_management_is_fully_reachable_with_pads_and_encoder_actions() {
@@ -12401,8 +12930,8 @@ mod tests {
         perform(Action::OpenTrackerPages, &mut a, Path::new("/none"), None);
         assert_eq!(a.screen, Screen::TrackerPages);
         perform(Action::AddPage, &mut a, Path::new("/none"), None);
-        assert_eq!(a.current_pages().len(), 3);
-        assert_eq!(a.current_pages()[2].lanes.len(), 4);
+        assert_eq!(a.current_pages().len(), 4);
+        assert_eq!(a.current_pages()[3].lanes.len(), 4);
 
         perform(Action::EditPageTarget, &mut a, Path::new("/none"), None);
         assert_eq!(a.page_manager_mode, PageManagerMode::Target);
@@ -12413,13 +12942,13 @@ mod tests {
         perform(Action::EditPageChannel, &mut a, Path::new("/none"), None);
         perform(Action::Down, &mut a, Path::new("/none"), None);
         perform(Action::Activate, &mut a, Path::new("/none"), None);
-        assert_eq!(a.current_pages()[2].column(0).channel, 1);
+        assert_eq!(a.current_pages()[3].column(0).channel, 1);
 
         perform(Action::PreviousTrack, &mut a, Path::new("/none"), None);
-        assert_eq!(a.tracker_page, 2);
+        assert_eq!(a.tracker_page, 3);
         assert_eq!(a.tracker_track, 0);
         perform(Action::NextTrack, &mut a, Path::new("/none"), None);
-        assert_eq!(a.tracker_page, 2);
+        assert_eq!(a.tracker_page, 3);
         assert_eq!(a.tracker_track, 1);
         perform(Action::ConfirmPageManager, &mut a, Path::new("/none"), None);
         assert_eq!(a.screen, Screen::Tracker);
@@ -12479,6 +13008,7 @@ mod tests {
     fn scrolled_hit_test_maps_visible_row() {
         let p = presets();
         let mut a = app(&p);
+        a.screen = Screen::Presets;
         a.offset = 10;
         a.selected = 10;
         a.hits.list = Rect::new(1, 3, 78, 10);
@@ -12677,7 +13207,10 @@ mod tests {
                 playback: available_audio_ports,
                 capture_sources,
             },
+            PathBuf::from("/none"),
+            PathBuf::from("/none"),
         );
+        a.screen = Screen::Presets;
         a.selected = 7;
         perform(Action::NextEngine, &mut a, Path::new("/none"), None);
         assert_eq!(a.selected_backend(), BackendKind::Yoshimi);
@@ -12889,8 +13422,8 @@ mod tests {
         let p = presets();
         let mut a = app(&p);
         assert_eq!(a.tracker_keyboard_note(0), 60);
-        a.tracker_page = 1;
-        assert!(a.current_pages()[1].percussion);
+        a.tracker_page = a.percussion_page_index().unwrap();
+        assert!(a.current_pages()[a.tracker_page].percussion);
         assert_eq!(a.tracker_keyboard_note(0), 36);
         assert_eq!(a.tracker_keyboard_note(11), 60);
         a.config.external_midi.percussion_notes = vec![36, 38, 40];
@@ -13399,10 +13932,7 @@ mod tests {
         assert_eq!(a.tracker_program_messages(7), vec![vec![0xc0, 7]]);
 
         a.current_page_mut().unwrap().target = PageTarget::ActiveInstrument;
-        assert_eq!(
-            a.tracker_program_messages(7),
-            vec![vec![0xb0, 0, 5], vec![0xb0, 32, 9], vec![0xc0, 7]]
-        );
+        assert!(a.tracker_program_messages(7).is_empty());
         a.config.external_midi.bank_select = BankSelectMode::Off;
         a.current_page_mut().unwrap().column_mut(0).bank_msb = 0;
         a.current_page_mut().unwrap().column_mut(0).bank_lsb = 0;
@@ -13421,7 +13951,7 @@ mod tests {
         assert!(rendered.contains("I-12 Metal Harp"));
 
         a.cancel_note_editor();
-        assert!(!a.tracker_route.lock().unwrap().preview_state().0);
+        assert!(a.tracker_route.lock().unwrap().preview_state().0);
     }
 
     #[test]
@@ -13765,7 +14295,7 @@ mod tests {
             bundled: None,
         }];
         a.drum_target_rows = a.tracker_rows();
-        let percussion = 1;
+        let percussion = a.percussion_page_index().unwrap();
         a.song.patterns.get_mut(&0).unwrap().pages[percussion].columns[0].program = 55;
         a.song.patterns.get_mut(&0).unwrap().rows[3][0].note = Note::On(64);
         let page_before = a.song.patterns[&0].pages[percussion].clone();
@@ -13994,7 +14524,7 @@ mod tests {
             .all(|cell| cell.note == Note::Empty));
 
         a.stop_tracker_recording();
-        assert!(!a.tracker_route.lock().unwrap().preview_state().0);
+        assert!(a.tracker_route.lock().unwrap().preview_state().0);
     }
 
     #[test]
@@ -14183,22 +14713,259 @@ mod tests {
     fn mode_page_enters_edit_noob_and_returns_to_play_without_duplicate_state() {
         let p = presets();
         let mut a = app(&p);
+        let (tx, _rx) = mpsc::channel();
         a.screen = Screen::Tracker;
         perform(Action::TrackerEdit, &mut a, Path::new("/none"), None);
         assert_eq!(a.tracker_mode, TrackerMode::Edit);
         assert!(a.tracker_recording.is_none());
         perform(Action::TrackerModeNoob, &mut a, Path::new("/none"), None);
-        assert_eq!(a.screen, Screen::TrackerNoob);
-        a.noob_draft = Scale {
-            root: 3,
-            kind: ScaleKind::NaturalMinor,
-        };
-        perform(Action::ConfirmNoob, &mut a, Path::new("/none"), None);
+        assert_eq!(a.screen, Screen::Tracker);
         assert_eq!(a.tracker_mode, TrackerMode::Noob);
-        assert_eq!(a.noob_scale.root, 3);
+        perform(Action::OpenNoobLength, &mut a, Path::new("/none"), None);
+        assert_eq!(a.screen, Screen::TrackerNoob);
+        a.controller_layout = ControllerLayout::Four;
+        dispatch_encoder(
+            crate::pads::EncoderAction::Up,
+            &mut a,
+            Path::new("/none"),
+            &tx,
+        );
+        assert_eq!(a.noob_length_draft, NoobLength::Eighth);
+        dispatch_encoder(
+            crate::pads::EncoderAction::Select,
+            &mut a,
+            Path::new("/none"),
+            &tx,
+        );
+        assert_eq!(a.noob_length, NoobLength::Eighth);
         a.set_tracker_mode(TrackerMode::Play);
         assert_eq!(a.tracker_mode, TrackerMode::Play);
         assert!(a.tracker_recording.is_none());
+    }
+
+    #[test]
+    fn standalone_engine_exit_takes_only_the_standalone_owner() {
+        let mut engine = Some("owned engine");
+        let mut owner = Some(EngineOwner::Tracker("Pattern Sound".into()));
+        assert!(take_engine_when_owned(&mut engine, &mut owner, |owner| {
+            *owner == EngineOwner::SoftwareSynth
+        })
+        .is_none());
+        assert_eq!(engine, Some("owned engine"));
+        assert_eq!(owner, Some(EngineOwner::Tracker("Pattern Sound".into())));
+
+        owner = Some(EngineOwner::SoftwareSynth);
+        assert_eq!(
+            take_engine_when_owned(&mut engine, &mut owner, |owner| {
+                *owner == EngineOwner::SoftwareSynth
+            }),
+            Some("owned engine")
+        );
+        assert!(engine.is_none());
+        assert!(owner.is_none());
+    }
+
+    #[test]
+    fn leaving_top_level_software_synth_clears_only_its_workspace_owner() {
+        let p = presets();
+        let mut a = app(&p);
+        a.screen = Screen::Presets;
+        a.engine_owner = Some(EngineOwner::SoftwareSynth);
+        a.set_screen(Screen::Home);
+        assert_eq!(a.engine_owner, None);
+
+        a.screen = Screen::Presets;
+        a.engine_owner = Some(EngineOwner::Tracker("Pattern Sound".into()));
+        a.set_screen(Screen::Home);
+        assert_eq!(
+            a.engine_owner,
+            Some(EngineOwner::Tracker("Pattern Sound".into()))
+        );
+    }
+
+    #[test]
+    fn tracker_synth_route_never_inherits_the_standalone_selection() {
+        let p = presets();
+        let mut a = app(&p);
+        a.playing = Some(p[38].clone());
+        assert_eq!(a.tracker_synth_name().as_deref(), Some("Preset 00"));
+        assert_ne!(
+            a.tracker_synth_name().as_deref(),
+            a.playing.as_ref().map(|preset| preset.name.as_str())
+        );
+    }
+
+    #[test]
+    fn arrangement_refuses_to_misroute_two_pattern_owned_synth_presets() {
+        let p = presets();
+        let mut a = app(&p);
+        assert_eq!(
+            arrangement_synth_name(&a.song, 0).unwrap().as_deref(),
+            Some("Preset 00")
+        );
+        let mut second = a.song.patterns[&0].pages[0].clone();
+        second.name = "SECOND SYNTH".into();
+        second.target = PageTarget::Synthv1("Preset 01".into());
+        a.song.patterns.get_mut(&0).unwrap().pages.push(second);
+        assert!(arrangement_synth_name(&a.song, 0)
+            .unwrap_err()
+            .to_string()
+            .contains("multiple synth presets"));
+    }
+
+    #[test]
+    fn ft2_live_route_follows_the_selected_synth_midi_and_drum_page() {
+        let p = presets();
+        let mut a = app(&p);
+        a.screen = Screen::Tracker;
+        a.sync_tracker_route();
+        assert_eq!(
+            a.tracker_route.lock().unwrap().destinations(),
+            vec![(PageTarget::Synthv1("Preset 00".into()), 0)]
+        );
+
+        a.tracker_page = 1;
+        a.sync_tracker_route();
+        assert_eq!(
+            a.tracker_route.lock().unwrap().destinations(),
+            vec![(PageTarget::ConfiguredExternal, 0)]
+        );
+
+        a.tracker_page = 2;
+        a.sync_tracker_route();
+        assert_eq!(
+            a.tracker_route.lock().unwrap().destinations(),
+            vec![(PageTarget::ConfiguredExternal, 9)]
+        );
+    }
+
+    #[test]
+    fn tracker_grid_shows_musician_facing_channel_and_program_one() {
+        let p = presets();
+        let mut a = app(&p);
+        a.screen = Screen::Tracker;
+        a.tracker_page = 1;
+        let backend = TestBackend::new(40, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut a)).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect::<String>();
+        assert!(text.contains("1:01/001"), "{text}");
+    }
+
+    #[test]
+    fn empty_pattern_routing_default_prompt_confirms_or_cancels_explicitly() {
+        let p = presets();
+        let mut a = app(&p);
+        let base =
+            std::env::temp_dir().join(format!("shr-ui-routing-defaults-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        a.routing_defaults_path = base.join("defaults.shsong");
+        a.screen = Screen::TrackerFiles;
+        a.song.patterns.get_mut(&0).unwrap().pages[1]
+            .column_mut(0)
+            .channel = 6;
+        assert!(a.should_prompt_routing_defaults());
+        let original = a.routing_defaults.clone();
+        a.save_song();
+        assert!(a.confirm_routing_defaults);
+        assert_eq!(
+            a.status,
+            "Save this routing as the default for new patterns?"
+        );
+        let backend = TestBackend::new(40, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut a)).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect::<String>();
+        assert!(text.contains("Save this routing as the default"), "{text}");
+        assert!(text.contains("for new patterns?"), "{text}");
+        a.resolve_routing_defaults_choice(false).unwrap();
+        assert_eq!(a.routing_defaults, original);
+        assert!(!a.routing_defaults_path.exists());
+
+        a.confirm_routing_defaults = true;
+        a.resolve_routing_defaults_choice(true).unwrap();
+        assert_eq!(a.routing_defaults[1].column(0).channel, 6);
+        assert_eq!(
+            sequencer::load_routing_defaults(&a.routing_defaults_path, &original).unwrap(),
+            a.routing_defaults
+        );
+        a.song.patterns.get_mut(&0).unwrap().rows[0][0].note = Note::On(60);
+        a.song.patterns.get_mut(&0).unwrap().pages[1]
+            .column_mut(0)
+            .channel = 7;
+        assert!(!a.should_prompt_routing_defaults());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn later_app_sessions_and_patterns_use_the_saved_routing_defaults() {
+        let p = presets();
+        let base = std::env::temp_dir().join(format!(
+            "shr-ui-later-routing-defaults-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let path = base.join("defaults.shsong");
+        let mut defaults = sequencer::factory_routing_pages("Preset 00");
+        defaults[1].column_mut(0).channel = 6;
+        defaults[1].column_mut(0).program = 41;
+        sequencer::save_routing_defaults(&path, &defaults).unwrap();
+
+        let mut a = app_with_routing_defaults(&p, path);
+        assert_eq!(a.song.patterns[&0].pages, defaults);
+        a.create_pattern(16);
+        assert_eq!(a.song.patterns[&1].pages, defaults);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn noob_mode_enters_every_supported_length_without_reinterpreting_data() {
+        let p = presets();
+        let mut a = app(&p);
+        a.screen = Screen::Tracker;
+        a.tracker_mode = TrackerMode::Noob;
+        let cases = [
+            (NoobLength::Whole, 16, 100),
+            (NoobLength::Half, 8, 100),
+            (NoobLength::Quarter, 4, 100),
+            (NoobLength::Eighth, 2, 100),
+            (NoobLength::Sixteenth, 1, 100),
+            (NoobLength::ThirtySecond, 1, 50),
+        ];
+        for (length, span, gate) in cases {
+            let pattern = a.song.patterns.get_mut(&0).unwrap();
+            for row in &mut pattern.rows {
+                row.fill(Cell::default());
+            }
+            a.tracker_row = 0;
+            a.noob_length = length;
+            a.write_noob_notes(&[(60, 99)]);
+            let pattern = &a.song.patterns[&0];
+            assert_eq!(pattern.rows[0][0].note, Note::On(60));
+            assert_eq!(pattern.rows[0][0].velocity, Some(99));
+            assert_eq!(pattern.rows[0][0].gate, Some(gate));
+            if gate == 100 {
+                assert_eq!(pattern.rows[span][0].note, Note::Off);
+            } else {
+                assert_eq!(pattern.rows[span][0].note, Note::Empty);
+            }
+            let snapshot = pattern.rows.clone();
+            a.set_tracker_mode(TrackerMode::Play);
+            a.set_tracker_mode(TrackerMode::Noob);
+            assert_eq!(a.song.patterns[&0].rows, snapshot);
+        }
     }
 
     #[test]

@@ -16,7 +16,8 @@ Start with a Pi and computer keyboard. Add a MIDI controller, synth, audio
 interface, or dedicated screen when useful.
 
 The immediate connection between played sound, note spelling, chord names,
-per-note MIDI strike velocity, scale-aware entry, and visible keyboard state
+per-note MIDI strike velocity, beginner note-length entry, and visible keyboard
+state
 also makes SHR-DAW a practical learning companion. A player can relate what
 they hear and press to intervals, chord construction, dynamics, scales, and
 pattern notation without separating study from making music.
@@ -52,7 +53,8 @@ its sounds.
   mappings; each item keeps its first movement until the rotary moves on.
 - Optionally drive a controller arpeggiator from SHR's dedicated 24-PPQN
   clock/transport output without reusing a musical tracker route.
-- Sequence self-contained FT2 Patterns through an Arrangement.
+- Sequence self-contained FT2 Patterns whose synth and MIDI routes audition
+  directly from the selected page.
 - Load and edit 72 bundled drum grooves.
 - Open ten cleared public-domain demo Projects, with matching Standard MIDI
   files and five separable arrangement parts.
@@ -64,11 +66,12 @@ its sounds.
   playback, and a 24-bit stereo final-mix recorder.
 - Use a computer keyboard, mouse, or small configured controller.
 
-New Projects use portable `AUTO` routing: they take this machine's configured
-MIDI channels and active destination when loaded, without saving a device name
-or using channel zero as a sentinel. Explicit routes from older or deliberately
-hardware-bound Projects remain intact. Missing preferred MIDI/audio hardware
-activates a visible, non-destructive fallback and never rewrites the preference.
+New Projects start with Pattern-owned Software Synth, MIDI channel 1/program 1,
+and Drums channel 10 pages. An empty routed Pattern can explicitly replace that
+private new-Pattern template when saved. The standalone Software Synth owns its loaded
+sound only until that top-level workspace exits; FT2 loads the preset named by
+its Pattern and never inherits the standalone choice. Missing preferred
+MIDI/audio hardware remains visible and never rewrites a saved route.
 
 Hardware names and routes remain configuration data. The owned effects graph
 is opt-in and disabled by default. When enabled it requires exactly the managed

@@ -27,7 +27,9 @@ editors, use OPS CONFIRM; SYS EXIT cancels the field.
 
 Presets chooses the instrument engine and sound. Loading a sound starts or
 reuses only the engine owned by SHR-DAW; unrelated synth processes are left
-alone.
+alone. Presets and Playback share that owned sound. Returning from top-level
+Presets to Home sends All Notes Off and unloads it; FT2 loads its Pattern's
+synthv1 preset separately.
 
 Synthv1 controls use pickup. After loading, idea load, or RESET, mapped CCs are
 blocked until the physical control reaches the stored value. This prevents
@@ -132,20 +134,22 @@ note-off.
 CELL edit is transactional. Confirm commits the draft cell; EXIT cancels and
 restores the original value. STOP stops transport without discarding the draft.
 
-N00B mode maps live notes to the nearest selected major or natural-minor scale
-tone. Equal-distance ties go downward, and note releases stay owned by the
-source note that created them.
+N00B mode keeps the selected page as the instrument and enters notes with one
+visible length. LENGTH opens a rotary selector for 1/1, 1/2, 1/4, 1/8, 1/16,
+or 1/32; 1/16 is the default. Entry writes the note and its end, then advances.
+NORMAL restores detailed tracker editing without changing existing notes.
 
 ## Pages and hardware MIDI
 
-Each tracker page has four lanes and one destination. AUTO is portable: it saves
-no device/channel route and uses this machine's defaults. Explicit columns store
-MIDI channel 1–16, bank MSB/LSB, and master program. Pages can also target the
-active software instrument, configured external output, or a named MIDI port.
+Each tracker page has four lanes and one destination. New Patterns start with
+Software Synth (first synthv1 preset), MIDI (channel 1/program 1), and Drums
+(channel 10). Explicit columns show MIDI channel 1–16 and program 1–128. Pages can target
+a named synthv1 preset, configured external output, or named MIDI port. Live
+keyboard and musical MIDI audition whichever page is selected.
 Sharing a destination/channel requires the same master instrument.
 
-Real-time REC is hardware-output only. It refuses Active Instrument so a loaded
-software synth is not doubled or rewritten by live capture.
+Real-time REC is hardware-output only. It refuses synthv1 pages so a software
+synth is not doubled or rewritten by live capture.
 
 Missing preferred targets keep their data and show FALLBACK or OFFLINE. A
 runtime substitute never replaces the saved route; reconnect and play again.

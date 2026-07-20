@@ -190,27 +190,28 @@ Arrangement reference and never silently rewrites the Arrangement.
 
 Each Pattern owns one or more **pages**, and every page has four note
 **columns**. All enabled pages play together. A page chooses one MIDI
-destination: portable `AUTO`, the active managed instrument, the configured
-external output, or an exact visible ALSA MIDI port. An `AUTO` page persists no
+destination: portable `AUTO`, a named Pattern-owned synthv1 preset, the
+configured external output, or an exact visible ALSA MIDI port. An `AUTO` page persists no
 device/channel/bank/program route and resolves the current machine defaults at
-playback. An explicit page's columns store channel 1–16,
-bank MSB/LSB, master program, lane name, and mute state. Two columns may share
+playback. An explicit page's columns show channel 1–16 and program 1–128 while
+storing their zero-based MIDI values, plus bank MSB/LSB, lane name, and mute
+state. Two columns may share
 the same destination/channel only when their master bank/program selections
 match, because MIDI program changes affect the whole channel.
 
 This separation makes several useful routes possible in one Pattern: one page
-can play the managed software instrument, another can address a drum machine,
+can play its named software instrument, another can address a drum machine,
 and another can play a hardware synth on a different port. A disconnected
-exact target is displayed as `FALLBACK` while the configured external route or
-loaded instrument can substitute, otherwise `OFFLINE`; its name and notes stay
+exact target is displayed as `FALLBACK` while the configured external route
+can substitute, otherwise `OFFLINE`; its name and notes stay
 in the Project. Destinations are re-resolved on each play, so returned equipment
 is selected without editing the Project. Ambiguous exact or partial preferred
 matches are not guessed.
 
 External MIDI device profiles add trustworthy bank labels and program names to
 the column and cell program browsers. They remain JSON data, can be privately
-overridden for writable user memories, and never remove the numeric 0–127
-fallback. See [MIDI device profiles](MIDI_DEVICE_PROFILES.md).
+overridden for writable user memories, and never remove the musician-facing
+1–128 numeric fallback. See [MIDI device profiles](MIDI_DEVICE_PROFILES.md).
 
 ## FT2 Play, Record, Edit, and N00B modes
 
@@ -222,9 +223,16 @@ The FT2 screen has four explicit modes:
 - **Edit** writes notes or chords from MIDI/computer-keyboard input. Blank,
   erase, and note-off are explicit operations, and the persistent 1/2/4/8-row
   advance determines the next cursor position.
-- **N00B** maps live input to the nearest note in a chosen major or natural
-  minor scale. Equal-distance choices go downward, and each source note retains
-  ownership of the mapped note used for its eventual note-off.
+- **N00B** enters notes on the selected page with one chosen musical length.
+  The rotary selector offers 1/1 through 1/32 and defaults to 1/16. Entry uses
+  the existing row/gate/note-off model, advances to the note end, and does not
+  rewrite cells when the mode changes.
+
+The selected Pattern page owns live audition. A synth page loads its named
+synthv1 preset; MIDI pages keep independent destination/channel/program routes;
+and percussion pages use their channel and drum mapping. Route changes cancel
+the old destination/channel before the new one is armed. The standalone
+Software Synth selection is never consulted by FT2.
 
 Cell Edit is transactional: changes are made to a draft, `CONFIRM` publishes
 the whole cell, and `EXIT` restores the original. A cell can hold a note or

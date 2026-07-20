@@ -24,11 +24,11 @@ mod jack;
 mod loop_player;
 mod midi;
 mod navigation;
+mod note_lifecycle;
 mod pads;
 mod performance_meter;
 mod preset;
 mod recording;
-mod scale;
 mod sequencer;
 mod ui;
 

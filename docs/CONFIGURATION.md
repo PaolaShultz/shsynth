@@ -538,8 +538,15 @@ mute, lane mute, Project replacement, route changes, and exit release notes only
 on affected destinations. Lanes that share a device/channel keep separate note
 ownership; a shared note is released only after its last lane owner ends.
 
-FT2 **REC** is deliberately hardware-only. It refuses an `ActiveInstrument`
-page, consumes musical controller notes before the loaded synth route, and
+The selected FT2 page also owns live keyboard and ordinary musical MIDI
+audition. A synth page uses its saved synthv1 preset name; each MIDI page uses
+its own output/channel/program; a percussion page uses its drum mapping.
+Switching any route field cancels the old route first. Internal channels and
+programs are zero-based MIDI values, while every FT2 screen shows channels
+1–16 and programs 1–128.
+
+FT2 **REC** is deliberately hardware-only. It refuses a synthv1 page,
+consumes musical controller notes before the loaded synth route, and
 auditions them on the current page's configured/exact MIDI output and channel.
 Recording loops only the selected pattern, writes only the visible page's four
 lanes, and does not advance through or alter other order entries.
@@ -548,3 +555,11 @@ Pattern setup offers 4/4 row counts of 8, 16, 32, 64, and 128, or matching 3/4
 counts of 6, 12, 24, 48, and 96. New patterns are distinct pattern records and
 are appended to the Arrangement; clone duplicates the selected Pattern, while
 repeat adds another order reference to the same pattern.
+
+Fresh Patterns use the private routing template at
+`${XDG_DATA_HOME:-~/.local/share}/shsynth/ft2-routing-defaults.shsong`. Without
+one, the factory pages are Software Synth (first synthv1 preset), MIDI (channel
+1/program 1), and Drums (channel 10). Saving a changed but note-empty Pattern
+asks whether to replace this template; confirm changes it, cancel does not. Projects with
+notes never update it implicitly. Legacy Projects without Pattern synth routing
+receive safe in-memory defaults and are rewritten only by an explicit save.

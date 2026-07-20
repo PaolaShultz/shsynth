@@ -68,6 +68,8 @@ this with hardcoded Rust paths. The important local paths are:
   state, and generated engine configuration;
 - `user/data/shsynth/ideas/`: recorded MIDI ideas;
 - `user/data/shsynth/songs/`: tracker Projects (`.shsong`);
+- `user/data/shsynth/ft2-routing-defaults.shsong`: private new-Pattern routing
+  template, created only after the musician confirms the empty-Pattern prompt;
 - `user/data/shsynth/demos/`: missing-only cleared MIDI/Project demo copies and
   their public manifest;
 - `user/data/shsynth/recordings/`: synchronized take directories, mono stems,
@@ -311,15 +313,19 @@ oversized-callback paths publish silence/unavailability so stale levels do not
 remain; loop/load boundaries reset this meter's presentation lifecycle without
 touching `FINAL OUT`.
 
-FT2 real-time REC is hardware-page-only: it refuses `ActiveInstrument`,
-consumes notes before the loaded synth, auditions through the selected page's
-MIDI destination/channel, and writes only that page in the selected looping
-pattern. Pattern setup supports 4/4 sizes 8/16/32/64/128 and corresponding 3/4
-sizes 6/12/24/48/96. Projects retain distinct Patterns plus their Arrangement.
+FT2 real-time REC is hardware-page-only: it refuses Pattern-owned synthv1
+pages, consumes notes before the loaded synth, auditions through the selected
+page's MIDI destination/channel, and writes only that page in the selected
+looping pattern. Pattern setup supports 4/4 sizes 8/16/32/64/128 and
+corresponding 3/4 sizes 6/12/24/48/96. Projects retain distinct Patterns plus
+their Arrangement.
 
-FT2 has one Play/Rec/Edit/N00B mode state. N00B maps live input to the nearest
-selected major/natural-minor scale tone with downward tie-breaking and exact
-per-channel/source-note release ownership. The Tools child opens the private
+FT2 has one Play/Rec/Edit/N00B mode state. N00B is the beginner duration-entry
+surface: the selected page owns the sound, the one rotary selector offers
+1/1–1/32 with 1/16 as default, and entry uses existing gate/explicit note-off
+cells before advancing. Its context keeps page/track, delete, note-off,
+play/save/files, Normal, and Exit controls. Mode switches never rewrite cells.
+The Tools child opens the private
 WAV loop player. Loop imports live below the XDG user-data `loops/` directory;
 Projects keep optional meter, filename, BPM interpretation, and beat-region
 settings plus a signed beat offset for one-bar placement shifts. The loop
@@ -359,7 +365,8 @@ overrides can live below `${XDG_DATA_HOME}/shsynth/midi-devices/` or
 hardcoded tracker mode. Each FT2 page has one destination and four columns.
 Project format 4 adds the canonical portable `default` target, whose
 device/channel/bank/program route is blank and resolved from active machine
-configuration. Explicit pages still persist their four setups. Format 3 loads
+configuration. It also accepts `synthv1:<preset name>` without changing the
+format version. Explicit pages still persist their four setups. Format 3 loads
 with every route remaining explicit and stores the source insert rack, two aux
 routes, and master rack. Formats 0 and 1 migrate
 with empty effects routing; format 2 retains its source rack and gains empty
@@ -367,12 +374,43 @@ aux/master routing; format 0 page-wide setups also migrate into four identical
 columns. Unknown newer formats and invalid fields are refused. Compatible
 shared channels require identical master selections. FT2 Program cell editing
 uses the selected column for named live audition; devices without a profile
-retain numeric 0–127 access.
+retain zero-based MIDI storage while every musician-facing screen shows
+programs 1–128 and channels 1–16.
+
+New FT2 Projects and Patterns use three routing pages: Software Synth with the
+first available synthv1 preset, MIDI on channel 1/program 1, and Drums on
+channel 10. The current private template may replace those values. Saving a routing-changed
+but note-empty Pattern asks exactly whether to save its routing as the new
+default; confirm updates the private template, cancel preserves it, and a
+Pattern containing notes never changes defaults implicitly. Older
+`ActiveInstrument` Projects are upgraded only in memory until explicit save.
+
+Software Synth and FT2 now have separate engine ownership. Presets/Playback
+keeps one standalone synth alive while moving within that workflow, sends All
+Notes Off and drops only its owned engine on the top-level return to Home, and
+never touches an unowned process. FT2 loads the synthv1 preset named by the
+current Pattern instead of consulting the standalone selection. Page, channel,
+program, destination, and preset changes cancel the old live route first; pad
+messages remain consumed and ordinary MIDI auditions the selected page. One
+host cannot represent two synth presets simultaneously, so an Arrangement with
+multiple enabled synthv1 preset names is refused rather than misrouted.
+
+Hardware-independent validation for this redesign used pinned Rust 1.85:
+formatting, `cargo check --locked`, focused ownership/routing/defaults/N00B/MIDI
+and 40×20 controller-render tests, an incremental `cargo build --locked`, all
+498 Rust tests, and the optimized locked release build passed. The broader test
+and release runs were made only after the user explicitly requested them; the
+full suite included its JACK-free synthetic stress cases. No JACK client, synth
+process, MIDI transmission/playback, audible or physical-hardware test, or
+Clippy run was used. The established screenshot set was not regenerated during
+the physical-controller review freeze.
 
 Preferred routing and resolved runtime routing are separate. MIDI targets are
-re-resolved for every transport start: an unavailable exact target tries the
-configured external output and then the loaded internal instrument without
-mutating the Project, so a returned target is used on a later play. Controller
+re-resolved for every transport start. An unavailable exact MIDI target may use
+the configured external hardware route but never falls into the Pattern's
+software synth; its preference is not mutated, so a returned target is used on
+a later play. Portable `AUTO` retains its machine-default compatibility path.
+Controller
 open failure leaves keyboard navigation/entry active. Audio activation tries
 the preferred pair, ordered named internal pairs, and the separately configured
 analogue headphone pair last; the status identifies both fallback and missing

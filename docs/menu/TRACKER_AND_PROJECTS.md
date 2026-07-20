@@ -176,25 +176,18 @@ private-WAV cleanup. `MUTE PG` toggles the current four-lane page.
 `PANIC`, `STOP`, and `HELP` retain their normal meanings. `EXIT` returns to the
 Pattern editor.
 
-## N00B setup
+## N00B mode and note length
 
-N00B mode maps incoming notes to the nearest pitch in one selected major or
-natural-minor scale. Equal-distance ties map downward. Exact source-note
-ownership is retained so every note-off releases the correct mapped note.
+N00B mode is a simpler entry surface over the same Pattern cells. The selected
+page chooses the synth, MIDI instrument, or drums being played and edited. Its
+pages provide page/track movement; `LENGTH`, `DELETE`, `N-OFF`, and `NORMAL`;
+play, save, and Files; plus panic, help, and one-level Exit.
 
-### OPS — choose a scale
-
-![Populated N00B setup with the OPS page](../images/menu/noob-setup-ops.png)
-
-`ROOT-` and `ROOT+` choose the chromatic root. `SCALE` toggles major/natural
-minor. `DONE` enables the selected mapping and returns to the Pattern.
-
-### SYS — stop or cancel setup
-
-![Populated N00B setup with the SYS page](../images/menu/noob-setup-sys.png)
-
-`PANIC`, `STOP`, and `HELP` remain available. `EXIT` returns without enabling
-the draft selection.
+`LENGTH` opens one rotary selector. Turn through `1/1`, `1/2`, `1/4`, `1/8`,
+`1/16`, and `1/32`, then click or choose `DONE`. `CANCEL`/`EXIT` keeps the old
+length. The default is `1/16`. A played note writes its required end using the
+existing row/gate/note-off representation and advances to the next insertion
+position. `NORMAL` leaves every existing cell untouched.
 
 ## Project Files
 
@@ -388,8 +381,9 @@ selected column. The configured bank-select order is honored during playback.
 
 ## Target field editor
 
-The target field lists the active software instrument, configured external
-route, and discovered named MIDI outputs. Offline selections are retained in
+The target field lists discovered synthv1 presets, the configured external
+route, and discovered named MIDI outputs. A synth choice belongs to the Pattern,
+not the standalone Software Synth workspace. Offline selections are retained in
 the Project rather than silently rewritten.
 
 ### OPS — confirm destination

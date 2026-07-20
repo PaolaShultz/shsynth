@@ -191,10 +191,11 @@ pub enum Action {
     TrackerRewind,
     TrackerRecordToggle,
     TrackerModeNoob,
-    NoobRootDown,
-    NoobRootUp,
-    NoobScale,
-    ConfirmNoob,
+    OpenNoobLength,
+    ConfirmNoobLength,
+    CancelNoobLength,
+    ConfirmRoutingDefaults,
+    CancelRoutingDefaults,
     LoopImport,
     LoopRemove,
     LoopSourceDown,
@@ -347,6 +348,8 @@ pub enum MenuContext {
     #[default]
     Normal,
     TrackerEdit,
+    TrackerNoob,
+    RoutingDefaults,
     TrackerRecord,
     TrackerNoteEdit,
     PageTarget,
@@ -559,10 +562,10 @@ const TRACKER_NOOB: [MenuPage; 4] = [
     page(
         "OPS",
         [
-            on("ROOT-", Action::NoobRootDown),
-            on("ROOT+", Action::NoobRootUp),
-            on("SCALE", Action::NoobScale),
-            on("DONE", Action::ConfirmNoob),
+            on("DONE", Action::ConfirmNoobLength),
+            on("CANCEL", Action::CancelNoobLength),
+            off(""),
+            off(""),
         ],
     ),
     page("", [off(""), off(""), off(""), off("")]),
@@ -573,7 +576,67 @@ const TRACKER_NOOB: [MenuPage; 4] = [
             on("PANIC", Action::StopAll),
             on("HELP", Action::OpenHelp),
             off(""),
+            on("EXIT", Action::CancelNoobLength),
+        ],
+    ),
+];
+const TRACKER_NOOB_MODE: [MenuPage; 4] = [
+    page(
+        "MOVE",
+        [
+            on("PAGE-", Action::PreviousTrackerPage),
+            on("PAGE+", Action::NextTrackerPage),
+            on("TRACK-", Action::PreviousTrack),
+            on("TRACK+", Action::NextTrack),
+        ],
+    ),
+    page(
+        "EDIT",
+        [
+            on("LENGTH", Action::OpenNoobLength),
+            on("DELETE", Action::TrackerErase),
+            on("N-OFF", Action::TrackerNoteOff),
+            on("NORMAL", Action::TrackerModeNoob),
+        ],
+    ),
+    page(
+        "PLAY",
+        [
+            on("PLAY", Action::TrackerPlayToggle),
+            on("SAVE", Action::SaveSong),
+            on("FILES", Action::OpenTrackerFiles),
+            off(""),
+        ],
+    ),
+    page(
+        "SYS",
+        [
+            on("PANIC", Action::StopAll),
+            off(""),
+            on("HELP", Action::OpenHelp),
             on("EXIT", Action::Back),
+        ],
+    ),
+];
+const ROUTING_DEFAULTS: [MenuPage; 4] = [
+    page(
+        "DEFAULT",
+        [
+            on("CONFIRM", Action::ConfirmRoutingDefaults),
+            on("CANCEL", Action::CancelRoutingDefaults),
+            off(""),
+            off(""),
+        ],
+    ),
+    page("", [off(""), off(""), off(""), off("")]),
+    page("", [off(""), off(""), off(""), off("")]),
+    page(
+        "SYS",
+        [
+            on("PANIC", Action::StopAll),
+            off(""),
+            off(""),
+            on("EXIT", Action::CancelRoutingDefaults),
         ],
     ),
 ];
@@ -1162,6 +1225,9 @@ const MIDI_SETUP: [MenuPage; 4] = [
 ];
 
 pub fn pages(screen: Screen, context: MenuContext) -> &'static [MenuPage; 4] {
+    if context == MenuContext::RoutingDefaults {
+        return &ROUTING_DEFAULTS;
+    }
     match (screen, context) {
         (Screen::Home, _) => &HOME,
         (Screen::Presets, _) => &PRESETS,
@@ -1171,6 +1237,7 @@ pub fn pages(screen: Screen, context: MenuContext) -> &'static [MenuPage; 4] {
         (Screen::Tracker, MenuContext::TrackerNoteEdit) => &TRACKER_NOTE_EDIT,
         (Screen::Tracker, MenuContext::TrackerRecord) => &TRACKER_RECORD,
         (Screen::Tracker, MenuContext::TrackerEdit) => &TRACKER_EDIT,
+        (Screen::Tracker, MenuContext::TrackerNoob) => &TRACKER_NOOB_MODE,
         (Screen::Tracker, _) => &TRACKER,
         (Screen::TrackerFiles, MenuContext::PatternClear) => &PATTERN_CLEAR,
         (Screen::TrackerFiles, MenuContext::PatternTools) => &PATTERN_TOOLS,
@@ -1230,6 +1297,39 @@ mod tests {
     }
 
     #[test]
+    fn noob_controller_context_keeps_move_length_transport_save_and_exit() {
+        let noob_pages = pages(Screen::Tracker, MenuContext::TrackerNoob);
+        let labels = noob_pages
+            .iter()
+            .flat_map(|page| page.slots)
+            .filter(|slot| slot.state == SlotState::Enabled)
+            .map(|slot| slot.label)
+            .collect::<HashSet<_>>();
+        for expected in [
+            "PAGE-", "PAGE+", "TRACK-", "TRACK+", "LENGTH", "DELETE", "N-OFF", "NORMAL", "PLAY",
+            "SAVE", "FILES", "PANIC", "HELP", "EXIT",
+        ] {
+            assert!(labels.contains(expected), "missing {expected}");
+        }
+        assert!(!labels.contains("PGUP"));
+        assert!(!labels.contains("PGDOWN"));
+
+        let selector = pages(Screen::TrackerNoob, MenuContext::Normal);
+        assert_eq!(
+            selector[0].slots[0].dispatch(),
+            Some(Action::ConfirmNoobLength)
+        );
+        assert_eq!(
+            selector[0].slots[1].dispatch(),
+            Some(Action::CancelNoobLength)
+        );
+        assert_eq!(
+            selector[3].slots[3].dispatch(),
+            Some(Action::CancelNoobLength)
+        );
+    }
+
+    #[test]
     fn empty_slots_and_pages_do_not_dispatch() {
         let empty_slot = slot(Screen::Meter, MenuContext::Normal, 1, 1).unwrap();
         let empty_page = pages(Screen::Help, MenuContext::Normal)[1];
@@ -1280,10 +1380,12 @@ mod tests {
             (Screen::Tracker, MenuContext::TrackerEdit),
             (Screen::Tracker, MenuContext::TrackerRecord),
             (Screen::Tracker, MenuContext::TrackerNoteEdit),
+            (Screen::Tracker, MenuContext::TrackerNoob),
             (Screen::TrackerFiles, MenuContext::Normal),
             (Screen::TrackerFiles, MenuContext::PatternClear),
             (Screen::TrackerFiles, MenuContext::PatternTools),
             (Screen::TrackerFiles, MenuContext::DrumPatterns),
+            (Screen::TrackerFiles, MenuContext::RoutingDefaults),
             (Screen::TrackerPages, MenuContext::Normal),
             (Screen::TrackerPages, MenuContext::PageTarget),
             (Screen::TrackerTools, MenuContext::Normal),
@@ -1561,10 +1663,12 @@ mod tests {
             (Screen::Tracker, MenuContext::TrackerEdit),
             (Screen::Tracker, MenuContext::TrackerRecord),
             (Screen::Tracker, MenuContext::TrackerNoteEdit),
+            (Screen::Tracker, MenuContext::TrackerNoob),
             (Screen::TrackerFiles, MenuContext::Normal),
             (Screen::TrackerFiles, MenuContext::PatternClear),
             (Screen::TrackerFiles, MenuContext::PatternTools),
             (Screen::TrackerFiles, MenuContext::DrumPatterns),
+            (Screen::TrackerFiles, MenuContext::RoutingDefaults),
             (Screen::TrackerPages, MenuContext::Normal),
             (Screen::TrackerPages, MenuContext::PageTarget),
             (Screen::TrackerPages, MenuContext::PageChannel),
@@ -1641,10 +1745,11 @@ mod tests {
             Action::TrackerRewind,
             Action::TrackerRecordToggle,
             Action::TrackerModeNoob,
-            Action::NoobRootDown,
-            Action::NoobRootUp,
-            Action::NoobScale,
-            Action::ConfirmNoob,
+            Action::OpenNoobLength,
+            Action::ConfirmNoobLength,
+            Action::CancelNoobLength,
+            Action::ConfirmRoutingDefaults,
+            Action::CancelRoutingDefaults,
             Action::TrackerMute,
             Action::TrackerPageMute,
             Action::NextTrackerPage,

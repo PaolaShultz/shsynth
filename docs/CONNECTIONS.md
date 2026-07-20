@@ -46,9 +46,11 @@ own configured FluidSynth when selected.
 ## Software instruments
 
 SHR-DAW supports synthv1, Yoshimi, and FluidSynth as separately installed
-programs. Only one SHR-DAW-managed software synth runs at a time. Changing it
-sends All Notes Off and stops only the process SHR-DAW started before opening
-the next one.
+programs. Only one SHR-DAW-managed software synth runs at a time. The
+standalone Software Synth workspace keeps its sound while moving between its
+Presets and Playback screens, then sends All Notes Off and unloads it on the
+top-level return to Home. FT2 separately loads the synthv1 preset named by its
+current Pattern. Replacement and exit stop only a process SHR-DAW owns.
 
 Each engine has a configured MIDI input and JACK audio output. See
 [Configuration and routing](CONFIGURATION.md) for the settings.
@@ -63,18 +65,18 @@ The separate loop player and recorder do not pass through this graph.
 
 Each tracker page can use its own MIDI output, with four independent column
 channels/banks/programs. Several pages can
-play several hardware instruments at the same time. A page can also target the
-currently active SHR-DAW software instrument.
+play several hardware instruments at the same time. A page can instead own a
+named synthv1 preset; it never inherits the standalone workspace selection.
 
 Portable `AUTO` pages save no output or channel and follow the machine default.
 Explicit pages remember their preferred port. If it is disconnected, the page
-shows `FALLBACK` while the configured output or loaded instrument is usable,
+shows `FALLBACK` while the configured output is usable,
 otherwise `OFFLINE`. Its notes and preference are kept; reconnecting it makes
 the original mapping usable on the next play without rewriting the Project.
 
 Named sound lists for supported external instruments come from
 [MIDI device profiles](MIDI_DEVICE_PROFILES.md). Instruments without a profile
-still have the normal MIDI program numbers 0–127.
+still show the normal MIDI programs 1–128 (stored/sent as values 0–127).
 
 ## Audio output and recording
 
