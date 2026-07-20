@@ -2,22 +2,34 @@
 //! activation; the process callback only reads immutable PCM and writes two
 //! bounded output buffers.
 
-use crate::config::LoopPlayerConfig;
+use crate::config::{ControllerClockConfig, LoopPlayerConfig};
 use crate::dsp::{AtomicMeter, MeterAccumulator, MeterSnapshot, StereoFrame, MAX_METER_WINDOW};
 use crate::jack::{Client as JackClient, Port as JackPort, PortDirection, PortGetBuffer};
 use crate::sequencer::{LoopSettings, Song};
+use alsa::seq::{Addr, EvQueueControl, Event, EventType, PortCap, PortType, Seq};
+use alsa::Direction;
 use anyhow::{bail, Context, Result};
 use libc::{c_int, c_uint, c_void};
+use midir::MidiOutput;
+use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 const BEAT_UNITS: f64 = 1_000_000.0;
 const ANALYSIS_HOP: usize = 1024;
 const LOOP_OUTPUT_PORT_NAMES: [&str; 2] = ["output_l", "output_r"];
+
+pub(crate) fn configured_output_ports(config: &LoopPlayerConfig) -> [String; 2] {
+    [
+        format!("{}:{}", config.client_name, LOOP_OUTPUT_PORT_NAMES[0]),
+        format!("{}:{}", config.client_name, LOOP_OUTPUT_PORT_NAMES[1]),
+    ]
+}
 const MAX_LOOP_CALLBACK_FRAMES: usize = MAX_METER_WINDOW;
 // Decoding is deliberately bounded because the whole loop stays resident in
 // memory for the lock-free JACK callback. Six million stereo frames use about
@@ -29,33 +41,387 @@ pub struct TransportClock {
     playing: AtomicBool,
     generation: AtomicU64,
     origin_beat: AtomicU64,
+    controller_tx: Option<mpsc::Sender<ControllerClockCommand>>,
+    controller_thread: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 impl Default for TransportClock {
     fn default() -> Self {
-        Self {
-            playing: AtomicBool::new(false),
-            generation: AtomicU64::new(0),
-            origin_beat: AtomicU64::new(0),
-        }
+        Self::new(
+            &ControllerClockConfig {
+                enabled: false,
+                client_name: String::new(),
+                output_match: String::new(),
+            },
+            120,
+        )
     }
 }
 
 impl TransportClock {
-    pub fn play(&self, origin_beat: f64, _bpm: u16) {
+    pub fn new(config: &ControllerClockConfig, initial_bpm: u16) -> Self {
+        let (controller_tx, controller_thread) = if config.enabled {
+            let (tx, rx) = mpsc::channel();
+            let output = AlsaControllerClockOutput::new(config.clone());
+            let handle = thread::Builder::new()
+                .name("shsynth-controller-clock".into())
+                .spawn(move || run_controller_clock(rx, Box::new(output), f64::from(initial_bpm)))
+                .ok();
+            match handle {
+                Some(handle) => (Some(tx), Some(handle)),
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+        Self {
+            playing: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
+            origin_beat: AtomicU64::new(0),
+            controller_tx,
+            controller_thread: Mutex::new(controller_thread),
+        }
+    }
+
+    pub fn play(&self, origin_beat: f64, bpm: u16) {
         self.origin_beat.store(
             (origin_beat.max(0.0) * BEAT_UNITS) as u64,
             Ordering::Release,
         );
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.playing.store(true, Ordering::Release);
+        if let Some(tx) = &self.controller_tx {
+            let _ = tx.send(ControllerClockCommand::Start(f64::from(bpm)));
+        }
     }
 
     pub fn stop(&self) {
-        self.playing.store(false, Ordering::Release);
+        if self.playing.swap(false, Ordering::AcqRel) {
+            if let Some(tx) = &self.controller_tx {
+                let _ = tx.send(ControllerClockCommand::Stop);
+            }
+        }
     }
 
-    pub fn tempo(&self, _bpm: f64) {}
+    pub fn tempo(&self, bpm: f64) {
+        if let Some(tx) = &self.controller_tx {
+            let _ = tx.send(ControllerClockCommand::Tempo(bpm.clamp(20.0, 300.0)));
+        }
+    }
+
+    /// Reposition the loop at a repeated Project boundary without emitting a
+    /// second MIDI Start. Controller transport remains one continuous run.
+    pub fn restart_cycle(&self, origin_beat: f64) {
+        self.origin_beat.store(
+            (origin_beat.max(0.0) * BEAT_UNITS) as u64,
+            Ordering::Release,
+        );
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+impl Drop for TransportClock {
+    fn drop(&mut self) {
+        self.stop();
+        if let Some(tx) = &self.controller_tx {
+            let _ = tx.send(ControllerClockCommand::Shutdown);
+        }
+        if let Ok(mut handle) = self.controller_thread.lock() {
+            if let Some(handle) = handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ControllerClockCommand {
+    Start(f64),
+    Tempo(f64),
+    Stop,
+    Shutdown,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ControllerClockMessage {
+    TimingClock,
+    Start,
+    Stop,
+}
+
+impl ControllerClockMessage {
+    #[cfg(test)]
+    const fn bytes(self) -> &'static [u8] {
+        match self {
+            Self::TimingClock => &[0xf8],
+            Self::Start => &[0xfa],
+            Self::Stop => &[0xfc],
+        }
+    }
+}
+
+trait ControllerClockOutput: Send {
+    fn send(&mut self, message: ControllerClockMessage) -> std::result::Result<(), String>;
+}
+
+struct AlsaControllerClockOutput {
+    config: ControllerClockConfig,
+    connection: Option<AlsaDirectClockConnection>,
+}
+
+struct AlsaDirectClockConnection {
+    sequencer: Seq,
+    source_port: i32,
+    destination: Addr,
+}
+
+impl AlsaControllerClockOutput {
+    fn new(config: ControllerClockConfig) -> Self {
+        Self {
+            config,
+            connection: None,
+        }
+    }
+
+    fn connect(&mut self) -> std::result::Result<(), String> {
+        let output =
+            MidiOutput::new(&self.config.client_name).map_err(|error| error.to_string())?;
+        let ports = output.ports();
+        let names = ports
+            .iter()
+            .map(|port| output.port_name(port).unwrap_or_default())
+            .collect::<Vec<_>>();
+        let index = matching_controller_output_index(&names, &self.config.output_match)?;
+        let destination = alsa_address_from_midir_name(&names[index])?;
+        drop(output);
+
+        let sequencer =
+            Seq::open(None, Some(Direction::Playback), false).map_err(|error| error.to_string())?;
+        let client_name = CString::new(self.config.client_name.as_str())
+            .map_err(|_| "controller clock client name contains a NUL byte".to_owned())?;
+        sequencer
+            .set_client_name(&client_name)
+            .map_err(|error| error.to_string())?;
+        let destination_info = sequencer
+            .get_any_port_info(destination)
+            .map_err(|error| error.to_string())?;
+        if !destination_info.get_capability().contains(PortCap::WRITE) {
+            return Err(format!(
+                "controller clock destination {}:{} is not writable",
+                destination.client, destination.port
+            ));
+        }
+        let port_name = CString::new("SHR-DAW controller clock only").expect("static port name");
+        let source_port = sequencer
+            .create_simple_port(
+                &port_name,
+                controller_clock_source_capabilities(),
+                PortType::MIDI_GENERIC | PortType::APPLICATION,
+            )
+            .map_err(|error| error.to_string())?;
+        self.connection = Some(AlsaDirectClockConnection {
+            sequencer,
+            source_port,
+            destination,
+        });
+        Ok(())
+    }
+}
+
+fn controller_clock_source_capabilities() -> PortCap {
+    PortCap::READ | PortCap::NO_EXPORT
+}
+
+fn alsa_address_from_midir_name(name: &str) -> std::result::Result<Addr, String> {
+    let address = name
+        .rsplit_once(' ')
+        .map(|(_, address)| address)
+        .ok_or_else(|| format!("ALSA output {name:?} has no client:port address"))?;
+    address
+        .parse::<Addr>()
+        .map_err(|_| format!("ALSA output {name:?} has an invalid client:port address"))
+}
+
+pub(crate) fn matching_controller_output_index(
+    names: &[String],
+    wanted: &str,
+) -> std::result::Result<usize, String> {
+    if wanted.trim().is_empty() || wanted.trim() != wanted {
+        return Err("controller clock output must be one exact ALSA port name".into());
+    }
+    let stable_wanted = crate::controller_learn::stable_input_match(wanted);
+    let matches = names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| {
+            (name == wanted || crate::controller_learn::stable_input_match(name) == stable_wanted)
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [index] => Ok(*index),
+        [] => Err(format!("controller clock output {wanted:?} is offline")),
+        _ => Err(format!(
+            "controller clock output {wanted:?} is ambiguous ({} exact stable-name matches)",
+            matches.len()
+        )),
+    }
+}
+
+pub fn controller_clock_outputs(client_name: &str) -> Result<Vec<String>> {
+    let output = MidiOutput::new(client_name)?;
+    let mut names = output
+        .ports()
+        .iter()
+        .filter_map(|port| output.port_name(port).ok())
+        .collect::<Vec<_>>();
+    names.sort();
+    Ok(names)
+}
+
+impl ControllerClockOutput for AlsaControllerClockOutput {
+    fn send(&mut self, message: ControllerClockMessage) -> std::result::Result<(), String> {
+        if self.connection.is_none() {
+            self.connect()?;
+        }
+        let connection = self
+            .connection
+            .as_mut()
+            .expect("controller clock connection was established");
+        let event_type = match message {
+            ControllerClockMessage::TimingClock => EventType::Clock,
+            ControllerClockMessage::Start => EventType::Start,
+            ControllerClockMessage::Stop => EventType::Stop,
+        };
+        let mut event = Event::new(
+            event_type,
+            &EvQueueControl {
+                queue: 0,
+                value: (),
+            },
+        );
+        event.set_source(connection.source_port);
+        event.set_dest(connection.destination);
+        event.set_direct();
+        let result = connection
+            .sequencer
+            .event_output_direct(&mut event)
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+        if result.is_err() {
+            self.connection = None;
+        }
+        result
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ControllerClockPhase {
+    interval_seconds: f64,
+    next_tick_seconds: f64,
+}
+
+impl ControllerClockPhase {
+    fn start(now: Duration, bpm: f64) -> Self {
+        Self {
+            interval_seconds: controller_clock_interval_seconds(bpm),
+            next_tick_seconds: now.as_secs_f64(),
+        }
+    }
+
+    fn tempo(&mut self, now: Duration, bpm: f64) {
+        let now = now.as_secs_f64();
+        let new_interval = controller_clock_interval_seconds(bpm);
+        let remaining = (self.next_tick_seconds - now).max(0.0);
+        let phase_remaining = (remaining / self.interval_seconds).clamp(0.0, 1.0);
+        self.interval_seconds = new_interval;
+        self.next_tick_seconds = now + new_interval * phase_remaining;
+    }
+
+    /// Return at most one due pulse. If scheduling was delayed, advance to
+    /// the first future phase instead of sending a catch-up burst.
+    fn take_due(&mut self, now: Duration) -> bool {
+        let now = now.as_secs_f64();
+        // `Duration` has nanosecond resolution while phase is retained as a
+        // fractional second to avoid cumulative rounding. Treat conversion
+        // to the nearest nanosecond as the same deadline.
+        if now + 0.000_000_001 < self.next_tick_seconds {
+            return false;
+        }
+        self.next_tick_seconds += self.interval_seconds;
+        if self.next_tick_seconds <= now {
+            let skipped = ((now - self.next_tick_seconds) / self.interval_seconds).floor() + 1.0;
+            self.next_tick_seconds += skipped * self.interval_seconds;
+        }
+        true
+    }
+
+    fn next_tick(&self) -> Duration {
+        Duration::from_secs_f64(self.next_tick_seconds)
+    }
+}
+
+#[cfg(test)]
+fn controller_clock_interval(bpm: f64) -> Duration {
+    Duration::from_secs_f64(controller_clock_interval_seconds(bpm))
+}
+
+fn controller_clock_interval_seconds(bpm: f64) -> f64 {
+    60.0 / bpm.clamp(20.0, 300.0) / 24.0
+}
+
+fn run_controller_clock(
+    receiver: mpsc::Receiver<ControllerClockCommand>,
+    mut output: Box<dyn ControllerClockOutput>,
+    initial_bpm: f64,
+) {
+    let origin = Instant::now();
+    let elapsed = || origin.elapsed();
+    let mut phase = ControllerClockPhase::start(elapsed(), initial_bpm);
+    let mut output_available = true;
+    let mut clock_sent = false;
+    let mut transport_running = false;
+    loop {
+        let timeout = phase.next_tick().saturating_sub(elapsed());
+        match receiver.recv_timeout(timeout) {
+            Ok(ControllerClockCommand::Start(bpm)) => {
+                phase.tempo(elapsed(), bpm);
+                if transport_running && output_available {
+                    let _ = output.send(ControllerClockMessage::Stop);
+                }
+                if !clock_sent {
+                    output_available = output.send(ControllerClockMessage::TimingClock).is_ok();
+                    clock_sent = output_available;
+                    let _ = phase.take_due(elapsed());
+                }
+                if output_available {
+                    output_available = output.send(ControllerClockMessage::Start).is_ok();
+                }
+                transport_running = true;
+            }
+            Ok(ControllerClockCommand::Tempo(bpm)) => {
+                phase.tempo(elapsed(), bpm);
+            }
+            Ok(ControllerClockCommand::Stop) => {
+                if transport_running && output_available {
+                    let _ = output.send(ControllerClockMessage::Stop);
+                }
+                transport_running = false;
+            }
+            Ok(ControllerClockCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if transport_running && output_available {
+                    let _ = output.send(ControllerClockMessage::Stop);
+                }
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if phase.take_due(elapsed()) && output_available {
+                    output_available = output.send(ControllerClockMessage::TimingClock).is_ok();
+                    clock_sent = output_available;
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -811,6 +1177,230 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("shr-loop-{name}-{}-{nanos}", std::process::id()))
+    }
+
+    fn quarter_note(bpm: f64) -> Duration {
+        Duration::from_secs_f64(60.0 / bpm)
+    }
+
+    #[test]
+    fn controller_clock_is_exactly_twenty_four_ppqn_at_representative_tempos() {
+        for bpm in [20.0, 60.0, 120.0, 173.0, 300.0] {
+            let mut phase = ControllerClockPhase::start(Duration::ZERO, bpm);
+            let end = quarter_note(bpm);
+            let mut pulses = Vec::new();
+            while phase.next_tick() < end {
+                let at = phase.next_tick();
+                assert!(phase.take_due(at));
+                pulses.push(at);
+            }
+            assert_eq!(pulses.len(), 24, "wrong PPQN at {bpm} BPM");
+            for pair in pulses.windows(2) {
+                let actual = pair[1] - pair[0];
+                assert!(actual.abs_diff(controller_clock_interval(bpm)) <= Duration::from_nanos(1));
+            }
+        }
+    }
+
+    #[test]
+    fn controller_clock_tempo_change_keeps_phase_and_never_catches_up_in_a_burst() {
+        let mut phase = ControllerClockPhase::start(Duration::ZERO, 120.0);
+        assert!(phase.take_due(Duration::ZERO));
+        let old_next = phase.next_tick();
+        let change = old_next / 2;
+        phase.tempo(change, 60.0);
+        let expected = change + controller_clock_interval(60.0) / 2;
+        assert!(phase.next_tick().abs_diff(expected) <= Duration::from_nanos(2));
+        let deadline = phase.next_tick();
+        assert!(!phase.take_due(deadline - Duration::from_nanos(5)));
+        assert!(phase.take_due(deadline));
+        assert!(!phase.take_due(deadline));
+
+        let delayed = deadline + Duration::from_secs(2);
+        assert!(phase.take_due(delayed));
+        assert!(!phase.take_due(delayed));
+        assert!(phase.next_tick() > delayed);
+    }
+
+    #[test]
+    fn controller_clock_is_independent_of_swing_pages_and_destinations() {
+        let pulses = |irrelevant_event_offsets: &[Duration]| {
+            let mut phase = ControllerClockPhase::start(Duration::ZERO, 100.0);
+            let mut result = Vec::new();
+            for _ in 0..48 {
+                let at = phase.next_tick();
+                assert!(phase.take_due(at));
+                result.push(at);
+            }
+            let _ = irrelevant_event_offsets;
+            result
+        };
+        let straight = pulses(&[]);
+        let swung_many_destinations = pulses(&[
+            Duration::from_millis(17),
+            Duration::from_millis(211),
+            Duration::from_millis(499),
+        ]);
+        assert_eq!(straight, swung_many_destinations);
+    }
+
+    #[test]
+    fn clock_only_protocol_has_no_channel_voice_sysex_continue_or_song_position() {
+        let bytes = [
+            ControllerClockMessage::TimingClock.bytes(),
+            ControllerClockMessage::Start.bytes(),
+            ControllerClockMessage::Stop.bytes(),
+        ];
+        assert_eq!(bytes, [&[0xf8][..], &[0xfa][..], &[0xfc][..]]);
+        assert!(bytes
+            .iter()
+            .flat_map(|message| message.iter())
+            .all(|byte| !matches!(byte, 0x80..=0xef | 0xf0 | 0xf2 | 0xfb)));
+        let capabilities = controller_clock_source_capabilities();
+        assert!(capabilities.contains(PortCap::NO_EXPORT));
+        assert!(!capabilities.contains(PortCap::SUBS_READ));
+    }
+
+    #[test]
+    fn controller_clock_output_uses_one_exact_stable_alsa_port_name() {
+        let names = vec![
+            "Minilab3:Minilab3 MIDI 32:0".to_owned(),
+            "Minilab3:Minilab3 DIN THRU 32:1".to_owned(),
+            "Other:Other MIDI 40:0".to_owned(),
+        ];
+        assert_eq!(
+            matching_controller_output_index(&names, "Minilab3:Minilab3 MIDI").unwrap(),
+            0
+        );
+        assert!(matching_controller_output_index(&names, "Minilab3").is_err());
+        let ambiguous = vec![
+            "Minilab3:Minilab3 MIDI 32:0".to_owned(),
+            "Minilab3:Minilab3 MIDI 41:0".to_owned(),
+        ];
+        assert!(matching_controller_output_index(&ambiguous, "Minilab3:Minilab3 MIDI").is_err());
+        assert_eq!(
+            alsa_address_from_midir_name(&names[0]).unwrap(),
+            Addr {
+                client: 32,
+                port: 0
+            }
+        );
+        assert!(alsa_address_from_midir_name("Minilab3:Minilab3 MIDI").is_err());
+    }
+
+    struct RecordingClockOutput {
+        messages: Arc<Mutex<Vec<Vec<u8>>>>,
+        fail: bool,
+    }
+
+    impl ControllerClockOutput for RecordingClockOutput {
+        fn send(&mut self, message: ControllerClockMessage) -> std::result::Result<(), String> {
+            if self.fail {
+                return Err("offline".into());
+            }
+            self.messages.lock().unwrap().push(message.bytes().to_vec());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn controller_transport_sends_one_start_and_stop_and_offline_shutdown_joins() {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = mpsc::channel();
+        let recorded = Arc::clone(&messages);
+        let worker = thread::spawn(move || {
+            run_controller_clock(
+                rx,
+                Box::new(RecordingClockOutput {
+                    messages: recorded,
+                    fail: false,
+                }),
+                120.0,
+            )
+        });
+        tx.send(ControllerClockCommand::Start(120.0)).unwrap();
+        thread::sleep(Duration::from_millis(55));
+        tx.send(ControllerClockCommand::Tempo(90.0)).unwrap();
+        tx.send(ControllerClockCommand::Stop).unwrap();
+        tx.send(ControllerClockCommand::Stop).unwrap();
+        thread::sleep(Duration::from_millis(30));
+        tx.send(ControllerClockCommand::Shutdown).unwrap();
+        worker.join().unwrap();
+        let messages = messages.lock().unwrap();
+        assert_eq!(
+            messages.iter().filter(|m| m.as_slice() == [0xfa]).count(),
+            1
+        );
+        assert_eq!(
+            messages.iter().filter(|m| m.as_slice() == [0xfc]).count(),
+            1
+        );
+        assert!(messages.iter().any(|m| m.as_slice() == [0xf8]));
+        let start = messages
+            .iter()
+            .position(|m| m.as_slice() == [0xfa])
+            .unwrap();
+        let stop = messages
+            .iter()
+            .position(|m| m.as_slice() == [0xfc])
+            .unwrap();
+        assert!(messages[..start].iter().any(|m| m.as_slice() == [0xf8]));
+        assert!(messages[stop + 1..].iter().any(|m| m.as_slice() == [0xf8]));
+        assert!(messages
+            .iter()
+            .all(|message| matches!(message.as_slice(), [0xf8] | [0xfa] | [0xfc])));
+
+        let (tx, rx) = mpsc::channel();
+        let offline = thread::spawn(move || {
+            run_controller_clock(
+                rx,
+                Box::new(RecordingClockOutput {
+                    messages: Arc::new(Mutex::new(Vec::new())),
+                    fail: true,
+                }),
+                120.0,
+            )
+        });
+        tx.send(ControllerClockCommand::Start(120.0)).unwrap();
+        tx.send(ControllerClockCommand::Stop).unwrap();
+        tx.send(ControllerClockCommand::Shutdown).unwrap();
+        offline.join().unwrap();
+
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = mpsc::channel();
+        let recorded = Arc::clone(&messages);
+        let shutdown = thread::spawn(move || {
+            run_controller_clock(
+                rx,
+                Box::new(RecordingClockOutput {
+                    messages: recorded,
+                    fail: false,
+                }),
+                120.0,
+            )
+        });
+        tx.send(ControllerClockCommand::Start(120.0)).unwrap();
+        tx.send(ControllerClockCommand::Shutdown).unwrap();
+        shutdown.join().unwrap();
+        let messages = messages.lock().unwrap();
+        assert_eq!(
+            messages.iter().filter(|m| m.as_slice() == [0xfa]).count(),
+            1
+        );
+        assert_eq!(
+            messages.iter().filter(|m| m.as_slice() == [0xfc]).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn disabled_controller_clock_starts_no_worker_and_sends_nothing() {
+        let clock = TransportClock::default();
+        assert!(clock.controller_tx.is_none());
+        assert!(clock.controller_thread.lock().unwrap().is_none());
+        clock.play(0.0, 120);
+        clock.tempo(90.0);
+        clock.stop();
     }
 
     fn test_renderer(samples: Vec<[f32; 2]>) -> (LoopRenderer, Arc<AtomicMeter>) {

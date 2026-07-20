@@ -63,6 +63,17 @@ pub struct ExternalMidiConfig {
     pub gesture_settle: Duration,
 }
 
+/// Dedicated clock/transport route to an input controller. This route is
+/// deliberately separate from tracker destinations so it can never carry
+/// notes, controller changes, programs, or device configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControllerClockConfig {
+    pub enabled: bool,
+    pub client_name: String,
+    /// Exact ALSA MIDI output port name; partial matches are never accepted.
+    pub output_match: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct StereoInputConfig {
     pub name: String,
@@ -161,6 +172,9 @@ pub struct AudioGraphConfig {
     pub enabled: bool,
     pub client_name: String,
     pub maximum_callback_frames: u32,
+    pub input: Option<StereoInputConfig>,
+    pub input_direct_monitoring: bool,
+    pub confirm_doubled_monitoring: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -187,6 +201,7 @@ pub struct RuntimeConfig {
     pub audio_engine_cpu: Option<usize>,
     pub cpu_temperature_path: Option<PathBuf>,
     pub external_midi: ExternalMidiConfig,
+    pub controller_clock: ControllerClockConfig,
     pub capture: AudioCaptureConfig,
     pub loop_player: LoopPlayerConfig,
 }
@@ -308,6 +323,9 @@ impl Default for RuntimeConfig {
                 enabled: false,
                 client_name: "shr-graph".into(),
                 maximum_callback_frames: 4_096,
+                input: None,
+                input_direct_monitoring: false,
+                confirm_doubled_monitoring: false,
             },
             audio_engine_cpu: None,
             cpu_temperature_path: None,
@@ -332,6 +350,11 @@ impl Default for RuntimeConfig {
                 profile: "unknown-monophonic-safe".into(),
                 gate_percent: 80,
                 gesture_settle: Duration::from_millis(45),
+            },
+            controller_clock: ControllerClockConfig {
+                enabled: false,
+                client_name: "shs-controller-clock".into(),
+                output_match: String::new(),
             },
             capture: AudioCaptureConfig {
                 client_name: "shs-recorder".into(),
@@ -507,6 +530,28 @@ impl RuntimeConfig {
                     self.audio_graph.maximum_callback_frames =
                         bounded_usize(key, value, 1, 4_096)? as u32
                 }
+                "audio.graph.input" => {
+                    self.audio_graph.input = if value.is_empty() {
+                        None
+                    } else {
+                        let mut fields = value.split('|').map(str::trim);
+                        let input = StereoInputConfig {
+                            name: required(key, fields.next().unwrap_or(""))?.into(),
+                            left_port: required(key, fields.next().unwrap_or(""))?.into(),
+                            right_port: required(key, fields.next().unwrap_or(""))?.into(),
+                        };
+                        if fields.next().is_some() {
+                            bail!("{key} must be NAME|LEFT_JACK_PORT|RIGHT_JACK_PORT");
+                        }
+                        Some(input)
+                    }
+                }
+                "audio.graph.input_direct_monitoring" => {
+                    self.audio_graph.input_direct_monitoring = boolean(key, value)?
+                }
+                "audio.graph.confirm_doubled_monitoring" => {
+                    self.audio_graph.confirm_doubled_monitoring = boolean(key, value)?
+                }
                 "audio.engine_cpu" => {
                     self.audio_engine_cpu = if value.is_empty() {
                         None
@@ -603,6 +648,11 @@ impl RuntimeConfig {
                     self.external_midi.gesture_settle =
                         Duration::from_millis(bounded_usize(key, value, 10, 250)? as u64)
                 }
+                "controller_clock.enabled" => self.controller_clock.enabled = boolean(key, value)?,
+                "controller_clock.client" => {
+                    self.controller_clock.client_name = required(key, value)?.into()
+                }
+                "controller_clock.output" => self.controller_clock.output_match = value.into(),
                 "capture.client" => self.capture.client_name = required(key, value)?.into(),
                 "capture.directory" => self.capture.directory = expand_home(required(key, value)?),
                 "capture.input" => {
@@ -671,6 +721,14 @@ impl RuntimeConfig {
         if self.audio_graph.enabled && (!self.audio_autoconnect || self.audio_outputs.len() != 2) {
             bail!("audio.graph.enabled requires audio.autoconnect and two audio.output entries");
         }
+        if self
+            .audio_graph
+            .input
+            .as_ref()
+            .is_some_and(|input| input.left_port == input.right_port)
+        {
+            bail!("audio.graph.input must use distinct JACK capture ports");
+        }
         for route in self
             .audio_internal_outputs
             .iter()
@@ -685,6 +743,9 @@ impl RuntimeConfig {
         }
         if self.external_midi.enabled && self.external_midi.output_match.is_empty() {
             bail!("external_midi.enabled requires external_midi.output");
+        }
+        if self.controller_clock.enabled && self.controller_clock.output_match.is_empty() {
+            bail!("controller_clock.enabled requires controller_clock.output");
         }
         if self.external_midi.channels.is_empty() {
             bail!("external_midi requires at least one channel");
@@ -824,6 +885,18 @@ impl RuntimeConfig {
             self.audio_graph.client_name,
             self.audio_graph.maximum_callback_frames
         ));
+        if let Some(input) = &self.audio_graph.input {
+            text.push_str(&format!(
+                "audio.graph.input={}|{}|{}\n",
+                input.name, input.left_port, input.right_port
+            ));
+        } else {
+            text.push_str("audio.graph.input=\n");
+        }
+        text.push_str(&format!(
+            "audio.graph.input_direct_monitoring={}\naudio.graph.confirm_doubled_monitoring={}\n",
+            self.audio_graph.input_direct_monitoring, self.audio_graph.confirm_doubled_monitoring
+        ));
         text.push_str(&format!(
             "audio.engine_cpu={}\n",
             self.audio_engine_cpu
@@ -863,12 +936,14 @@ impl RuntimeConfig {
             text.push_str("external_midi.percussion_note=\n");
         }
         text.push_str(&format!(
-            "external_midi.bank_select={}\nexternal_midi.program_changes={}\nexternal_midi.send_transport={}\nexternal_midi.default_tempo={}\nexternal_midi.pattern_rows={}\nexternal_midi.steps_per_beat={}\nexternal_midi.live_thru={}\nexternal_midi.profile={}\nexternal_midi.gate_percent={}\nexternal_midi.gesture_settle_ms={}\ncapture.client={}\ncapture.directory={}\ncapture.ring_frames={}\ncapture.maximum_callback_frames={}\n",
+            "external_midi.bank_select={}\nexternal_midi.program_changes={}\nexternal_midi.send_transport={}\nexternal_midi.default_tempo={}\nexternal_midi.pattern_rows={}\nexternal_midi.steps_per_beat={}\nexternal_midi.live_thru={}\nexternal_midi.profile={}\nexternal_midi.gate_percent={}\nexternal_midi.gesture_settle_ms={}\ncontroller_clock.enabled={}\ncontroller_clock.client={}\ncontroller_clock.output={}\ncapture.client={}\ncapture.directory={}\ncapture.ring_frames={}\ncapture.maximum_callback_frames={}\n",
             match self.external_midi.bank_select { BankSelectMode::Off => "off", BankSelectMode::Cc0 => "cc0", BankSelectMode::Cc0Cc32 => "cc0+cc32" },
             self.external_midi.program_changes, self.external_midi.send_transport,
             self.external_midi.default_tempo, self.external_midi.default_pattern_rows,
             self.external_midi.steps_per_beat, self.external_midi.live_thru,
-            self.external_midi.profile, self.external_midi.gate_percent, self.external_midi.gesture_settle.as_millis(), self.capture.client_name,
+            self.external_midi.profile, self.external_midi.gate_percent, self.external_midi.gesture_settle.as_millis(),
+            self.controller_clock.enabled, self.controller_clock.client_name,
+            self.controller_clock.output_match, self.capture.client_name,
             self.capture.directory.display(), self.capture.ring_frames,
             self.capture.maximum_callback_frames
         ));
@@ -1109,6 +1184,39 @@ mod tests {
     }
 
     #[test]
+    fn controller_clock_is_default_off_exact_and_round_trips() {
+        assert!(!RuntimeConfig::default().controller_clock.enabled);
+        let path = std::env::temp_dir().join(format!(
+            "shsynth-controller-clock-{}.conf",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            "controller_clock.enabled=true\ncontroller_clock.client=my-clock\ncontroller_clock.output=MiniLab3 MIDI:MiniLab3 MIDI 1 32:0\n",
+        )
+        .unwrap();
+        let config = RuntimeConfig::load(&path).unwrap();
+        assert!(config.controller_clock.enabled);
+        assert_eq!(config.controller_clock.client_name, "my-clock");
+        assert_eq!(
+            config.controller_clock.output_match,
+            "MiniLab3 MIDI:MiniLab3 MIDI 1 32:0"
+        );
+        config.save(&path).unwrap();
+        assert_eq!(
+            RuntimeConfig::load(&path).unwrap().controller_clock,
+            config.controller_clock
+        );
+        fs::write(
+            &path,
+            "controller_clock.enabled=true\ncontroller_clock.output=\n",
+        )
+        .unwrap();
+        assert!(RuntimeConfig::load(&path).is_err());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn audio_engine_cpu_is_optional_and_round_trips() {
         let path =
             std::env::temp_dir().join(format!("shsynth-audio-cpu-{}.conf", std::process::id()));
@@ -1131,19 +1239,31 @@ mod tests {
             std::env::temp_dir().join(format!("shsynth-audio-graph-{}.conf", std::process::id()));
         fs::write(
             &path,
-            "audio.graph.enabled=true\naudio.graph.client=my-graph\naudio.graph.maximum_callback_frames=256\n",
+            "audio.graph.enabled=true\naudio.graph.client=my-graph\naudio.graph.maximum_callback_frames=256\naudio.graph.input=External mix|usb:mix_l|usb:mix_r\naudio.graph.input_direct_monitoring=true\naudio.graph.confirm_doubled_monitoring=true\n",
         )
         .unwrap();
         let config = RuntimeConfig::load(&path).unwrap();
         assert!(config.audio_graph.enabled);
         assert_eq!(config.audio_graph.client_name, "my-graph");
         assert_eq!(config.audio_graph.maximum_callback_frames, 256);
+        assert_eq!(
+            config.audio_graph.input.as_ref().unwrap().name,
+            "External mix"
+        );
+        assert_eq!(
+            config.audio_graph.input.as_ref().unwrap().left_port,
+            "usb:mix_l"
+        );
+        assert!(config.audio_graph.input_direct_monitoring);
+        assert!(config.audio_graph.confirm_doubled_monitoring);
         config.save(&path).unwrap();
         assert!(RuntimeConfig::load(&path).unwrap().audio_graph.enabled);
 
         fs::write(&path, "audio.autoconnect=false\naudio.graph.enabled=true\n").unwrap();
         assert!(RuntimeConfig::load(&path).is_err());
         fs::write(&path, "audio.output=only:left\naudio.graph.enabled=true\n").unwrap();
+        assert!(RuntimeConfig::load(&path).is_err());
+        fs::write(&path, "audio.graph.input=Bad|same:port|same:port\n").unwrap();
         assert!(RuntimeConfig::load(&path).is_err());
         let _ = fs::remove_file(path);
 

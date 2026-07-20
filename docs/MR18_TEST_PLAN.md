@@ -198,3 +198,16 @@ Observed identifiers and routing:
 | 1–16 | | | | | |
 | 17 L | | | | | |
 | 18 R | | | | | |
+
+## Future final-bus acceptance (not yet run)
+
+After the raw multitrack matrix passes, obtain—not guess—the MR18 JACK capture
+names for the deliberately mixed external stereo pair and place them in the
+private `audio.graph.input` setting. With monitor/speaker level controlled,
+verify synth-only, loop-only, input-only, and all-three identity; confirm there
+is no parallel direct loop/synth path; and deliberately choose either interface
+direct monitoring or the software path. Exercise source disconnect/reconnect,
+transaction rollback, final-recording fault behavior, L/R identity, limiter
+latency, JACK xruns/timing, and playback/file equality. Record exact observed
+names, period count, converter latency, and results here. Synthetic tests do not
+count as this physical acceptance.

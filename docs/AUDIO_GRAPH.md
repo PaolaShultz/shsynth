@@ -3,24 +3,32 @@
 This document is the current implementation contract for SHR-DAW's owned audio
 graph and effects racks. The graph is implemented and Raspberry Pi measured,
 but remains opt-in and disabled by default. Direct JACK routing is both the
-default and the conservative fallback. The current product graph owns exactly
-one stereo source: the one software instrument process managed by SHR-DAW.
+default and the conservative fallback. The current product compiler instantiates
+exactly three stereo sources while retaining the general four-source bound: the
+managed software instrument, the owned WAV loop, and one exact configured JACK
+capture pair.
 
 The active signal flow is:
 
 ```text
-managed instrument -> SOURCE inserts -------------------------------> dry sum
+managed instrument -> SOURCE inserts -------------------------------\
        |                    |                                            ^
        |                    +-> POST send gain -> wet AUX 1/2 -> return -+
        +----------------------> PRE send gain  -> wet AUX 1/2 -> return -+
+owned WAV loop ------------------------------------------------------+-> dry sum
+configured stereo JACK input --------------------------------------/
 
-dry sum -> MASTER inserts -> FINAL OUT meter -> configured playback L/R
+dry sum -> MASTER inserts -> master level -> linked limiter
+        -> FINAL OUT meter -> final stereo WAV tap -> playback L/R
 ```
 
 Each aux bus has its own send level, pre/post source-insert tap, forced-wet
 serial rack, return level, and return meter. Each return is mixed exactly once.
 The complete dry-plus-wet sum then passes through the master rack and a
-dedicated post-master meter immediately before playback. The measured history
+dedicated final limiter and post-limiter meter immediately before the recorder
+tap and playback. The final WAV and JACK playback buffers contain the same
+limited samples. The exact final-bus contract is in
+[Final stereo performance bus](FINAL_PERFORMANCE_BUS.md). The measured history
 is in the [Phase 1 dry](PHASE1_AUDIO_GRAPH_MEASUREMENT.md),
 [Phase 2 insert](PHASE2_AUDIO_GRAPH_MEASUREMENT.md), and
 [Phase 3/4 bus](PHASE3_4_AUDIO_GRAPH_MEASUREMENT.md) records.
@@ -34,37 +42,35 @@ a -18 dB post-insert send. Return changes also use 3 dB steps and wrap from
 
 One SHR-owned JACK client contains the current stereo graph. Effects are
 internal processors, not separate JACK clients or processes. That client has
-one stereo input boundary from the managed engine and one stereo output
-boundary to the runtime-resolved pair. The saved preferred `audio.output` pair,
+three stereo input boundaries and one stereo output boundary to the
+runtime-resolved pair. The saved preferred `audio.output` pair,
 ordered internal pairs, and final headphone pair remain machine configuration.
 Exact JACK and hardware
 names come from configuration, never Rust constants.
 
-The typed graph model reserves source and sink kinds for a loop player, live
-input, hardware returns/sends, and recording taps. The current graph client
-does not instantiate those boundaries. The WAV loop player remains a separate
-owned client on its direct route and now meters only its own rendered callback
-as `LOOP OUT`; the synchronized multitrack recorder remains a separate capture
-client; external
-instruments have no SHR-owned audio return; and there is no software input
-monitoring or hardware insert. Those are present topology limitations, not
-hidden paths through the master meter.
+The typed graph model reserves a fourth source plus hardware returns/sends, but
+the current graph client instantiates only `ManagedEngine`, `LoopPlayer`, and
+`LiveInput`. The loop remains its own rendering client; when the final bus is
+active its output is moved off direct playback and into the owned sum. The raw
+synchronized multitrack recorder remains a separate capture client. External
+instruments return only through the configured stereo mix. There is no hardware
+insert or per-interface-channel processing.
 
 The graph may connect and disconnect only SHR-owned endpoints. It must not
 alter unrelated JACK connections or terminate a client/process it does not
-own. Until the graph is activated successfully, the managed engine uses its
-direct route. The separately owned loop and recorder routes are unchanged.
+own. Until the graph is activated successfully, the managed engine and loop use
+their exact direct routes. The raw recorder routes are unchanged.
 
 For every current managed-engine start, direct playback is connected first. The
-owned callback publishes silence while its four boundary links are prepared;
-the two direct links are then removed in the same rollback-capable transaction.
+owned callback publishes silence while its eight boundary links are prepared;
+the two synth and two loop direct links are then removed in the same
+rollback-capable transaction.
 Only after that commit does an atomic flag publish graph output at a block
 boundary. A rejected graph, activation failure, ambiguous engine-output pair,
-or connection failure leaves or restores the exact direct topology. The loop
-player remains on its existing direct route.
+or connection failure leaves or restores the exact direct topology.
 
 On normal shutdown, the publish flag is cleared and JACK deactivation joins the
-owned callback before either direct link is restored. Closing that client then
+owned callback before the synth and loop direct links are restored. Closing that client then
 releases only its registered ports and their graph-boundary connections. This
 ordering prevents a final already-started graph block from overlapping the
 restored direct path.
@@ -149,7 +155,7 @@ These are rejection limits, not targets and not silent truncation points:
 
 | Resource | Bound |
 | --- | ---: |
-| Stereo source strips | 4 in the general model; 1 instantiated now |
+| Stereo source strips | 4 in the general model; exactly 3 instantiated |
 | Aux buses | 2 |
 | Effects in one serial chain | 8 |
 | Active effect instances | 16 |

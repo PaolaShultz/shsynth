@@ -29,8 +29,8 @@ display does not rely on an omitted suffix to teach the chord quality.
 - **Presets** chooses an engine and sound.
 - **Playback** shows played notes and keyboard state, changes synthv1 controls,
   and records ideas.
-- **MTR** passively shows CPU-core activity and, when available, the owned
-  graph's stereo final-output level.
+- **MTR** is the compact three-source final-bus surface when the graph is
+  enabled; otherwise it retains the passive CPU/legacy meter view.
 - **Ideas** loads, plays, saves, and deletes MIDI ideas.
 - **Help** shows compact user help; turn the encoder through rows and press a
   highlighted link to jump sections. When possible, it also shows a temporary
@@ -68,6 +68,20 @@ Press `?` or F1 from the keyboard to open the same in-app help. The Help screen
 tries to start `http://<LAN-IP>/help` on port 80 only while Help is open; if the
 port or network is unavailable, the local Help screen keeps working.
 
+For the MiniLab 3, the reviewed factory Arturia/DAW pads use notes 36–43 on
+channel 10 for page 1–4 and item 1–4. Keyboard/channel-1 notes—including the
+captured User 1 pads—remain musical. DAW Shift/CC27 is not pad lock.
+
+When `controller_clock.enabled=true`, leave the MiniLab arpeggiator at External
+Sync and start normal FT2 transport. While SHR is open it sends the
+current/default tempo at 24 PPQN; transport adds the required Start/Stop state
+through the dedicated standard MIDI endpoint. An empty Pattern is allowed for
+live arpeggiator playing. Stop sends Stop but clock continues so the MiniLab is
+ready before the next Play; enabling the feature is the explicit clock-run
+switch. See
+[Configuration and routing](CONFIGURATION.md#dedicated-controller-clock-and-transport)
+for the Raspberry Pi setup, backup, disable, and rollback procedure.
+
 ## MIDI ideas
 
 Ideas capture free playing as MIDI. Each saved idea keeps its timing and
@@ -101,9 +115,10 @@ its already-created wet tail decay.
 
 The rack remains editable and saved when the opt-in graph is disabled, but the
 direct audio path cannot process or meter it. With the graph active, stop
-transport and all recording before publishing an FX change. The current graph
-contains only the managed software instrument; the WAV loop, recorder input,
-and external-instrument audio do not pass through these effects. Read
+transport and all recording before publishing an FX change. Source/aux effects
+belong only to the managed instrument. The loop and configured stereo input
+join it before the master rack, so master effects and the protected final stage
+cover the complete three-source sum. Read
 [How SHR-DAW works](HOW_IT_WORKS.md#the-managed-audio-graph) for the complete
 route and sound-oriented effect guide.
 
@@ -125,19 +140,19 @@ Each mono file has its own RIFF limit. Any overflow, callback violation, source
 loss, xrun, writer/storage error, or mismatched finalization prevents the take
 from appearing complete.
 
-External line input is intended to use the audio interface's direct-monitor
-feature. See [Physical connections](CONNECTIONS.md) for the audio path.
+This raw-stem workflow is separate from MTR's final-mix recorder. The latter
+writes one 24-bit interleaved stereo WAV containing the exact limited playback
+samples. See [Final performance bus](FINAL_PERFORMANCE_BUS.md).
 See [Synchronized multitrack recording](MULTITRACK_RECORDING.md) for exact
 configuration, session layout, recovery, and hardware-free stress validation.
 
 ## Performance meters
 
-Open MTR from the first item on Presets NAV, or press `m` on Presets. Its four
-CPU rows normally show CPU0–CPU3 on a Raspberry Pi. They are calculated from
-changes in Linux `/proc/stat`, not by running a command. Green is below 60%,
-yellow is 60–85%, and red is above 85%. If fewer cores or no Linux statistics
-are available, the missing rows say `n/a`. A configured CPU-temperature sensor
-is shown too, but MTR does not require one.
+Open MTR from the first item on Presets NAV, or press `m` on Presets. When the
+owned graph is disabled, its four CPU rows retain the legacy passive display.
+When enabled, the 40×20 surface instead shows the three-source performance bus:
+selected source level/mute/readiness, master level, final L/R meter and clip,
+limiter gain reduction, and final recording time/size/error/path.
 
 The friendly stereo VU display is labelled in dBFS. Its solid body is live,
 smoothed RMS; the thin marker is a short peak hold that later decays. The
@@ -155,22 +170,23 @@ change is blocked; increases, unchanged values, and other controls do not clear
 them. A new sound/engine session, a stopped engine, direct unmetered playback,
 or a lost meter starts with no maximum from the previous session.
 
-`FINAL OUT` is truthful only while the owned audio graph is active. It is the
-graph master after the managed software-instrument source, its wet aux returns,
-and master inserts. The current graph does not include the separate WAV loop
-player, hardware returns, recorder inputs, or unrelated JACK clients. In direct
-playback MTR explicitly reports that output metering is unavailable because
-there is no safe owned tap; it never enables the graph or fakes movement.
+`FINAL OUT` is truthful only while the owned graph is active. It follows the
+managed instrument (including its wet aux returns), owned WAV loop, configured
+stereo input, master rack/level, and linked limiter. Its samples are the exact
+buffer sent to both the final recorder and playback. It excludes unrelated
+JACK clients and downstream interface processing. Direct playback reports the
+bus unavailable; it never enables the graph or fakes movement.
 
-The normal FT2 WAV Loop screen has a second, independent stereo meter labelled
-`LOOP OUT`. Its solid bars are smoothed RMS, its thin markers are short-held
-peaks, `MAX` is the highest left/right loop peak in the current transport
-session, and `CLIP!` is held visibly. It measures the loop callback after the
-selected region, interpolation, transport gate, and edge fades, just before
-the loop's existing JACK outputs. Stopping, unloading, a load failure, or a
-lost loop client clears it. It does not include synths, effects, inputs,
-hardware gain, or any other JACK client, and it does not make the loop part of
-`FINAL OUT`.
+The normal FT2 WAV Loop screen keeps its independent `LOOP OUT` meter for the
+loop alone. An active bus moves those same owned loop outputs away from their
+direct playback links and includes them exactly once in `FINAL OUT`.
+
+Use SOURCE-/SOURCE+ to select Synth, Loop, or Input; LEVEL-/LEVEL+ changes the
+selected source by 1 dB and MUTE toggles it. REC starts/stops one final stereo
+WAV at callback boundaries. All faders are smoothed. There is deliberately no
+pan, solo, arbitrary routing, or per-input processing. The exact limiter,
+monitoring, latency, and recording rules are in
+[Final performance bus](FINAL_PERFORMANCE_BUS.md).
 
 The CPU bars are whole-core system load, not CPU used by the synth or graph.
 MTR deliberately does not measure JACK callback duration, xruns, scheduling
@@ -201,6 +217,7 @@ shr pads profiles
 shr pads auto [PORT_MATCH]
 shr pads learn [PORT_MATCH]
 shr pads update
+shr clock ports
 shr casio diagnostic
 shr config init
 shr effects-checkpoint ENGINE:PRESET [PROFILE] [SECONDS]

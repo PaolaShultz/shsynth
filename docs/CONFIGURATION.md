@@ -31,8 +31,9 @@ accepts:
 | Yoshimi | `yoshimi.command`, `.client`, `.midi_output`, repeated `.preset_root` and `.category`, `.presets_per_category` |
 | FluidSynth | `fluidsynth.command`, `.client`, `.midi_output`, `.gain`, repeated `.soundfont` |
 | Managed MIDI/audio | `midi.autoconnect`, repeated `midi.input`; `audio.autoconnect`, exactly two preferred `audio.output` entries, ordered `audio.internal_output=NAME|LEFT|RIGHT` fallbacks, final optional `audio.headphone_output=NAME|LEFT|RIGHT`; optional `audio.engine_cpu` |
-| Owned graph | `audio.graph.enabled`, `.client`, `.maximum_callback_frames` (1–4096) |
+| Owned final bus | `audio.graph.enabled`, `.client`, `.maximum_callback_frames` (1–4096), `.input`, monitoring confirmations |
 | External tracker MIDI | `external_midi.enabled`, `.client`, `.output`, `.max_tracks`, repeated `.channel`, `.melody_channel`, optional `.percussion_channel` and `.percussion_program`, `.percussion_input_base`, repeated `.percussion_note`, `.bank_select` (`off`, `cc0`, or `cc0+cc32`), `.program_changes`, `.send_transport`, `.default_tempo` (20–300), `.pattern_rows` (1–256), `.steps_per_beat` (1–16), `.live_thru`, `.profile`, `.gate_percent` (1–100), `.gesture_settle_ms` |
+| Controller clock | `controller_clock.enabled`, `.client`, `.output`; disabled by default, with one exact stable ALSA MIDI output name required when enabled |
 | Synchronized capture | `capture.directory`, `.client`, repeated `capture.track=ID|LABEL|GROUP|ROLE|ARMED|EXACT_SOURCE`, legacy stereo `capture.input=NAME|LEFT|RIGHT`, `.ring_frames` (1024–4194304), `.maximum_callback_frames` (16–65536) |
 | WAV loop | `loop.client`, `loop.import_directory`, exactly two repeated `loop.output` entries when playback is used |
 
@@ -47,6 +48,94 @@ positions. The default is `german`, matching the existing central-European B
 and H convention; `english` names those pitch classes A# and B. `shr-setup`
 asks with the two example scales `C D E F G A B C` and
 `C D E F G A H C (B means B-flat)` and writes this key.
+
+## Dedicated controller clock and transport
+
+The controller sync route is separate from every tracker page and from the
+managed instrument. It opens only the one exact standard-MIDI output selected
+by `controller_clock.output`; it never broadcasts and never falls back to a
+tracker, synth, DIN THRU, MCU/HUI, or ALV port. Its protocol is deliberately
+closed: `F8` Timing Clock, `FA` Start, and `FC` Stop are the only bytes the
+connection can send. SHR uses directly addressed ALSA sequencer events from a
+non-exportable source port, so an automatic JACK bridge cannot subscribe to or
+copy the clock. It cannot send notes, CCs, bank/program selection, Song
+Position Pointer, feedback, identity requests, or configuration SysEx.
+
+```text
+controller_clock.enabled=false
+controller_clock.client=shs-controller-clock
+controller_clock.output=
+```
+
+`shr clock ports` performs read-only output discovery. Each `current:` line is
+what ALSA reports now; the paired `configure:` value removes only the trailing
+volatile ALSA client address and remains an exact client-and-port-name match.
+If zero or multiple ports have that stable exact name, SHR leaves controller
+clock offline rather than guessing. For the MiniLab 3 choose its standard
+`Minilab3 MIDI` endpoint, never `DIN THRU`, `MCU/HUI`, or `ALV`.
+
+SHR's tracker transport is the authority. Every accepted Play, Play from start,
+or Record transport launch is a fresh run, so it sends one `FA`; SHR has no
+paused position that could truthfully use `FB` Continue. Stop sends one `FC`.
+Clean shutdown sends `FC` if transport is still running. Pattern repeats remain
+one continuous transport and do not emit another Start. `F2` Song Position
+Pointer is not used: the MiniLab arpeggiator needs tempo and run state, while
+SHR does not expose pause/continue or remote song-location semantics.
+
+Timing Clock runs whenever the feature is enabled and SHR is open; Start and
+Stop still follow only tracker transport. This is the explicit clock-run state:
+there is no second hidden switch. Direct hardware validation found that the
+MiniLab must detect clock before it receives Start; sending Start before the
+first pulse left its External-Sync arpeggiator waiting. Continuous stopped-state
+clock is therefore the least surprising live-safe behavior. It lets the
+controller know the tempo before Play, while `FC` still stops its arpeggiator.
+When controller clock is enabled, SHR permits an otherwise empty Pattern to run
+so a player can launch the live arpeggiator with ordinary tracker transport.
+Clock stays at 24 PPQN from the current transport tempo (or configured default
+tempo before the first run); cell timing, number of pages/destinations, and
+swing/event placement do not create or move pulses. A live tempo change
+preserves the remaining pulse phase, and a delayed worker skips missed
+deadlines instead of producing a catch-up burst.
+
+### Raspberry Pi setup, backup, verification, and rollback
+
+Run all of these on the Raspberry Pi. Do not use MIDI Control Center or write
+controller memory.
+
+1. Stop SHR-DAW and any synth, then list ALSA subscriptions with `aconnect -l`.
+   Run `shr clock ports` and identify the one `configure:` line paired with the
+   MiniLab standard MIDI endpoint.
+2. Back up the active `shsynth.conf` before editing it. For a normal install it
+   is below `${XDG_STATE_HOME:-$HOME/.local/state}/shsynth/`; for a checkout,
+   use the private state path selected by `scripts/local.sh`. Give the copy a
+   date-stamped name and do not replace an older backup.
+3. Set `controller_clock.output` to that complete `configure:` value, then set
+   `controller_clock.enabled=true`. Leave MiniLab arpeggiator Sync at External.
+4. Run `shr doctor`. Start SHR and confirm `aconnect -l` shows the
+   `shs-controller-clock` source as non-exportable with no subscriptions; its
+   events are directly addressed rather than represented by an ALSA
+   subscription. Start tracker transport, enable the MiniLab arpeggiator, and
+   play keys; no tracker page should target the controller.
+5. To disable without losing the remembered endpoint, set
+   `controller_clock.enabled=false` and restart SHR. Confirm the
+   `shs-controller-clock` client is gone. To roll back completely, stop
+   SHR and restore the dated backup of `shsynth.conf`.
+
+The official [MiniLab 3 manual](https://downloads.arturia.net/products/minilab-3/manual/minilab-3_Manual_1_0_5_EN.pdf)
+states that External Sync takes arpeggiator rate from host tempo and requires
+clock plus host playback. The MIDI Association's
+[MIDI 1.0 message summary](https://midi.org/summary-of-midi-1-0-messages)
+defines Timing Clock as 24 per quarter note and distinguishes Start, Continue,
+Stop, and Song Position Pointer. These are protocol facts; the channel-10 pad
+mapping below is direct evidence from this Raspberry Pi/controller pair.
+Arturia's current [MiniLab 3 support page](https://support.arturia.com/hc/en-us/articles/6189475866396-MiniLab-3-General-Questions)
+documents the four separate ports, identifies `MiniLab 3 MIDI` as the standard
+port, and lists DAW Shift as CC27. Its
+[download page](https://www.arturia.com/support/downloads-manuals/product/minilab-3)
+currently lists firmware 1.2.0. SHR does not infer the installed firmware or
+claim that a controller-side setting persists: the no-clock behavior and
+program/pad messages are observations of the connected unit in the stated test
+state.
 
 ## Audio CPU isolation
 
@@ -64,12 +153,12 @@ restarts JACK. Reboot after installing or removing the isolation settings.
 
 ## Owned audio graph
 
-The opt-in SHR-owned JACK client processes one managed software instrument,
-its Project-persisted source insert rack, two aux buses, and master rack. Each
-aux has an independent pre/post source-insert send, forced-wet rack, return
-gain, and return meter. The dry-plus-return sum passes through the master rack
-and final post-master meter. It remains disabled by default after the measured
-Raspberry Pi checkpoints:
+The opt-in SHR-owned JACK client sums exactly the managed software instrument,
+the owned WAV loop, and one configured stereo capture pair. The instrument
+retains its Project-persisted source insert rack and two aux buses; all three
+sources then pass through the master rack, master level, linked sample-peak
+limiter, final meter, final stereo recorder tap, and playback. It remains
+disabled by default:
 
 ```text
 audio.autoconnect=true
@@ -78,23 +167,32 @@ audio.output=system:playback_2
 audio.graph.enabled=false
 audio.graph.client=shr-graph
 audio.graph.maximum_callback_frames=4096
+audio.graph.input=External mix|system:capture_1|system:capture_2
+audio.graph.input_direct_monitoring=false
+audio.graph.confirm_doubled_monitoring=false
 ```
 
 Exactly two `audio.output` entries are the preferred direct route and the
-graph's main destinations. Enabling the graph requires those two
-entries and direct autoconnection. The callback frame bound may be 1–4096 and
-must cover the active JACK period; an unexpectedly larger callback is counted
-and written as silence rather than overrunning fixed memory.
+graph's main destinations. `audio.graph.input` is `LABEL|LEFT|RIGHT`; both JACK
+capture names are resolved exactly. If it is absent, the first legacy
+`capture.input` supplies a backward-compatible preference. Missing, ambiguous,
+or identical ports keep the bus visibly unavailable—SHR-DAW never picks a
+nearby name. The callback frame bound may be 1–4096 and must cover the active
+JACK period; an unexpectedly larger callback faults final recording and writes
+safe silence rather than overrunning fixed memory.
 
-On a managed-engine load, SHR-DAW first establishes direct playback. The graph
-client stays muted while its exact source/input/output links are connected,
-then both direct links are removed transactionally before graph output is
-published at a callback boundary. Validation, client activation, exact port
-resolution, or connection failure leaves or restores direct playback. Graph
-shutdown restores only those two managed direct links and closing the owned
-client releases its own ports. The callback is deactivated before those direct
-links are restored, preventing a final graph block from doubling the source;
-unrelated JACK clients and connections are not changed.
+On managed-engine and loop load, SHR-DAW first establishes their direct
+playback. The graph client stays muted while the exact synth, loop, live-input,
+and playback links are connected. It then removes the four direct synth/loop
+links transactionally before publishing at a callback boundary. Failure leaves
+or restores those exact prior links. Shutdown restores only them; unrelated
+JACK clients and connections are not changed.
+
+Software monitoring means the configured capture pair passes through the final
+bus and adds JACK-buffer plus 2.5 ms limiter lookahead latency. Interface direct
+monitoring is outside SHR-DAW. If both are declared, activation is refused
+unless `audio.graph.confirm_doubled_monitoring=true` deliberately acknowledges
+the doubled/comb-filtered path. See [Final performance bus](FINAL_PERFORMANCE_BUS.md).
 
 An orderly `shr stop` writes the owned graph's
 callback count, mean, p95, p99, maximum, missed-deadline count, and oversized
@@ -179,6 +277,27 @@ pad.42=item-3
 pad.43=item-4
 ```
 
+Add an optional 1-based MIDI channel between `pad` and the note number when a
+keyboard and command pads share note numbers. The verified MiniLab factory
+mapping is:
+
+```text
+pad.10.36=page-1
+pad.10.37=page-2
+pad.10.38=page-3
+pad.10.39=page-4
+pad.10.40=item-1
+pad.10.41=item-2
+pad.10.42=item-3
+pad.10.43=item-4
+```
+
+Only channel-10 presses, releases, velocity-zero Note On releases, and
+polyphonic pressure for those notes are consumed. Notes 36–43 on channel 1 or
+any other channel remain musical input. CC buttons use the parallel
+`button.cc.CHANNEL.NUMBER=ROLE` form. Old `pad.NUMBER` and
+`button.cc.NUMBER` entries remain intentionally channel-agnostic.
+
 Five-button layout:
 
 ```text
@@ -209,7 +328,8 @@ with `shr pads set NOTE ROLE`.
 
 Older physical role aliases are accepted in physical order. New profiles should
 use `page-1` through `page-4`, `page-cycle`, and `item-1` through `item-4`.
-Command-note on and off remain consumed; unmapped musical notes pass through.
+Command-note on/off and matching polyphonic pressure remain consumed; unmapped
+musical notes pass through.
 Disabled (`-`) and planned (`~`) entries never dispatch actions.
 
 List or change controller mappings with:

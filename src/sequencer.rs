@@ -2096,7 +2096,7 @@ fn run_transport(
             note_owners.clear();
             index = 0;
             started = Instant::now();
-            clock.play(loop_origin_beat, transport_tempo);
+            clock.restart_cycle(loop_origin_beat);
         }
     }
 }

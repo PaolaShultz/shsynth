@@ -9,7 +9,8 @@
 SHR-DAW turns a Raspberry Pi, a 40×20 terminal, and optional MIDI gear into a
 focused music workstation. Play software or external instruments, build FT2
 Patterns and Arrangements, use effects, import private loops, save MIDI ideas,
-and record synchronized multitrack audio from compatible JACK interfaces.
+record synchronized raw multitrack audio, and capture the protected final
+stereo performance mix from compatible JACK interfaces.
 
 Start with a Pi and computer keyboard. Add a MIDI controller, synth, audio
 interface, or dedicated screen when useful.
@@ -41,6 +42,8 @@ SHR-DAW never starts or restarts it implicitly. Continue with
 - Browse synthv1, Yoshimi, and FluidSynth sounds without layering managed
   engines.
 - Route one controller to software or external MIDI instruments.
+- Optionally drive a controller arpeggiator from SHR's dedicated 24-PPQN
+  clock/transport output without reusing a musical tracker route.
 - Sequence self-contained FT2 Patterns through an Arrangement.
 - Load and edit 72 bundled drum grooves.
 - Open ten cleared public-domain demo Projects, with matching Standard MIDI
@@ -48,8 +51,9 @@ SHR-DAW never starts or restarts it implicitly. Continue with
 - Save free-timed MIDI Ideas and private tracker Projects.
 - Start with four CC0 48 kHz WAV loops, optionally download private
   tempo-labelled drums during setup, and monitor the loop-only stereo meter.
-- Process the managed software instrument through source inserts, two aux
-  returns, master effects, and a passive final-output meter.
+- Sum the managed software instrument, owned WAV loop, and one exact configured
+  stereo input through master effects, a linked lookahead limiter, final meter,
+  playback, and a 24-bit stereo final-mix recorder.
 - Use a computer keyboard, mouse, or small configured controller.
 
 New Projects use portable `AUTO` routing: they take this machine's configured
@@ -58,9 +62,11 @@ or using channel zero as a sentinel. Explicit routes from older or deliberately
 hardware-bound Projects remain intact. Missing preferred MIDI/audio hardware
 activates a visible, non-destructive fallback and never rewrites the preference.
 
-Hardware names and routes remain configuration data. The current owned effects
-graph is opt-in, disabled by default, and intentionally limited to one managed
-software-instrument source. See [How it works](docs/HOW_IT_WORKS.md) and the
+Hardware names and routes remain configuration data. The owned effects graph
+is opt-in and disabled by default. When enabled it requires exactly the managed
+instrument, owned WAV loop, and configured stereo input. See the
+[final performance bus](docs/FINAL_PERFORMANCE_BUS.md),
+[How it works](docs/HOW_IT_WORKS.md), and the
 [audio graph contract](docs/AUDIO_GRAPH.md) for the exact boundaries.
 
 ## Screens
@@ -85,12 +91,13 @@ practise dynamics but is not an audio loudness measurement.
 
 ### Performance Meter
 
-<img src="docs/images/shr-daw-performance-meter.png" alt="MTR performance screen with four CPU bars and stereo output meters" width="100%">
+<img src="docs/images/shr-daw-performance-meter.png" alt="MTR final performance bus with source, limiter, meter, and recording status" width="100%">
 
-Inspect CPU load and the owned graph's final stereo output without changing the
-audio route. Live bars show smoothed RMS and a short peak marker; the clearly
-labelled `MAX` numbers hold each channel's highest peak until RESET or a mapped
-Volume-down movement. [Meter details](docs/USING_SHR_DAW.md#performance-meters).
+With the graph disabled, inspect CPU load and the legacy managed-source meter.
+With the graph enabled, MTR becomes the compact three-source performance-bus
+surface: source level/mute/readiness, master level, final meter, limiter gain
+reduction, and final recording status.
+[Meter details](docs/USING_SHR_DAW.md#performance-meters).
 
 ### FT2 Pattern Editor
 

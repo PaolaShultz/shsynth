@@ -2,6 +2,7 @@
 //! armed channel into one bounded interleaved SPSC ring; a non-real-time worker
 //! writes one mono WAV per track and atomically publishes the take directory.
 use crate::config::{AudioCaptureConfig, CaptureTrackConfig, CaptureTrackRole};
+use crate::dsp::StereoFrame;
 use crate::jack::{Client as JackClient, Port as JackPort, PortDirection, PortGetBuffer};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -127,6 +128,19 @@ impl InterleavedRing {
         true
     }
 
+    #[inline]
+    fn push_stereo(&self, frames: &[StereoFrame]) -> bool {
+        if self.channels != 2 {
+            self.dropped
+                .fetch_add(frames.len() as u64, Ordering::Relaxed);
+            return false;
+        }
+        self.push_with(frames.len(), |channel, frame| match channel {
+            0 => frames[frame].left,
+            _ => frames[frame].right,
+        })
+    }
+
     fn pop_interleaved(&self, output: &mut [f32]) -> usize {
         let maximum_frames = output.len() / self.channels;
         let mut read = self.read.load(Ordering::Relaxed);
@@ -150,6 +164,349 @@ impl InterleavedRing {
 
     fn is_empty(&self) -> bool {
         self.read.load(Ordering::Acquire) == self.write.load(Ordering::Acquire)
+    }
+}
+
+const FINAL_CAPTURE_IDLE: u32 = 0;
+const FINAL_CAPTURE_ARMED: u32 = 1;
+const FINAL_CAPTURE_ACTIVE: u32 = 2;
+const FINAL_CAPTURE_STOP: u32 = 3;
+
+#[derive(Clone, Debug, Default)]
+pub struct FinalMixRecorderStatus {
+    pub recording: bool,
+    pub elapsed: Duration,
+    pub bytes: u64,
+    pub total_frames: u64,
+    pub dropped_frames: u64,
+    pub overflow_events: u64,
+    pub writer_high_water_frames: usize,
+    pub path: Option<PathBuf>,
+    pub error: Option<String>,
+}
+
+struct FinalMixShared {
+    ring: InterleavedRing,
+    mode: AtomicU32,
+    writer_running: AtomicBool,
+    fault: AtomicU32,
+    accepted_frames: AtomicU64,
+    written_frames: AtomicU64,
+    sample_rate: u32,
+    maximum_callback_frames: usize,
+}
+
+#[derive(Clone)]
+pub(crate) struct FinalMixCapture {
+    shared: Arc<FinalMixShared>,
+}
+
+impl FinalMixCapture {
+    /// Called once with the exact final playback frames. The transition from
+    /// armed to active and from stop-requested to idle can therefore occur
+    /// only at a complete callback boundary.
+    #[inline]
+    pub(crate) fn capture(&self, frames: &[StereoFrame]) {
+        let mut mode = self.shared.mode.load(Ordering::Acquire);
+        if mode == FINAL_CAPTURE_ARMED {
+            let _ = self.shared.mode.compare_exchange(
+                FINAL_CAPTURE_ARMED,
+                FINAL_CAPTURE_ACTIVE,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            mode = self.shared.mode.load(Ordering::Acquire);
+        }
+        if mode == FINAL_CAPTURE_STOP {
+            self.shared
+                .mode
+                .store(FINAL_CAPTURE_IDLE, Ordering::Release);
+            self.shared.writer_running.store(false, Ordering::Release);
+            return;
+        }
+        if mode != FINAL_CAPTURE_ACTIVE {
+            return;
+        }
+        if frames.is_empty() || frames.len() > self.shared.maximum_callback_frames {
+            self.fault(FAULT_CALLBACK_SIZE);
+            return;
+        }
+        if !self.shared.ring.push_stereo(frames) {
+            self.fault(FAULT_OVERFLOW);
+            return;
+        }
+        self.shared
+            .accepted_frames
+            .fetch_add(frames.len() as u64, Ordering::Relaxed);
+    }
+
+    pub(crate) fn source_lost(&self) {
+        if self.recording() {
+            self.fault(FAULT_SOURCE_LOST);
+        }
+    }
+
+    pub(crate) fn xrun(&self) {
+        if self.recording() {
+            self.fault(FAULT_XRUN);
+        }
+    }
+
+    pub(crate) fn jack_shutdown(&self) {
+        if self.recording() {
+            self.fault(FAULT_JACK_SHUTDOWN);
+        }
+    }
+
+    pub(crate) fn callback_violation(&self) {
+        if self.recording() {
+            self.fault(FAULT_CALLBACK_SIZE);
+        }
+    }
+
+    pub(crate) fn invalid_buffer(&self) {
+        if self.recording() {
+            self.fault(FAULT_NULL_BUFFER);
+        }
+    }
+
+    fn recording(&self) -> bool {
+        matches!(
+            self.shared.mode.load(Ordering::Acquire),
+            FINAL_CAPTURE_ARMED | FINAL_CAPTURE_ACTIVE | FINAL_CAPTURE_STOP
+        )
+    }
+
+    fn fault(&self, code: u32) {
+        self.shared
+            .fault
+            .compare_exchange(FAULT_NONE, code, Ordering::AcqRel, Ordering::Relaxed)
+            .ok();
+        self.shared
+            .mode
+            .store(FINAL_CAPTURE_IDLE, Ordering::Release);
+        self.shared.writer_running.store(false, Ordering::Release);
+    }
+}
+
+pub(crate) struct FinalMixRecorder {
+    directory: PathBuf,
+    shared: Arc<FinalMixShared>,
+    status: Arc<Mutex<FinalMixRecorderStatus>>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl FinalMixRecorder {
+    pub(crate) fn new(
+        directory: PathBuf,
+        sample_rate: u32,
+        ring_frames: usize,
+        maximum_callback_frames: usize,
+    ) -> Result<Self> {
+        if !(8_000..=384_000).contains(&sample_rate) {
+            bail!("invalid final-mix sample rate");
+        }
+        if maximum_callback_frames == 0 {
+            bail!("invalid final-mix callback capacity");
+        }
+        Ok(Self {
+            directory,
+            shared: Arc::new(FinalMixShared {
+                ring: InterleavedRing::new(2, ring_frames)?,
+                mode: AtomicU32::new(FINAL_CAPTURE_IDLE),
+                writer_running: AtomicBool::new(false),
+                fault: AtomicU32::new(FAULT_NONE),
+                accepted_frames: AtomicU64::new(0),
+                written_frames: AtomicU64::new(0),
+                sample_rate,
+                maximum_callback_frames,
+            }),
+            status: Arc::new(Mutex::new(FinalMixRecorderStatus::default())),
+            worker: None,
+        })
+    }
+
+    pub(crate) fn capture_handle(&self) -> FinalMixCapture {
+        FinalMixCapture {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+
+    pub(crate) fn is_recording(&self) -> bool {
+        self.worker.is_some() && self.shared.mode.load(Ordering::Acquire) != FINAL_CAPTURE_IDLE
+    }
+
+    pub(crate) fn start(&mut self, optional_name: Option<&str>) -> Result<()> {
+        self.reap_finished()?;
+        if self.worker.is_some()
+            || self.shared.mode.load(Ordering::Acquire) != FINAL_CAPTURE_IDLE
+            || !self.shared.ring.is_empty()
+        {
+            bail!("final-mix recording is already active");
+        }
+        fs::create_dir_all(&self.directory)?;
+        let recovered = recover_interrupted(&self.directory)?;
+        if available_bytes(&self.directory)? < MIN_FREE_BYTES {
+            bail!("less than 64 MiB free in recording directory");
+        }
+        let stem = final_mix_stem(optional_name);
+        let final_path = unique_file(&self.directory, &stem, "wav")?;
+        let temporary = final_path.with_extension("wav.part");
+        self.shared.fault.store(FAULT_NONE, Ordering::Release);
+        self.shared.accepted_frames.store(0, Ordering::Release);
+        self.shared.written_frames.store(0, Ordering::Release);
+        self.shared.ring.dropped.store(0, Ordering::Release);
+        self.shared.ring.overflows.store(0, Ordering::Release);
+        self.shared.ring.high_water.store(0, Ordering::Release);
+        self.shared.writer_running.store(true, Ordering::Release);
+        if let Ok(mut status) = self.status.lock() {
+            *status = FinalMixRecorderStatus {
+                recording: true,
+                path: Some(final_path.clone()),
+                error: (!recovered.is_empty())
+                    .then(|| format!("recovered {} interrupted recording(s)", recovered.len())),
+                ..FinalMixRecorderStatus::default()
+            };
+        }
+        let shared = Arc::clone(&self.shared);
+        let status = Arc::clone(&self.status);
+        let worker_final = final_path.clone();
+        let worker_temporary = temporary.clone();
+        self.worker = Some(
+            thread::Builder::new()
+                .name("shr-final-mix-writer".into())
+                .spawn(move || {
+                    let result = write_final_mix(
+                        &worker_temporary,
+                        &worker_final,
+                        &shared,
+                        &status,
+                        WriterBehavior::default(),
+                    );
+                    shared.writer_running.store(false, Ordering::Release);
+                    shared.mode.store(FINAL_CAPTURE_IDLE, Ordering::Release);
+                    if let Err(error) = result {
+                        shared
+                            .fault
+                            .compare_exchange(
+                                FAULT_NONE,
+                                FAULT_WRITER,
+                                Ordering::AcqRel,
+                                Ordering::Relaxed,
+                            )
+                            .ok();
+                        if let Ok(mut public) = status.lock() {
+                            public.recording = false;
+                            public.error = Some(error.to_string());
+                            public.path = worker_temporary.exists().then_some(worker_temporary);
+                        }
+                    }
+                })
+                .context("start final-mix writer thread")?,
+        );
+        self.shared
+            .mode
+            .store(FINAL_CAPTURE_ARMED, Ordering::Release);
+        Ok(())
+    }
+
+    pub(crate) fn request_stop(&self) {
+        let mode = self.shared.mode.load(Ordering::Acquire);
+        if matches!(mode, FINAL_CAPTURE_ARMED | FINAL_CAPTURE_ACTIVE) {
+            self.shared
+                .mode
+                .store(FINAL_CAPTURE_STOP, Ordering::Release);
+        }
+    }
+
+    /// Use after JACK deactivation: the last completed callback is already a
+    /// deterministic boundary, so no future callback is needed to consume the
+    /// stop request.
+    pub(crate) fn stop_after_deactivate(&mut self) -> Result<()> {
+        if self.worker.is_none() {
+            return Ok(());
+        }
+        self.shared
+            .mode
+            .store(FINAL_CAPTURE_IDLE, Ordering::Release);
+        self.shared.writer_running.store(false, Ordering::Release);
+        self.join_worker()
+    }
+
+    pub(crate) fn finish_stop(&mut self) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while self.shared.mode.load(Ordering::Acquire) == FINAL_CAPTURE_STOP
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(1));
+        }
+        if self.shared.mode.load(Ordering::Acquire) == FINAL_CAPTURE_STOP {
+            bail!("final-mix stop boundary timed out; audio callback is unavailable");
+        }
+        self.join_worker()
+    }
+
+    pub(crate) fn status(&mut self) -> FinalMixRecorderStatus {
+        let _ = self.reap_finished();
+        let mut public = self
+            .status
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_default();
+        public.recording =
+            self.worker.is_some() && self.shared.mode.load(Ordering::Acquire) != FINAL_CAPTURE_IDLE;
+        public.total_frames = if public.recording {
+            self.shared.accepted_frames.load(Ordering::Relaxed)
+        } else {
+            self.shared.written_frames.load(Ordering::Relaxed)
+        };
+        public.elapsed = Duration::from_secs_f64(
+            public.total_frames as f64 / f64::from(self.shared.sample_rate),
+        );
+        let written_frames = self.shared.written_frames.load(Ordering::Relaxed);
+        public.bytes = if written_frames == 0 && public.path.is_none() {
+            0
+        } else {
+            44 + written_frames.saturating_mul(6)
+        };
+        public.dropped_frames = self.shared.ring.dropped.load(Ordering::Relaxed);
+        public.overflow_events = self.shared.ring.overflows.load(Ordering::Relaxed);
+        public.writer_high_water_frames = self.shared.ring.high_water.load(Ordering::Relaxed);
+        let fault = self.shared.fault.load(Ordering::Acquire);
+        if fault != FAULT_NONE && public.error.is_none() {
+            public.error = Some(fault_message(fault).into());
+        }
+        public
+    }
+
+    fn reap_finished(&mut self) -> Result<()> {
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| worker.is_finished())
+        {
+            self.join_worker()?;
+        }
+        Ok(())
+    }
+
+    fn join_worker(&mut self) -> Result<()> {
+        if let Some(worker) = self.worker.take() {
+            worker
+                .join()
+                .map_err(|_| anyhow!("final-mix writer thread panicked"))?;
+        }
+        let fault = self.shared.fault.load(Ordering::Acquire);
+        if fault != FAULT_NONE {
+            bail!(fault_message(fault));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for FinalMixRecorder {
+    fn drop(&mut self) {
+        let _ = self.stop_after_deactivate();
     }
 }
 
@@ -842,6 +1199,115 @@ fn append_i24(output: &mut Vec<u8>, value: f32) {
     output.extend_from_slice(&sample.to_le_bytes()[..3]);
 }
 
+fn write_final_mix(
+    temporary: &Path,
+    final_path: &Path,
+    shared: &FinalMixShared,
+    status: &Mutex<FinalMixRecorderStatus>,
+    behavior: WriterBehavior,
+) -> Result<()> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(temporary)
+        .with_context(|| format!("create {}", temporary.display()))?;
+    let mut file = BufWriter::with_capacity(64 * 1024, file);
+    finalize_legacy_stereo_wav(&mut file, shared.sample_rate, 0)?;
+    let scratch_frames = shared.maximum_callback_frames.max(16);
+    let mut scratch = vec![0.0f32; scratch_frames * 2];
+    let mut encoded = Vec::with_capacity(scratch_frames * 6);
+    let mut frames = 0u64;
+    while shared.writer_running.load(Ordering::Acquire) || !shared.ring.is_empty() {
+        let count = shared.ring.pop_interleaved(&mut scratch);
+        if count == 0 {
+            thread::sleep(Duration::from_millis(1));
+            continue;
+        }
+        if let Some(limit) = behavior.fail_after_frames {
+            if frames >= limit {
+                bail!("simulated final-mix storage failure");
+            }
+        }
+        if frames.saturating_add(count as u64) > STEREO_WAV_MAX_FRAMES {
+            shared
+                .fault
+                .compare_exchange(
+                    FAULT_NONE,
+                    FAULT_WRITER,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .ok();
+            shared.mode.store(FINAL_CAPTURE_IDLE, Ordering::Release);
+            shared.writer_running.store(false, Ordering::Release);
+            bail!("stereo WAV reached the RIFF 4 GiB limit");
+        }
+        encoded.clear();
+        for sample in scratch.iter().take(count * 2) {
+            append_i24(&mut encoded, *sample);
+        }
+        file.write_all(&encoded)?;
+        frames += count as u64;
+        shared.written_frames.store(frames, Ordering::Release);
+        if !behavior.delay.is_zero() {
+            thread::sleep(behavior.delay);
+        }
+        if frames % STATUS_UPDATE_FRAMES < count as u64 {
+            if let Ok(mut public) = status.lock() {
+                public.bytes = 44 + frames * 6;
+                public.total_frames = frames;
+                public.dropped_frames = shared.ring.dropped.load(Ordering::Relaxed);
+                public.overflow_events = shared.ring.overflows.load(Ordering::Relaxed);
+                public.writer_high_water_frames = shared.ring.high_water.load(Ordering::Relaxed);
+            }
+        }
+    }
+    if frames == 0 {
+        drop(file);
+        let _ = fs::remove_file(temporary);
+        if let Ok(mut public) = status.lock() {
+            public.recording = false;
+            public.bytes = 0;
+            public.total_frames = 0;
+            public.path = None;
+            public.error = Some("final-mix recording contains no frames".into());
+        }
+        bail!("final-mix recording contains no frames");
+    }
+    finalize_legacy_stereo_wav(&mut file, shared.sample_rate, frames)?;
+    file.flush()?;
+    file.get_ref().sync_all()?;
+    drop(file);
+    let fault = shared.fault.load(Ordering::Acquire);
+    if fault == FAULT_NONE
+        && shared.ring.dropped.load(Ordering::Acquire) == 0
+        && shared.ring.overflows.load(Ordering::Acquire) == 0
+    {
+        crate::fsutil::rename_noreplace(temporary, final_path)?;
+        if let Some(parent) = final_path.parent() {
+            File::open(parent)?.sync_all()?;
+        }
+        if let Ok(mut public) = status.lock() {
+            public.recording = false;
+            public.bytes = 44 + frames * 6;
+            public.total_frames = frames;
+            public.path = Some(final_path.to_path_buf());
+            public.error = None;
+        }
+        Ok(())
+    } else {
+        if let Ok(mut public) = status.lock() {
+            public.recording = false;
+            public.bytes = 44 + frames * 6;
+            public.total_frames = frames;
+            public.path = Some(temporary.to_path_buf());
+            public.error = Some(fault_message(fault).into());
+        }
+        bail!(fault_message(fault));
+    }
+}
+
 fn write_mono_wav_header(file: &mut impl Write, rate: u32, data: u32) -> Result<()> {
     let riff_size = 36u32.checked_add(data).context("WAV size overflow")?;
     let byte_rate = rate.checked_mul(3).context("WAV sample rate overflow")?;
@@ -1014,6 +1480,193 @@ pub struct StressReport {
     pub dropped_frames: u64,
     pub overflow_events: u64,
     pub channel_identity_verified: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct FinalMixStressReport {
+    pub wav: PathBuf,
+    pub sample_rate: u32,
+    pub callback_frames: usize,
+    pub total_frames: u64,
+    pub elapsed: Duration,
+    pub callback_mean_nanoseconds: u64,
+    pub callback_p95_nanoseconds: u64,
+    pub callback_p99_nanoseconds: u64,
+    pub callback_maximum_nanoseconds: u64,
+    pub maximum_gain_reduction_db: f32,
+    pub writer_high_water_frames: usize,
+    pub dropped_frames: u64,
+    pub overflow_events: u64,
+    pub output_file_equal: bool,
+}
+
+/// JACK-free, non-audible soak of the production three-source faders, final
+/// limiter/meter, callback recorder handoff, stereo writer, and publication.
+pub fn run_final_mix_stress(
+    destination: &Path,
+    duration: Duration,
+    sample_rate: u32,
+    callback_frames: usize,
+) -> Result<FinalMixStressReport> {
+    if destination.as_os_str().is_empty() || destination == Path::new("/") {
+        bail!("stress destination must be an explicit non-root directory");
+    }
+    if duration.is_zero() || duration > Duration::from_secs(24 * 60 * 60) {
+        bail!("stress duration must be greater than zero and at most 24 hours");
+    }
+    if !(44_100..=48_000).contains(&sample_rate) || !matches!(sample_rate, 44_100 | 48_000) {
+        bail!("final-mix stress rate must be 44100 or 48000 Hz");
+    }
+    if !(16..=4096).contains(&callback_frames) {
+        bail!("final-mix stress callback must be 16..=4096 frames");
+    }
+    let target_frames = (duration.as_secs_f64() * f64::from(sample_rate)).round() as u64;
+    if target_frames == 0 {
+        bail!("stress duration is shorter than one sample frame");
+    }
+    fs::create_dir_all(destination)?;
+    let controls = Arc::new(crate::final_bus::BusControls::default());
+    let meters = Arc::new(crate::final_bus::FinalBusMeters::default());
+    let mut bus = crate::final_bus::FinalBusProcessor::new(
+        sample_rate,
+        callback_frames,
+        controls,
+        Arc::clone(&meters),
+    )
+    .map_err(anyhow::Error::msg)?;
+    let ring_frames = (sample_rate as usize * 2).max(callback_frames * 8);
+    let mut recorder = FinalMixRecorder::new(
+        destination.to_path_buf(),
+        sample_rate,
+        ring_frames,
+        callback_frames,
+    )?;
+    let capture = recorder.capture_handle();
+    recorder.start(Some("stress"))?;
+    let mut sources: [Vec<StereoFrame>; 3] =
+        std::array::from_fn(|_| vec![StereoFrame::SILENCE; callback_frames]);
+    let mut output = vec![StereoFrame::SILENCE; callback_frames];
+    let callbacks =
+        target_frames.saturating_add(callback_frames as u64 - 1) / callback_frames as u64;
+    let mut timings = Vec::with_capacity(callbacks as usize);
+    let mut expected_hash = 0xcbf29ce484222325u64;
+    let mut maximum_gain_reduction_db = 0.0f32;
+    let mut produced = 0u64;
+    let started = Instant::now();
+    while produced < target_frames {
+        let count = (target_frames - produced).min(callback_frames as u64) as usize;
+        for (source, buffer) in sources.iter_mut().enumerate() {
+            for (offset, frame) in buffer.iter_mut().take(count).enumerate() {
+                *frame = final_stress_source(source, produced + offset as u64);
+            }
+        }
+        let callback_started = Instant::now();
+        for (index, source) in crate::final_bus::BusSource::ALL.iter().copied().enumerate() {
+            bus.process_source(source, &mut sources[index][..count]);
+        }
+        for (frame, output_frame) in output.iter_mut().take(count).enumerate() {
+            *output_frame = StereoFrame::new(
+                sources[0][frame].left + sources[1][frame].left + sources[2][frame].left,
+                sources[0][frame].right + sources[1][frame].right + sources[2][frame].right,
+            );
+        }
+        bus.process_final(&mut output[..count]);
+        capture.capture(&output[..count]);
+        maximum_gain_reduction_db =
+            maximum_gain_reduction_db.max(meters.snapshot().limiter_gain_reduction_db);
+        timings.push(
+            callback_started
+                .elapsed()
+                .as_nanos()
+                .min(u128::from(u64::MAX)) as u64,
+        );
+        let ceiling = 10.0f32.powf(crate::final_bus::LIMITER_CEILING_DBFS / 20.0) + 1e-6;
+        for frame in &output[..count] {
+            if !frame.left.is_finite()
+                || !frame.right.is_finite()
+                || frame.left.abs() > ceiling
+                || frame.right.abs() > ceiling
+            {
+                bail!("final bus produced an unsafe sample");
+            }
+            hash_i24(&mut expected_hash, frame.left);
+            hash_i24(&mut expected_hash, frame.right);
+        }
+        produced += count as u64;
+        let deadline = started + Duration::from_secs_f64(produced as f64 / f64::from(sample_rate));
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining > Duration::from_millis(1) {
+                thread::sleep(remaining.min(Duration::from_millis(2)));
+            } else {
+                thread::yield_now();
+            }
+        }
+    }
+    recorder.request_stop();
+    capture.capture(&[]);
+    recorder.finish_stop()?;
+    let status = recorder.status();
+    let wav = status
+        .path
+        .context("final-mix stress did not publish a WAV")?;
+    let mut file = File::open(&wav)?;
+    let mut header = [0u8; 44];
+    file.read_exact(&mut header)?;
+    let mut actual_hash = 0xcbf29ce484222325u64;
+    let mut bytes = [0u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut bytes)?;
+        if count == 0 {
+            break;
+        }
+        for byte in &bytes[..count] {
+            actual_hash ^= u64::from(*byte);
+            actual_hash = actual_hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    timings.sort_unstable();
+    let percentile = |percent: usize| timings[(timings.len().saturating_sub(1) * percent) / 100];
+    let total_time = timings.iter().copied().sum::<u64>();
+    Ok(FinalMixStressReport {
+        wav,
+        sample_rate,
+        callback_frames,
+        total_frames: produced,
+        elapsed: started.elapsed(),
+        callback_mean_nanoseconds: total_time / timings.len() as u64,
+        callback_p95_nanoseconds: percentile(95),
+        callback_p99_nanoseconds: percentile(99),
+        callback_maximum_nanoseconds: timings.last().copied().unwrap_or(0),
+        maximum_gain_reduction_db,
+        writer_high_water_frames: status.writer_high_water_frames,
+        dropped_frames: status.dropped_frames,
+        overflow_events: status.overflow_events,
+        output_file_equal: expected_hash == actual_hash,
+    })
+}
+
+fn final_stress_source(source: usize, frame: u64) -> StereoFrame {
+    if frame % 8192 == 0 {
+        return StereoFrame::new(0.8, 0.72);
+    }
+    let (left_prime, right_prime, scale) = match source {
+        0 => (257, 263, 0.20),
+        1 => (509, 521, 0.16),
+        _ => (997, 991, 0.12),
+    };
+    StereoFrame::new(
+        ((frame % left_prime) as f32 / (left_prime - 1) as f32 - 0.5) * scale,
+        ((frame % right_prime) as f32 / (right_prime - 1) as f32 - 0.5) * scale,
+    )
+}
+
+fn hash_i24(hash: &mut u64, value: f32) {
+    let sample = (value.clamp(-1.0, 1.0) * 8_388_607.0).round() as i32;
+    for byte in &sample.to_le_bytes()[..3] {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(0x100000001b3);
+    }
 }
 
 /// Non-audible, JACK-free soak using the production ring, writer, manifest,
@@ -1471,6 +2124,20 @@ fn recording_stem(name: Option<&str>) -> String {
     )
 }
 
+fn final_mix_stem(name: Option<&str>) -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let suffix = name
+        .map(crate::sequencer::safe_name)
+        .filter(|name| name != "untitled");
+    suffix.map_or_else(
+        || format!("final-mix-{seconds}"),
+        |name| format!("final-mix-{seconds}-{name}"),
+    )
+}
+
 fn unique_session_paths(directory: &Path, stem: &str) -> Result<SessionPaths> {
     for suffix in 0..10_000 {
         let stem = if suffix == 0 {
@@ -1525,6 +2192,7 @@ fn unique_file(directory: &Path, stem: &str, extension: &str) -> Result<PathBuf>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dsp::allocation_test::assert_no_allocations;
 
     fn tracks(count: usize) -> Vec<CaptureTrackConfig> {
         (0..count)
@@ -1939,7 +2607,254 @@ mod tests {
         let _ = fs::remove_dir_all(base);
     }
 
+    #[test]
+    fn jack_free_final_mix_stress_uses_three_sources_and_verifies_full_pcm() {
+        let base =
+            std::env::temp_dir().join(format!("shr-final-stress-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let report = run_final_mix_stress(&base, Duration::from_millis(25), 48_000, 128).unwrap();
+        assert_eq!(report.total_frames, 1200);
+        assert_eq!(report.dropped_frames, 0);
+        assert_eq!(report.overflow_events, 0);
+        assert!(report.maximum_gain_reduction_db > 0.0);
+        assert!(report.output_file_equal);
+        assert_eq!(read_stereo_i24(&report.wav).len(), 1200);
+        let _ = fs::remove_dir_all(base);
+    }
+
     unsafe extern "C" fn dummy_buffer(_: *mut JackPort, _: c_uint) -> *mut c_void {
         std::ptr::null_mut()
+    }
+
+    fn read_stereo_i24(path: &Path) -> Vec<StereoFrame> {
+        let bytes = fs::read(path).unwrap();
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert_eq!(u16::from_le_bytes(bytes[22..24].try_into().unwrap()), 2);
+        assert_eq!(u16::from_le_bytes(bytes[34..36].try_into().unwrap()), 24);
+        bytes[44..]
+            .chunks_exact(6)
+            .map(|frame| {
+                let decode = |sample: &[u8]| {
+                    let raw = i32::from(sample[0])
+                        | (i32::from(sample[1]) << 8)
+                        | (i32::from(sample[2]) << 16);
+                    let signed = if raw & 0x80_0000 != 0 {
+                        raw | !0xff_ffff
+                    } else {
+                        raw
+                    };
+                    signed as f32 / 8_388_607.0
+                };
+                StereoFrame::new(decode(&frame[..3]), decode(&frame[3..]))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn final_mix_callback_boundaries_and_pcm_equal_playback_quantization() {
+        let base = std::env::temp_dir().join(format!("shr-final-mix-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let mut recorder = FinalMixRecorder::new(base.clone(), 48_000, 4096, 256).unwrap();
+        let capture = recorder.capture_handle();
+        recorder.start(Some("equality")).unwrap();
+        let first = (0..128)
+            .map(|index| StereoFrame::new(index as f32 / 512.0, -(index as f32) / 1024.0))
+            .collect::<Vec<_>>();
+        let second = (0..64)
+            .map(|index| StereoFrame::new(-0.25 + index as f32 / 1024.0, 0.125))
+            .collect::<Vec<_>>();
+        assert_no_allocations(|| capture.capture(&first));
+        assert_no_allocations(|| capture.capture(&second));
+        recorder.request_stop();
+        assert_no_allocations(|| capture.capture(&[]));
+        recorder.finish_stop().unwrap();
+        let status = recorder.status();
+        assert_eq!(status.total_frames, 192);
+        assert_eq!(status.dropped_frames, 0);
+        assert_eq!(status.overflow_events, 0);
+        let path = status.path.unwrap();
+        let decoded = read_stereo_i24(&path);
+        let expected = first.iter().chain(&second).copied().collect::<Vec<_>>();
+        assert_eq!(decoded.len(), expected.len());
+        for (actual, expected) in decoded.iter().zip(expected) {
+            assert!((actual.left - expected.left).abs() <= 1.0 / 8_388_607.0);
+            assert!((actual.right - expected.right).abs() <= 1.0 / 8_388_607.0);
+        }
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn final_mix_source_loss_is_recoverable_and_never_looks_successful() {
+        let base =
+            std::env::temp_dir().join(format!("shr-final-source-loss-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let mut recorder = FinalMixRecorder::new(base.clone(), 44_100, 512, 128).unwrap();
+        let capture = recorder.capture_handle();
+        recorder.start(None).unwrap();
+        capture.capture(&[StereoFrame::new(0.1, -0.2); 128]);
+        capture.source_lost();
+        assert!(recorder.finish_stop().is_err());
+        let status = recorder.status();
+        assert!(!status.recording);
+        assert!(status.error.unwrap().contains("source disappeared"));
+        let part = status.path.unwrap();
+        assert_eq!(
+            part.extension().and_then(|value| value.to_str()),
+            Some("part")
+        );
+        assert!(!base.join("final-mix.wav").exists());
+        let recovered = recover_interrupted(&base).unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(read_stereo_i24(&recovered[0]).len(), 128);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn final_mix_zero_frame_failure_and_publication_collision_are_safe() {
+        let base = std::env::temp_dir().join(format!("shr-final-safe-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let temporary = base.join("empty.wav.part");
+        let destination = base.join("empty.wav");
+        let shared = FinalMixShared {
+            ring: InterleavedRing::new(2, 64).unwrap(),
+            mode: AtomicU32::new(FINAL_CAPTURE_IDLE),
+            writer_running: AtomicBool::new(false),
+            fault: AtomicU32::new(FAULT_NONE),
+            accepted_frames: AtomicU64::new(0),
+            written_frames: AtomicU64::new(0),
+            sample_rate: 48_000,
+            maximum_callback_frames: 64,
+        };
+        assert!(write_final_mix(
+            &temporary,
+            &destination,
+            &shared,
+            &Mutex::new(FinalMixRecorderStatus::default()),
+            WriterBehavior::default(),
+        )
+        .is_err());
+        assert!(!temporary.exists());
+        fs::write(&destination, b"owned by someone else").unwrap();
+        let frames = [StereoFrame::new(0.1, 0.2); 16];
+        assert!(shared.ring.push_stereo(&frames));
+        let collision_part = base.join("collision.wav.part");
+        assert!(write_final_mix(
+            &collision_part,
+            &destination,
+            &shared,
+            &Mutex::new(FinalMixRecorderStatus::default()),
+            WriterBehavior::default(),
+        )
+        .is_err());
+        assert_eq!(fs::read(&destination).unwrap(), b"owned by someone else");
+        assert!(collision_part.exists());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn final_mix_overflow_writer_failure_and_disk_error_are_honest() {
+        let shared = Arc::new(FinalMixShared {
+            ring: InterleavedRing::new(2, 17).unwrap(),
+            mode: AtomicU32::new(FINAL_CAPTURE_ACTIVE),
+            writer_running: AtomicBool::new(true),
+            fault: AtomicU32::new(FAULT_NONE),
+            accepted_frames: AtomicU64::new(0),
+            written_frames: AtomicU64::new(0),
+            sample_rate: 48_000,
+            maximum_callback_frames: 16,
+        });
+        let capture = FinalMixCapture {
+            shared: Arc::clone(&shared),
+        };
+        capture.capture(&[StereoFrame::new(0.1, -0.1); 16]);
+        capture.capture(&[StereoFrame::new(0.2, -0.2); 16]);
+        assert_eq!(shared.fault.load(Ordering::Acquire), FAULT_OVERFLOW);
+        assert_eq!(shared.mode.load(Ordering::Acquire), FINAL_CAPTURE_IDLE);
+        assert_eq!(shared.ring.dropped.load(Ordering::Relaxed), 16);
+        assert_eq!(shared.ring.overflows.load(Ordering::Relaxed), 1);
+
+        let base =
+            std::env::temp_dir().join(format!("shr-final-writer-errors-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let slow_shared = Arc::new(FinalMixShared {
+            ring: InterleavedRing::new(2, 129).unwrap(),
+            mode: AtomicU32::new(FINAL_CAPTURE_ACTIVE),
+            writer_running: AtomicBool::new(true),
+            fault: AtomicU32::new(FAULT_NONE),
+            accepted_frames: AtomicU64::new(0),
+            written_frames: AtomicU64::new(0),
+            sample_rate: 48_000,
+            maximum_callback_frames: 16,
+        });
+        let slow_status = Arc::new(Mutex::new(FinalMixRecorderStatus::default()));
+        let slow_part = base.join("slow.wav.part");
+        let slow_final = base.join("slow.wav");
+        let worker_shared = Arc::clone(&slow_shared);
+        let worker_status = Arc::clone(&slow_status);
+        let worker_part = slow_part.clone();
+        let worker_final = slow_final.clone();
+        let worker = thread::spawn(move || {
+            write_final_mix(
+                &worker_part,
+                &worker_final,
+                &worker_shared,
+                &worker_status,
+                WriterBehavior {
+                    delay: Duration::from_millis(2),
+                    fail_after_frames: None,
+                },
+            )
+        });
+        for block in 0..8 {
+            let sample = 0.01 * (block + 1) as f32;
+            assert!(slow_shared
+                .ring
+                .push_stereo(&[StereoFrame::new(sample, -sample); 16]));
+        }
+        slow_shared.writer_running.store(false, Ordering::Release);
+        worker.join().unwrap().unwrap();
+        assert_eq!(read_stereo_i24(&slow_final).len(), 128);
+        assert!(slow_shared.ring.high_water.load(Ordering::Relaxed) >= 16);
+
+        let writer_shared = FinalMixShared {
+            ring: InterleavedRing::new(2, 64).unwrap(),
+            mode: AtomicU32::new(FINAL_CAPTURE_IDLE),
+            writer_running: AtomicBool::new(false),
+            fault: AtomicU32::new(FAULT_NONE),
+            accepted_frames: AtomicU64::new(0),
+            written_frames: AtomicU64::new(0),
+            sample_rate: 48_000,
+            maximum_callback_frames: 16,
+        };
+        assert!(writer_shared
+            .ring
+            .push_stereo(&[StereoFrame::new(0.1, 0.2); 16]));
+        let failed_part = base.join("failed.wav.part");
+        assert!(write_final_mix(
+            &failed_part,
+            &base.join("failed.wav"),
+            &writer_shared,
+            &Mutex::new(FinalMixRecorderStatus::default()),
+            WriterBehavior {
+                delay: Duration::from_millis(1),
+                fail_after_frames: Some(0),
+            },
+        )
+        .is_err());
+        assert!(failed_part.exists());
+
+        let missing_parent = base.join("missing");
+        assert!(write_final_mix(
+            &missing_parent.join("disk.wav.part"),
+            &missing_parent.join("disk.wav"),
+            &writer_shared,
+            &Mutex::new(FinalMixRecorderStatus::default()),
+            WriterBehavior::default(),
+        )
+        .is_err());
+        assert!(!missing_parent.exists());
+        let _ = fs::remove_dir_all(base);
     }
 }

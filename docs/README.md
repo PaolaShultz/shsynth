@@ -49,6 +49,8 @@ configuration, or the architecture contracts.
 - [Audio graph and DSP contract](AUDIO_GRAPH.md) — Project effects data, exact
   parameter schemas, real-time limits, routing publication, meters, bypass,
   tails, topology limits, and curation gates.
+- [Final stereo performance bus](FINAL_PERFORMANCE_BUS.md) — exact three-source
+  topology, limiter, monitoring safety, final WAV capture, and hardware acceptance.
 - [Synchronized multitrack recording](MULTITRACK_RECORDING.md) — exact JACK
   source mapping, shared callback timeline, mono stems, manifests, recovery,
   and the non-audible stress helper.

@@ -351,6 +351,48 @@ validated catalog;
 Ardour, Mixxx, Zynthian, and Pencil Research data are documented research
 sources and are not redistributed.
 
+The MiniLab 3 factory Arturia and DAW pads were directly captured as notes
+36–43 on MIDI channel 10; the enabled User 1 program used channel 1, colliding
+with the keyboard. Controller commands now retain an optional channel
+qualifier, and the reviewed MiniLab profile uses channel 10 for page 1–4 and
+item 1–4. Matching Note On/Off, velocity-zero releases, and polyphonic pressure
+are consumed; the same notes on channel 1 remain musical. The old DAW Shift
+CC27 pad-lock binding was removed because ordinary Shift gestures toggled it.
+The captured exact Arturia program-notification SysEx remains forwarded rather
+than adding a broad manufacturer filter; profile-qualified metadata matching is
+the safe future boundary if consuming it becomes necessary.
+
+Optional `controller_clock.*` configuration owns a dedicated exact stable ALSA
+standard-MIDI output and is off by default. It shares tracker transport tempo,
+sends only `FA`, evenly timed `F8` at 24 PPQN, and `FC`, and never uses a musical
+page.
+The source port is ALSA `NO_EXPORT` and uses directly addressed events; this is
+required because the Pi's JACK sequencer bridge otherwise auto-subscribes to a
+normal RtMidi output and duplicates its route.
+Clock runs while the enabled app is open, using default tempo before the first
+run; direct MiniLab validation established that clock must be detected before
+Start. Enabling it permits an empty Pattern for live external-sync
+arpeggiation. SHR has no pause/resume state, so it sends Start for each fresh
+run and does not send Continue or Song Position Pointer; Stop does not silence
+Timing Clock.
+
+The 2026-07-20 non-audible validation addressed only the current standard MIDI
+endpoint (`Minilab3 MIDI`, then ALSA `32:0`; the number is volatile). USB wire
+monitoring saw `FA`, repeated `F8` intervals around 20,833 microseconds at 120
+BPM, and `FC`, with no channel messages or SysEx on that connection. With the
+MiniLab in Arturia mode, Sync External, and its arpeggiator enabled, a fresh
+Start after clock detection produced Note On/Off on the same standard port,
+channel 1. The observed repeating pitches included 72, 79, 76, 84, 91, 88, 96,
+103, and 100. The passive capture is
+`/tmp/shr-minilab-clock-validation-20260720-003.log`. A second capture against
+the final release build,
+`/tmp/shr-minilab-clock-validation-20260720-004.log`, confirmed that
+stopped-state clock before the first fresh Start produced the arpeggio
+immediately, without the earlier manual transport restart. `/tmp` evidence is
+not expected to survive a reboot. DAW and User 1 were not repeated because the
+dedicated clock protocol and endpoint do not depend on controller program, and
+their no-clock behavior plus pad channels were already captured separately.
+
 ## Preset provenance decision
 
 Only the 21 cleared synthv1 presets listed in
@@ -543,3 +585,34 @@ into the public project without explicit user direction.
 7. Keep the 12 mapped synthv1 controls and pickup/reset invariants intact.
 8. Validate only what changed, inspect the staged tree, then push. Run all Rust
    checks for code/runtime changes, not for docs or image-only commits.
+
+## Final stereo performance bus (2026-07-20 implementation)
+
+The opt-in owned graph now instantiates exactly the managed synth, owned WAV
+loop, and one exact configured stereo capture pair. It transactionally replaces
+the direct synth/loop routes, applies the existing managed-source/aux and master
+DSP, then a dedicated -1 dBFS stereo-linked 3 dB-knee sample-peak limiter with
+2.5 ms lookahead. The post-limiter buffer is shared exactly by the final meter,
+new 24-bit interleaved stereo recorder tap, and JACK playback. See
+`docs/FINAL_PERFORMANCE_BUS.md` for the full boundary and limitations.
+
+Machine source names remain only in runtime configuration; Project format stays
+4 and old configuration falls back to its first legacy capture pair. The raw
+multitrack recorder and legacy `.wav.part` recovery remain separate and intact.
+MTR provides the compact three-source level/mute/readiness, master, limiter,
+meter, and final-record controls through its four controller pages.
+
+Hardware-independent validation and release stress results belong in the
+handoff report for this change. No full-duplex JACK/interface or MR18 acceptance
+was run during implementation; `docs/MR18_TEST_PLAN.md` records the later
+procedure without invented port names.
+
+Final release-mode synthetic evidence used three distinguishable stereo sources
+for one paced second per row. At 48 kHz, 64/128/256/1024-frame callbacks had
+mean times of 15.294/29.111/58.912/203.826 microseconds; the worst single
+callback was 295.517 microseconds. A 44.1 kHz, 128-frame run averaged 30.614
+microseconds and peaked at 276.314 microseconds. Every run reported 2.60 dB
+maximum limiter reduction, writer high-water no greater than one 1024-frame
+callback (128/128/256/1024 and 128 frames respectively), zero dropped frames,
+zero overflows, and complete playback/WAV PCM equality. This is synthetic
+hardware-independent evidence only.

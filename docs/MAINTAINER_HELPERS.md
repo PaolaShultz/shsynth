@@ -23,6 +23,7 @@ assumptions.
 | `generate_demo_songs.py` | Reproduce or validate cleared public-domain demos | `--write` replaces only tracked demo outputs; normal mode is read-only and rejects changes/extras |
 | `capture-minilab-midi.sh` | Passively capture and label MiniLab 3 MIDI evidence | Temporarily stops and restores `amidiminder`; writes one unique log below `/tmp` by default |
 | `shr recorder-stress` | Non-audibly exercise the production multistem buffer/writer without JACK | Creates one unique synthetic take below an explicit destination |
+| `shr final-mix-stress` | Non-audibly exercise the three-source final DSP and stereo writer without JACK | Creates one unique 24-bit stereo stress WAV below an explicit destination |
 
 None of the setup, tuning, preset, or screenshot helpers starts JACK, a synth
 engine, MIDI playback, or an audible test. `local.sh` is the exception only in
@@ -572,3 +573,36 @@ Pi storage scheduling, the real bounded transfer, per-stem conversion, flush,
 manifest, or atomic publication. It is evidence for hardware-independent
 capacity and file correctness, never evidence that an MR18 or any other
 physical interface passed.
+
+## Synthetic final-mix stress
+
+### Invocation
+
+```sh
+shr final-mix-stress DEST [SECONDS] [RATE] [CALLBACK]
+```
+
+`DEST` is required and must be an explicit non-root directory. Defaults are 10
+seconds, 48000 Hz, and 128 frames/callback. Bounds are 1–86400 seconds, a
+supported rate of 44100 or 48000 Hz, and 16–4096 callback frames.
+
+The command does not load runtime configuration, open/start JACK, register a
+port, transmit MIDI, start a synth, or produce sound. It feeds three
+deterministic, distinguishable stereo sources through the production source and
+master smoothing, final linked limiter, final meter, callback-boundary capture,
+bounded SPSC ring, non-real-time 24-bit stereo WAV writer, fsync, and
+no-replace publication. It paces callbacks in real time and reports callback
+mean/p95/p99/maximum, limiter maximum gain reduction, writer high-water, drops,
+overflows, frame count, full playback/file sample equality, and final path.
+
+The only persistent side effect is one uniquely named
+`final-mix-*.stress.wav` below `DEST`; existing paths are never replaced. An
+in-progress matching `.wav.part` is owned by that invocation and remains for
+honest recovery after failure. Use an explicit dedicated temporary directory
+when results are disposable, and validate that exact expanded path before
+removal.
+
+This helper is intentionally separate from `recorder-stress`: raw multitrack
+evidence concerns many synchronized mono stems, while final-mix evidence must
+exercise the exact post-limiter stereo playback/tap equivalence. Neither helper
+is physical-interface, JACK scheduling, listening, or MR18 acceptance evidence.

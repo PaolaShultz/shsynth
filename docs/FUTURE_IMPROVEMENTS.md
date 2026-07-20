@@ -64,22 +64,24 @@ ordinary drum loops should feel like a pleasant afternoon.
 
 ## Audio effects graph: inserts, sends, and returns
 
-The concrete post-competition migration from the current single managed source
-to a bounded multi-strip mixer with two genuinely shared aux buses is in the
+The current narrow performance bus now sums exactly the managed instrument,
+owned loop, and one configured stereo input before the master, dedicated
+limiter, final meter, recorder, and playback. The broader proposed migration to
+a bounded multi-strip mixer with genuinely shared multi-source aux buses is in the
 [post-competition mixer and shared-aux plan](POST_COMPETITION_MIXER_AUX_PLAN.md).
 It also records the current dry/wet behavior, the audio-source boundary behind
 tracker lanes, Project migration, and recording taps. The two narrow meter and
-aux-bypass findings from that routing audit have been repaired in the current
-one-source graph without beginning the migration.
+aux-bypass findings from that routing audit have also been repaired. The final
+bus does not implement the broader strip/aux design.
 
 The managed graph now includes the essential source inserts, delay/modulation,
 three reverb voicings, two independently scaled pre/post aux sends and returns,
 and an ordered master rack. It retains strict Project persistence, stopped
 structural publication, compact editors, and meters. Evidence is in the
 [Phase 2 insert-effects measurement](PHASE2_AUDIO_GRAPH_MEASUREMENT.md) and
-[Phase 3/4 effects measurement](PHASE3_4_AUDIO_GRAPH_MEASUREMENT.md). Hardware
-loops and full-duplex live-input monitoring remain deferred because they cross
-the physical-interface safety boundary.
+[Phase 3/4 effects measurement](PHASE3_4_AUDIO_GRAPH_MEASUREMENT.md). The
+three-source path has hardware-independent evidence, while full-duplex physical
+interface acceptance remains deliberately deferred.
 
 ### Product idea
 
@@ -105,18 +107,17 @@ hiding both behaviors behind a generic “effect” switch.
 
 ### Current architecture boundary
 
-For a managed software engine, SHR-DAW now owns a bounded internal stereo sum:
-the source's dry path and two optional wet returns meet once, then pass through
-the master rack to configured playback. The WAV loop client and synchronized
-multitrack recorder remain independently owned direct clients; recorded stems
-do not pass through or monitor through this graph.
+SHR-DAW now owns a bounded three-source stereo sum. The managed source's dry
+path and two wet returns meet the owned loop and configured live-input pair,
+then pass through the master, final limiter/meter/recorder and playback. The raw
+synchronized multitrack recorder remains a separate workflow.
 
 The graph uses internal preallocated mixer, send-tap, and return nodes rather
 than relying on implicit JACK summing. That makes independent send/return gain,
 pre/post placement, return metering, and exactly-once mixing explicit and
-testable. A fuller owned mixer is still needed before loops and live inputs can
-share independent gain/pan, mute/solo, and stable record points with the managed
-engine.
+testable. The final bus adds only smoothed level/mute per source and master
+level. A fuller mixer would still be needed for pan, solo, per-input inserts,
+or shared aux sends, none of which is current product scope.
 
 Primary source: [JACK 2 `jack_port_get_buffer` API
 contract](https://github.com/jackaudio/jack2/blob/develop/common/jack/jack.h),

@@ -75,6 +75,10 @@ Each JSON entry has stable `id`, display `name`, normalized ALSA
 `match_names`, a 4/5/8-button layout, and any known mappings. `controls` maps
 incoming physical CC numbers to the twelve canonical synthv1 CCs.
 `note_buttons` and `cc_buttons` map physical messages to page/item roles.
+Optional `note_button_channels` and `cc_button_channels` objects map the same
+note/CC keys to 1-based MIDI channels. Missing qualifiers preserve legacy
+all-channel profiles. MIDI learn records the channel observed for every learned
+note or CC command, and save/load retains it.
 Encoder, press, and optional lock messages are separate so they cannot collide
 with continuous controls. All physical note and CC numbers must be valid MIDI
 data bytes (0–127), and an encoder press cannot reuse a command-button note.
@@ -83,3 +87,14 @@ Profiles may be partial. After one is loaded, `shr pads learn` asks only for
 continuous controls and encoder functions that are still empty; command-button
 learning is optional and replaces the chosen button layout as one verified
 set.
+
+The reviewed MiniLab 3 profile uses factory Arturia/DAW pad notes 36–43 on
+channel 10. Direct capture on this unit found User 1 pads on channel 1, the same
+channel as its keyboard, so User 1 pads are not safe command buttons: their
+messages are indistinguishable from keyboard notes. DAW Shift emits CC27, but
+the profile deliberately does not bind it as persistent pad lock; normal
+arpeggiator, program, and bank gestures therefore cannot toggle SHR lock state.
+Selecting the controller's DAW program does not itself require a proprietary
+DAW script for these ordinary MIDI note commands. Arturia mode has the same
+captured channel-10 pad notes, so use DAW mode only if another ordinary mapping
+has been verified to be useful.

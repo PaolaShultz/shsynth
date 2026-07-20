@@ -33,8 +33,14 @@ pub struct ControllerProfile {
     pub lock_cc: Option<u8>,
     #[serde(default)]
     pub note_buttons: HashMap<u8, String>,
+    /// Optional 1-based channel qualifiers keyed by command note.
+    #[serde(default)]
+    pub note_button_channels: HashMap<u8, u8>,
     #[serde(default)]
     pub cc_buttons: HashMap<u8, String>,
+    /// Optional 1-based channel qualifiers keyed by command CC.
+    #[serde(default)]
+    pub cc_button_channels: HashMap<u8, u8>,
     #[serde(default)]
     pub source: String,
 }
@@ -73,6 +79,24 @@ impl ControllerProfile {
         }
         for &cc in self.cc_buttons.keys() {
             crate::pads::ensure_midi_number(cc, "controller profile button CC")?;
+        }
+        if self.note_button_channels.iter().any(|(note, channel)| {
+            !self.note_buttons.contains_key(note) || !(1..=16).contains(channel)
+        }) {
+            bail!(
+                "controller profile {} has an invalid note-button channel qualifier",
+                self.id
+            );
+        }
+        if self
+            .cc_button_channels
+            .iter()
+            .any(|(cc, channel)| !self.cc_buttons.contains_key(cc) || !(1..=16).contains(channel))
+        {
+            bail!(
+                "controller profile {} has an invalid CC-button channel qualifier",
+                self.id
+            );
         }
         for (number, description) in [
             (self.encoder_relative_cc, "controller profile encoder CC"),
@@ -147,11 +171,21 @@ impl ControllerProfile {
             .iter()
             .map(|(&number, action)| Ok((number, action.parse()?)))
             .collect::<Result<_>>()?;
+        config.pad_channels = self
+            .note_button_channels
+            .iter()
+            .map(|(&number, &channel)| (number, channel - 1))
+            .collect();
         config.cc_buttons = self
             .cc_buttons
             .iter()
             .map(|(&number, action)| Ok((number, action.parse()?)))
             .collect::<Result<_>>()?;
+        config.cc_button_channels = self
+            .cc_button_channels
+            .iter()
+            .map(|(&number, &channel)| (number, channel - 1))
+            .collect();
         config.validate()
     }
 }
@@ -280,6 +314,25 @@ mod tests {
         profile.apply(&mut config, "MiniLab3 MIDI").unwrap();
         assert_eq!(config.controls.len(), 12);
         assert_eq!(config.pads.len(), 8);
+        assert_eq!(config.pad_channels.len(), 8);
+        assert!(config.pad_channels.values().all(|channel| *channel == 9));
+        assert_eq!(config.lock_cc, None);
+        for (offset, action) in [
+            PadAction::Page1,
+            PadAction::Page2,
+            PadAction::Page3,
+            PadAction::Page4,
+            PadAction::Item1,
+            PadAction::Item2,
+            PadAction::Item3,
+            PadAction::Item4,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(config.pads.get(&(36 + offset as u8)), Some(&action));
+        }
+        assert_eq!(config.lock_action(&[0xb0, 27, 127]), (false, false));
     }
 
     fn minimal_profile() -> ControllerProfile {
@@ -295,7 +348,9 @@ mod tests {
             encoder_press_note: None,
             lock_cc: None,
             note_buttons: HashMap::new(),
+            note_button_channels: HashMap::new(),
             cc_buttons: HashMap::new(),
+            cc_button_channels: HashMap::new(),
             source: "hardware verification".into(),
         }
     }
@@ -315,6 +370,43 @@ mod tests {
         profile.encoder_press_cc = Some(118);
         profile.encoder_press_note = Some(36);
         assert!(profile.validate().is_err());
+
+        profile = minimal_profile();
+        profile.note_button_channels.insert(36, 10);
+        assert!(profile.validate().is_err());
+
+        profile = minimal_profile();
+        profile.note_buttons.insert(36, "item-1".into());
+        profile.note_button_channels.insert(36, 17);
+        assert!(profile.validate().is_err());
+
+        profile = minimal_profile();
+        profile.cc_buttons.insert(44, "item-1".into());
+        profile.cc_button_channels.insert(44, 0);
+        assert!(profile.validate().is_err());
+    }
+
+    #[test]
+    fn qualified_profile_application_and_controller_save_retain_channels() {
+        let mut profile = minimal_profile();
+        profile.note_buttons.insert(36, "page-1".into());
+        profile.note_button_channels.insert(36, 10);
+        profile.cc_buttons.insert(44, "item-1".into());
+        profile.cc_button_channels.insert(44, 3);
+        let mut config = PadConfig::default();
+        profile.apply(&mut config, "Test Controller MIDI").unwrap();
+        assert_eq!(config.pad_channels, HashMap::from([(36, 9)]));
+        assert_eq!(config.cc_button_channels, HashMap::from([(44, 2)]));
+
+        let path = std::env::temp_dir().join(format!(
+            "shsynth-profile-channel-roundtrip-{}.conf",
+            std::process::id()
+        ));
+        config.save(&path).unwrap();
+        let loaded = PadConfig::load(&path).unwrap();
+        assert_eq!(loaded.pad_channels, config.pad_channels);
+        assert_eq!(loaded.cc_button_channels, config.cc_button_channels);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

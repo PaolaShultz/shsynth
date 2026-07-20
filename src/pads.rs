@@ -128,9 +128,14 @@ impl FromStr for PadAction {
 pub struct PadConfig {
     pub input_match: Option<String>,
     pub pads: HashMap<u8, PadAction>,
+    /// Optional zero-based MIDI channel for each note command. Missing keeps
+    /// the legacy behavior of matching the note on every channel.
+    pub pad_channels: HashMap<u8, u8>,
     /// Incoming controller CC buttons. Note buttons remain in `pads` for
     /// compatibility with the original profile format.
     pub cc_buttons: HashMap<u8, PadAction>,
+    /// Optional zero-based MIDI channel for each CC command.
+    pub cc_button_channels: HashMap<u8, u8>,
     /// Incoming controller CC -> synthv1 mapped CC from control::CONTROLS.
     pub controls: HashMap<u8, u8>,
     pub encoder_relative_cc: Option<u8>,
@@ -147,7 +152,9 @@ impl Default for PadConfig {
         let mut config = Self {
             input_match: None,
             pads: HashMap::new(),
+            pad_channels: HashMap::new(),
             cc_buttons: HashMap::new(),
+            cc_button_channels: HashMap::new(),
             controls: HashMap::new(),
             encoder_relative_cc: None,
             encoder_relative_reverse: false,
@@ -253,19 +260,37 @@ impl PadConfig {
             if let Some(raw) = key.trim().strip_prefix("button.cc.") {
                 if !saw_cc_buttons {
                     self.cc_buttons.clear();
+                    self.cc_button_channels.clear();
                     saw_cc_buttons = true;
                 }
-                let raw = midi_number(raw, "controller button CC")?;
+                let (channel, raw) = command_binding(raw, "controller button CC")?;
                 self.cc_buttons.insert(raw, value.trim().parse()?);
+                match channel {
+                    Some(channel) => {
+                        self.cc_button_channels.insert(raw, channel);
+                    }
+                    None => {
+                        self.cc_button_channels.remove(&raw);
+                    }
+                }
                 continue;
             }
             if !saw_pads {
                 self.pads.clear();
+                self.pad_channels.clear();
                 saw_pads = true;
             }
             let note_text = key.trim().strip_prefix("pad.").unwrap_or(key.trim());
-            let note = midi_number(note_text, "pad note")?;
+            let (channel, note) = command_binding(note_text, "pad note")?;
             self.pads.insert(note, value.trim().parse()?);
+            match channel {
+                Some(channel) => {
+                    self.pad_channels.insert(note, channel);
+                }
+                None => {
+                    self.pad_channels.remove(&note);
+                }
+            }
         }
         self.validate()
     }
@@ -289,6 +314,20 @@ impl PadConfig {
         }
         for &note in self.pads.keys() {
             ensure_midi_number(note, "pad note")?;
+        }
+        if self
+            .pad_channels
+            .iter()
+            .any(|(note, channel)| !self.pads.contains_key(note) || *channel > 15)
+        {
+            bail!("pad channel qualifiers require a mapped note and channel 1..16");
+        }
+        if self
+            .cc_button_channels
+            .iter()
+            .any(|(cc, channel)| !self.cc_buttons.contains_key(cc) || *channel > 15)
+        {
+            bail!("button CC channel qualifiers require a mapped CC and channel 1..16");
         }
         for (number, description) in [
             (self.encoder_relative_cc, "encoder relative CC"),
@@ -349,7 +388,7 @@ impl PadConfig {
         }
         let mut entries: Vec<_> = self.pads.iter().collect();
         entries.sort_by_key(|(note, _)| **note);
-        let mut text = String::from("# SHR-DAW controller profile v3\n");
+        let mut text = String::from("# SHR-DAW controller profile v4\n");
         if let Some(input) = &self.input_match {
             text.push_str(&format!("input={input}\n"));
         }
@@ -380,10 +419,18 @@ impl PadConfig {
         let mut cc_buttons: Vec<_> = self.cc_buttons.iter().collect();
         cc_buttons.sort_by_key(|(cc, _)| **cc);
         for (cc, action) in cc_buttons {
-            text.push_str(&format!("button.cc.{cc}={action}\n"));
+            if let Some(channel) = self.cc_button_channels.get(cc) {
+                text.push_str(&format!("button.cc.{}.{cc}={action}\n", channel + 1));
+            } else {
+                text.push_str(&format!("button.cc.{cc}={action}\n"));
+            }
         }
         for (note, action) in entries {
-            text.push_str(&format!("pad.{note}={action}\n"));
+            if let Some(channel) = self.pad_channels.get(note) {
+                text.push_str(&format!("pad.{}.{note}={action}\n", channel + 1));
+            } else {
+                text.push_str(&format!("pad.{note}={action}\n"));
+            }
         }
         crate::fsutil::atomic_write(path, text.as_bytes())
     }
@@ -395,10 +442,10 @@ impl PadConfig {
             return (false, None);
         }
         let kind = message[0] & 0xf0;
-        if kind != 0x90 && kind != 0x80 {
+        if !matches!(kind, 0x80 | 0x90 | 0xa0) {
             return (false, None);
         }
-        match self.pads.get(&message[1]).copied() {
+        match self.note_action(message[0], message[1]) {
             Some(action) => (true, (kind == 0x90 && message[2] > 0).then_some(action)),
             None => (false, None),
         }
@@ -411,17 +458,31 @@ impl PadConfig {
         let kind = message[0] & 0xf0;
         if kind == 0xb0 {
             return self
-                .cc_buttons
-                .get(&message[1])
-                .copied()
+                .cc_action(message[0], message[1])
                 .map(|action| (action, message[2] > 0));
         }
         if kind != 0x90 && kind != 0x80 {
             return None;
         }
-        self.pads.get(&message[1]).copied().map(|action| {
+        self.note_action(message[0], message[1]).map(|action| {
             let pressed = kind == 0x90 && message[2] > 0;
             (action, pressed)
+        })
+    }
+
+    fn note_action(&self, status: u8, note: u8) -> Option<PadAction> {
+        self.pads.get(&note).copied().filter(|_| {
+            self.pad_channels
+                .get(&note)
+                .is_none_or(|channel| *channel == status & 0x0f)
+        })
+    }
+
+    fn cc_action(&self, status: u8, cc: u8) -> Option<PadAction> {
+        self.cc_buttons.get(&cc).copied().filter(|_| {
+            self.cc_button_channels
+                .get(&cc)
+                .is_none_or(|channel| *channel == status & 0x0f)
         })
     }
 
@@ -500,6 +561,22 @@ fn optional_midi_number(value: &str, description: &str) -> Result<Option<u8>> {
     midi_number(value, description).map(Some)
 }
 
+fn command_binding(value: &str, description: &str) -> Result<(Option<u8>, u8)> {
+    let Some((channel, number)) = value.split_once('.') else {
+        return Ok((None, midi_number(value, description)?));
+    };
+    if number.contains('.') {
+        bail!("{description} binding must be NUMBER or CHANNEL.NUMBER");
+    }
+    let channel = channel
+        .parse::<u8>()
+        .with_context(|| format!("{description} channel must be 1..16"))?;
+    if !(1..=16).contains(&channel) {
+        bail!("{description} channel must be 1..16");
+    }
+    Ok((Some(channel - 1), midi_number(number, description)?))
+}
+
 #[derive(Debug, Default)]
 pub struct TapTempo {
     taps: VecDeque<Instant>,
@@ -549,6 +626,40 @@ mod tests {
         assert_eq!(c.route(&[0x90, 36, 100]), (true, Some(PadAction::Rec)));
         assert_eq!(c.route(&[0x80, 36, 0]), (true, None));
         assert_eq!(c.route(&[0x90, 40, 100]), (false, None));
+    }
+    #[test]
+    fn channel_qualified_note_commands_consume_press_release_zero_release_and_pressure() {
+        let c = PadConfig {
+            pads: HashMap::from([(36, PadAction::Page1)]),
+            pad_channels: HashMap::from([(36, 9)]),
+            ..PadConfig::default()
+        };
+        for channel in 0..16 {
+            let expected_press = if channel == 9 {
+                (true, Some(PadAction::Page1))
+            } else {
+                (false, None)
+            };
+            assert_eq!(c.route(&[0x90 | channel, 36, 100]), expected_press);
+            for (kind, value) in [(0x80, 0), (0x90, 0), (0xa0, 72)] {
+                assert_eq!(c.route(&[kind | channel, 36, value]), (channel == 9, None));
+            }
+        }
+    }
+
+    #[test]
+    fn channel_qualified_cc_commands_match_only_the_configured_channel() {
+        let c = PadConfig {
+            cc_buttons: HashMap::from([(44, PadAction::Item1)]),
+            cc_button_channels: HashMap::from([(44, 9)]),
+            ..PadConfig::default()
+        };
+        for channel in 0..16 {
+            let expected_press = (channel == 9).then_some((PadAction::Item1, true));
+            let expected_release = (channel == 9).then_some((PadAction::Item1, false));
+            assert_eq!(c.action_state(&[0xb0 | channel, 44, 127]), expected_press);
+            assert_eq!(c.action_state(&[0xb0 | channel, 44, 0]), expected_release);
+        }
     }
     #[test]
     fn relative_encoder_turns_and_press_are_consumed() {
@@ -601,6 +712,28 @@ mod tests {
         assert_eq!(config.layout, ControllerLayout::Five);
         assert_eq!(config.pads[&60].menu_input(), MenuInput::CyclePage);
         assert_eq!(config.pads[&64].menu_input(), MenuInput::ActivateItem(3));
+        let _ = fs::remove_file(path);
+    }
+    #[test]
+    fn qualified_and_legacy_unqualified_commands_round_trip() {
+        let path = std::env::temp_dir().join(format!(
+            "shsynth-controller-qualified-{}.conf",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            "pad.10.36=page-1\npad.37=page-2\nbutton.cc.10.44=item-1\nbutton.cc.45=item-2\n",
+        )
+        .unwrap();
+        let config = PadConfig::load(&path).unwrap();
+        assert_eq!(config.pad_channels, HashMap::from([(36, 9)]));
+        assert_eq!(config.cc_button_channels, HashMap::from([(44, 9)]));
+        config.save(&path).unwrap();
+        let loaded = PadConfig::load(&path).unwrap();
+        assert_eq!(loaded.pad_channels, config.pad_channels);
+        assert_eq!(loaded.cc_button_channels, config.cc_button_channels);
+        assert!(loaded.route(&[0x90, 37, 100]).0);
+        assert!(loaded.route(&[0x9f, 37, 100]).0);
         let _ = fs::remove_file(path);
     }
     #[test]
@@ -659,6 +792,9 @@ mod tests {
             "encoder.press_cc=128\n",
             "encoder.press_note=128\n",
             "lock.cc=128\n",
+            "pad.0.36=item-1\n",
+            "pad.17.36=item-1\n",
+            "button.cc.17.44=item-1\n",
         ] {
             fs::write(&path, text).unwrap();
             assert!(PadConfig::load(&path).is_err(), "accepted {text:?}");
@@ -683,6 +819,20 @@ mod tests {
         config = PadConfig {
             encoder_relative_cc: Some(28),
             controls: HashMap::from([(28, 74)]),
+            ..PadConfig::default()
+        };
+        assert!(config.save(&path).is_err());
+
+        config = PadConfig {
+            pads: HashMap::from([(36, PadAction::Item1)]),
+            pad_channels: HashMap::from([(37, 9)]),
+            ..PadConfig::default()
+        };
+        assert!(config.save(&path).is_err());
+
+        config = PadConfig {
+            cc_buttons: HashMap::from([(44, PadAction::Item1)]),
+            cc_button_channels: HashMap::from([(44, 16)]),
             ..PadConfig::default()
         };
         assert!(config.save(&path).is_err());

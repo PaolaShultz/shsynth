@@ -1,10 +1,12 @@
 # Synchronized multitrack recording
 
-SHR-DAW records a deliberately configured collection of JACK audio source
+SHR-DAW's raw recorder records a deliberately configured collection of JACK audio source
 ports as one synchronized take. It is interface-neutral: an MR18, a two-input
 sound card, a virtual JACK source, or another multichannel USB interface uses
 the same recorder. It does not monitor, mix, process, overdub, or edit these
-inputs. Use the interface or mixer for safe low-latency monitoring.
+inputs. It remains distinct from the owned performance bus and its one-file
+post-limiter [final stereo recording](FINAL_PERFORMANCE_BUS.md#final-recording).
+Use the interface or mixer for safe low-latency raw-input monitoring.
 
 ## What one take guarantees
 

@@ -8,6 +8,9 @@ use crate::control::{parameter_color, CONTROLS, VOLUME_CC};
 use crate::device_profile::{DeviceProfile, Registry as DeviceProfiles};
 use crate::drum_pattern::{self, DrumPattern};
 use crate::engine::{self, Engine, MidiEvent};
+use crate::final_bus::{
+    BusSource, MASTER_GAIN_MAX_DB, MASTER_GAIN_MIN_DB, SOURCE_GAIN_MAX_DB, SOURCE_GAIN_MIN_DB,
+};
 use crate::geometry::{contains, rect, visible_index};
 use crate::help::{self, HelpKind};
 use crate::navigation::{self, Action, MenuContext, Screen, SlotState};
@@ -387,6 +390,8 @@ struct App {
     fx_parameter: usize,
     fx_add_kind: usize,
     fx_target: usize,
+    bus_selected: usize,
+    final_recording_last: crate::audio_recorder::FinalMixRecorderStatus,
     performance_meter: PerformanceMeter,
     loop_meter: PerformanceMeter,
     last_mapped_volume: Option<f32>,
@@ -425,7 +430,10 @@ impl App {
             profile.apply_midi_selection(&mut config.external_midi);
         }
         let song = Song::new(&config.external_midi);
-        let transport_clock = Arc::new(crate::loop_player::TransportClock::default());
+        let transport_clock = Arc::new(crate::loop_player::TransportClock::new(
+            &config.controller_clock,
+            config.external_midi.default_tempo,
+        ));
         let sequencer = sequencer::Sequencer::start_with_clock(
             &config.external_midi,
             Arc::clone(&midi_output),
@@ -551,6 +559,8 @@ impl App {
             fx_parameter: 0,
             fx_add_kind: 0,
             fx_target: 0,
+            bus_selected: 0,
+            final_recording_last: crate::audio_recorder::FinalMixRecorderStatus::default(),
             performance_meter: PerformanceMeter::default(),
             loop_meter: PerformanceMeter::default(),
             last_mapped_volume: None,
@@ -747,6 +757,14 @@ impl App {
         let _ = self.audio_recorder.stop();
         self.stop_recording();
         self.stop_playback();
+        if let Some(engine) = self.engine.as_mut() {
+            if engine.final_recording_active() {
+                let _ = engine.stop_final_recording();
+            }
+            if let Some(status) = engine.final_recording_status() {
+                self.final_recording_last = status;
+            }
+        }
         self.engine.take();
         self.performance_meter
             .set_audio_unavailable(AudioAvailability::Stopped);
@@ -1754,7 +1772,7 @@ impl App {
                 return;
             }
         };
-        if notes == 0 && self.song.audio_loop.is_none() {
+        if notes == 0 && self.song.audio_loop.is_none() && !self.config.controller_clock.enabled {
             self.status =
                 "tracker has no notes from this position · enable EDIT and enter notes".into();
             return;
@@ -1769,11 +1787,16 @@ impl App {
             .count();
         self.status = if offline == 0 {
             format!(
-                "tracker playing · {notes} MIDI · loop {}",
+                "tracker playing · {notes} MIDI · loop {}{}",
                 if self.song.audio_loop.is_some() {
                     "on"
                 } else {
                     "off"
+                },
+                if self.config.controller_clock.enabled {
+                    " · controller clock on"
+                } else {
+                    ""
                 }
             )
         } else {
@@ -1967,6 +1990,7 @@ impl App {
         {
             Ok(()) => {
                 self.status = format!("loop ready · {}", settings.file);
+                self.retry_final_bus();
                 true
             }
             Err(error) => {
@@ -1977,9 +2001,29 @@ impl App {
     }
 
     fn unload_loop_player(&mut self) {
+        if let Some(engine) = self.engine.as_mut() {
+            if let Err(error) = engine.suspend_audio_graph() {
+                self.status = format!("final bus suspend failed: {error:#}");
+            }
+        }
         self.loop_player.unload();
         self.loop_meter
             .set_audio_unavailable(AudioAvailability::Stopped);
+    }
+
+    fn retry_final_bus(&mut self) {
+        let Some(engine) = self.engine.as_mut() else {
+            return;
+        };
+        match engine.retry_audio_graph(&self.config, &self.song.insert_rack, &self.song.aux_routing)
+        {
+            Ok(true) => self.status.push_str(" · final bus active"),
+            Ok(false) => {}
+            Err(error) => {
+                self.audio_fallback = Some(format!("final bus unavailable · {error:#}"));
+                self.status.push_str(" · final bus unavailable");
+            }
+        }
     }
 
     fn remove_project_loop(&mut self) {
@@ -2106,6 +2150,12 @@ impl App {
                 let tempo = self.apply_tracker_tempo(Self::loop_project_tempo(&settings));
                 self.loop_meter
                     .set_audio_unavailable(AudioAvailability::Stopped);
+                if let Some(engine) = self.engine.as_mut() {
+                    if let Err(error) = engine.suspend_audio_graph() {
+                        self.status = format!("final bus suspend failed: {error:#}");
+                        return;
+                    }
+                }
                 match self.loop_player.load(decoded, &settings) {
                     Ok(()) => {
                         self.status = format!(
@@ -2116,7 +2166,8 @@ impl App {
                             candidates[0],
                             candidates[1],
                             candidates[2]
-                        )
+                        );
+                        self.retry_final_bus();
                     }
                     Err(error) => {
                         self.status = format!("imported privately · JACK loop offline: {error}")
@@ -3577,7 +3628,13 @@ impl App {
         if !self.config.audio_graph.enabled {
             return None;
         }
-        if self.audio_recorder.status().recording || self.recorder.is_recording() {
+        if self.audio_recorder.status().recording
+            || self.recorder.is_recording()
+            || self
+                .engine
+                .as_ref()
+                .is_some_and(Engine::final_recording_active)
+        {
             return Some("stop recording before changing the insert rack");
         }
         if self.playback.is_some()
@@ -3588,6 +3645,86 @@ impl App {
             return Some("stop transport before changing the insert rack");
         }
         None
+    }
+
+    fn move_bus_selection(&mut self, direction: i8) {
+        self.bus_selected = if direction < 0 {
+            self.bus_selected.saturating_sub(1)
+        } else {
+            (self.bus_selected + 1).min(3)
+        };
+        self.status = format!("final bus · {} selected", self.bus_selection_label());
+    }
+
+    fn bus_selection_label(&self) -> &'static str {
+        if self.bus_selected < 3 {
+            BusSource::ALL[self.bus_selected].label()
+        } else {
+            "MASTER"
+        }
+    }
+
+    fn adjust_bus_level(&mut self, direction: i8) {
+        let Some(controls) = self.engine.as_ref().and_then(Engine::bus_controls) else {
+            self.status = "final bus unavailable · load loop, input, and synth first".into();
+            return;
+        };
+        let delta = if direction < 0 { -1.0 } else { 1.0 };
+        let value = if self.bus_selected < 3 {
+            let source = BusSource::ALL[self.bus_selected];
+            let value = (controls.source_gain_db(source) + delta)
+                .clamp(SOURCE_GAIN_MIN_DB, SOURCE_GAIN_MAX_DB);
+            controls.set_source_gain_db(source, value);
+            value
+        } else {
+            let value =
+                (controls.master_gain_db() + delta).clamp(MASTER_GAIN_MIN_DB, MASTER_GAIN_MAX_DB);
+            controls.set_master_gain_db(value);
+            value
+        };
+        self.status = format!("{} level {value:.0} dB", self.bus_selection_label());
+    }
+
+    fn toggle_bus_mute(&mut self) {
+        if self.bus_selected >= 3 {
+            self.status = "master has level only · source mutes remain explicit".into();
+            return;
+        }
+        let Some(controls) = self.engine.as_ref().and_then(Engine::bus_controls) else {
+            self.status = "final bus unavailable".into();
+            return;
+        };
+        let source = BusSource::ALL[self.bus_selected];
+        let muted = !controls.source_muted(source);
+        controls.set_source_muted(source, muted);
+        self.status = format!(
+            "{} {}",
+            source.label(),
+            if muted { "muted" } else { "ready" }
+        );
+    }
+
+    fn toggle_final_recording(&mut self) {
+        let Some(engine) = self.engine.as_mut() else {
+            self.status = "final recording unavailable · owned graph is inactive".into();
+            return;
+        };
+        let active = engine.final_recording_active();
+        let result = if active {
+            engine.stop_final_recording()
+        } else {
+            engine.start_final_recording(None)
+        };
+        let final_status = engine.final_recording_status().unwrap_or_default();
+        self.final_recording_last = final_status.clone();
+        self.status = match result {
+            Ok(()) if active => final_status.path.map_or_else(
+                || "final recording stopped".into(),
+                |path| format!("final recording saved · {}", path.display()),
+            ),
+            Ok(()) => "final recording armed · begins on next audio callback".into(),
+            Err(error) => format!("final recording: {error:#}"),
+        };
     }
 
     fn selected_effect_id(&self) -> Option<EffectId> {
@@ -4478,6 +4615,13 @@ impl App {
                 .set_audio_unavailable(AudioAvailability::DirectUnavailable);
             self.status = status;
         }
+        if let Some(status) = self
+            .engine
+            .as_mut()
+            .and_then(Engine::final_recording_status)
+        {
+            self.final_recording_last = status;
+        }
         if self.engine.as_mut().is_some_and(|engine| !engine.alive()) {
             self.playback.take();
             self.engine.take();
@@ -5147,7 +5291,18 @@ fn perform(
         Action::ResetMeter => {
             a.performance_meter.clear_holds();
             a.status = "meter MAX, short peak, and clip holds cleared".into();
+            if a.config.audio_graph.enabled
+                && a.engine.as_ref().and_then(Engine::bus_controls).is_none()
+            {
+                a.retry_final_bus();
+            }
         }
+        Action::BusSelectPrevious => a.move_bus_selection(-1),
+        Action::BusSelectNext => a.move_bus_selection(1),
+        Action::BusLevelDecrease => a.adjust_bus_level(-1),
+        Action::BusLevelIncrease => a.adjust_bus_level(1),
+        Action::BusMute => a.toggle_bus_mute(),
+        Action::FinalRecordToggle => a.toggle_final_recording(),
         Action::Back => {
             if a.screen == Screen::FxEditor {
                 a.set_screen(Screen::FxRack);
@@ -6421,6 +6576,10 @@ const fn performance_audio_route(availability: AudioAvailability) -> &'static st
 }
 
 fn draw_performance_meter<B: Backend>(f: &mut Frame<B>, a: &mut App) {
+    if a.config.audio_graph.enabled {
+        draw_final_performance_bus(f, a);
+        return;
+    }
     let z = f.size();
     let body = rect(z.x, z.y, z.width, z.height.saturating_sub(3));
     let inner = rect(
@@ -6548,6 +6707,185 @@ fn draw_performance_meter<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         ),
         body,
     );
+}
+
+fn draw_final_performance_bus<B: Backend>(f: &mut Frame<B>, a: &mut App) {
+    let z = f.size();
+    let body = rect(z.x, z.y, z.width, z.height.saturating_sub(3));
+    let width = usize::from(body.width.saturating_sub(2));
+    let controls = a.engine.as_ref().and_then(Engine::bus_controls);
+    let meter = a.engine.as_ref().and_then(Engine::final_bus_meter);
+    let sample_rate = a.engine.as_ref().and_then(Engine::audio_graph_sample_rate);
+    if let Some(recording) = a.engine.as_mut().and_then(Engine::final_recording_status) {
+        a.final_recording_last = recording;
+    }
+    let recording = a.final_recording_last.clone();
+    let active = controls.is_some() && meter.is_some();
+    let input = a
+        .config
+        .audio_graph
+        .input
+        .as_ref()
+        .or_else(|| a.config.capture.inputs.first());
+    let input_ready = input.is_some_and(|input| {
+        a.capture_sources
+            .iter()
+            .any(|source| source == &input.left_port)
+            && a.capture_sources
+                .iter()
+                .any(|source| source == &input.right_port)
+    });
+    let mut lines = Vec::new();
+    lines.push(Spans::from(Span::styled(
+        format!(
+            "THREE-SOURCE SUM · {}",
+            if active { "ACTIVE" } else { "UNAVAILABLE" }
+        ),
+        Style::default()
+            .fg(if active { Color::Green } else { Color::Red })
+            .add_modifier(Modifier::BOLD),
+    )));
+    for (index, source) in BusSource::ALL.iter().copied().enumerate() {
+        let ready = active
+            && match source {
+                BusSource::Synth => a.engine.is_some(),
+                BusSource::Loop => a.loop_player.status().loaded,
+                BusSource::Input => input_ready,
+            };
+        let (gain, muted) = controls.as_ref().map_or((0.0, false), |controls| {
+            (
+                controls.source_gain_db(source),
+                controls.source_muted(source),
+            )
+        });
+        let selected = a.bus_selected == index;
+        lines.push(Spans::from(Span::styled(
+            format!(
+                "{} {:<5} {:>4.0}dB {:<4} {}",
+                if selected { ">" } else { " " },
+                source.label(),
+                gain,
+                if muted { "MUTE" } else { "ON" },
+                if ready { "READY" } else { "OFFLINE" }
+            ),
+            if selected {
+                Style::default().fg(Color::Black).bg(Color::Yellow)
+            } else if ready {
+                Style::default().fg(Color::White)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        )));
+    }
+    let master_gain = controls
+        .as_ref()
+        .map(|controls| controls.master_gain_db())
+        .unwrap_or(0.0);
+    lines.push(Spans::from(Span::styled(
+        format!(
+            "{} MASTER {:>4.0}dB",
+            if a.bus_selected == 3 { ">" } else { " " },
+            master_gain
+        ),
+        if a.bus_selected == 3 {
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::White)
+        },
+    )));
+    let meter = meter.unwrap_or_default();
+    lines.push(Spans::from(format!(
+        "FINAL L {:>5.1}  R {:>5.1} dBFS",
+        meter_db(meter.output.peak.left),
+        meter_db(meter.output.peak.right)
+    )));
+    lines.push(Spans::from(Span::styled(
+        format!(
+            "PRE CLIP {} · FINAL CLIP {} · GR {:.1}dB",
+            meter.limiter_input.clips, meter.output.clips, meter.limiter_gain_reduction_db
+        ),
+        if meter.limiter_input.clips > 0 || meter.output.clips > 0 {
+            Style::default().fg(Color::Red)
+        } else {
+            Style::default().fg(Color::Green)
+        },
+    )));
+    let latency = sample_rate.map_or_else(
+        || "2.5ms lookahead".into(),
+        |rate| {
+            let samples =
+                (rate as f32 * crate::final_bus::LIMITER_LOOKAHEAD_SECONDS).round() as u32;
+            format!(
+                "{samples} samples/{:.3}ms",
+                samples as f64 * 1000.0 / f64::from(rate)
+            )
+        },
+    );
+    lines.push(Spans::from(format!(
+        "LIMIT -1.0dBFS · knee 3dB · {latency}"
+    )));
+    lines.push(Spans::from(format!(
+        "REC {}  {:02}:{:02}  {}",
+        if recording.recording {
+            "ACTIVE"
+        } else if recording.error.is_some() {
+            "ERROR "
+        } else {
+            "STOPPED"
+        },
+        recording.elapsed.as_secs() / 60,
+        recording.elapsed.as_secs() % 60,
+        format_bytes(recording.bytes)
+    )));
+    lines.push(Spans::from(format!(
+        "DROP {} · OVF {} · HIGH {}f",
+        recording.dropped_frames, recording.overflow_events, recording.writer_high_water_frames
+    )));
+    if let Some(error) = recording.error {
+        lines.push(Spans::from(Span::styled(
+            truncate(&error, width),
+            Style::default().fg(Color::Red),
+        )));
+    } else if let Some(path) = recording.path {
+        lines.push(Spans::from(truncate(
+            &format!("FILE {}", path.display()),
+            width,
+        )));
+    }
+    lines.push(Spans::from(Span::styled(
+        if a.config.audio_graph.input_direct_monitoring {
+            if a.config.audio_graph.confirm_doubled_monitoring {
+                "MONITOR software + confirmed interface direct"
+            } else {
+                "MONITOR REFUSED · unconfirmed doubled path"
+            }
+        } else {
+            "MONITOR software · interface direct monitor off"
+        },
+        Style::default().fg(if a.config.audio_graph.input_direct_monitoring {
+            Color::LightYellow
+        } else {
+            Color::Green
+        }),
+    )));
+    lines.truncate(usize::from(body.height.saturating_sub(2)));
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(" MTR · PERFORMANCE BUS ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(if active { Color::Green } else { Color::Red })),
+        ),
+        body,
+    );
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1}MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1}KiB", bytes as f64 / 1024.0)
+    }
 }
 
 fn draw_fx_editor<B: Backend>(f: &mut Frame<B>, a: &mut App) {
@@ -9142,6 +9480,53 @@ mod tests {
     }
 
     #[test]
+    fn final_bus_renders_complete_offline_state_at_forty_by_twenty() {
+        let p = presets();
+        let mut a = app(&p);
+        a.screen = Screen::Meter;
+        a.config.audio_graph.enabled = true;
+        let backend = TestBackend::new(40, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut a)).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect::<String>();
+        for expected in [
+            "MTR · PERFORMANCE BUS",
+            "THREE-SOURCE SUM · UNAVAILABLE",
+            "SYNTH",
+            "LOOP",
+            "INPUT",
+            "MASTER",
+            "OFFLINE",
+            "LIMIT -1.0dBFS",
+            "REC STOPPED",
+            "MONITOR software",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?}");
+        }
+        let reachable = navigation::pages(Screen::Meter, MenuContext::Normal)
+            .iter()
+            .flat_map(|page| page.slots)
+            .filter_map(|slot| slot.dispatch())
+            .collect::<std::collections::HashSet<_>>();
+        for action in [
+            Action::BusSelectPrevious,
+            Action::BusSelectNext,
+            Action::BusLevelDecrease,
+            Action::BusLevelIncrease,
+            Action::BusMute,
+            Action::FinalRecordToggle,
+        ] {
+            assert!(reachable.contains(&action));
+        }
+    }
+
+    #[test]
     fn meter_controller_entry_and_exit_return_exactly_to_presets() {
         let p = presets();
         let mut a = app(&p);
@@ -9667,10 +10052,10 @@ mod tests {
         let p = presets();
         let mut a = app(&p);
         a.screen = Screen::Meter;
-        a.select_menu_page(0);
+        a.select_menu_page(1);
         let before = a.status.clone();
         let (tx, rx) = mpsc::channel();
-        tx.send(MidiEvent::Pad(crate::pads::PadAction::Item2, true))
+        tx.send(MidiEvent::Pad(crate::pads::PadAction::Item4, true))
             .unwrap();
         drain(&rx, &mut a, Path::new("/none"), &tx);
         assert_eq!(a.status, before);

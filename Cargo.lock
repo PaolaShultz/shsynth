@@ -393,6 +393,7 @@ dependencies = [
 name = "shr-daw"
 version = "1.0.0"
 dependencies = [
+ "alsa",
  "anyhow",
  "crossterm",
  "hound",

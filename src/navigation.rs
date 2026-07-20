@@ -118,6 +118,12 @@ pub enum Action {
     OpenFxEditor,
     OpenMeter,
     ResetMeter,
+    BusSelectPrevious,
+    BusSelectNext,
+    BusLevelDecrease,
+    BusLevelIncrease,
+    BusMute,
+    FinalRecordToggle,
     FxAdd,
     FxRemove,
     FxMoveUp,
@@ -1068,10 +1074,26 @@ const FX_EDITOR: [MenuPage; 4] = [
 const METER: [MenuPage; 4] = [
     page(
         "OPS",
-        [on("RESET", Action::ResetMeter), off(""), off(""), off("")],
+        [
+            on("SOURCE-", Action::BusSelectPrevious),
+            on("SOURCE+", Action::BusSelectNext),
+            on("LEVEL-", Action::BusLevelDecrease),
+            on("LEVEL+", Action::BusLevelIncrease),
+        ],
     ),
-    page("", [off(""), off(""), off(""), off("")]),
-    page("", [off(""), off(""), off(""), off("")]),
+    page(
+        "MIX",
+        [
+            on("MUTE", Action::BusMute),
+            on("REC", Action::FinalRecordToggle),
+            on("RESET", Action::ResetMeter),
+            off(""),
+        ],
+    ),
+    page(
+        "NAV",
+        [on("FX", Action::OpenFxRack), off(""), off(""), off("")],
+    ),
     page(
         "SYS",
         [
@@ -1172,8 +1194,8 @@ mod tests {
 
     #[test]
     fn empty_slots_and_pages_do_not_dispatch() {
-        let empty_slot = slot(Screen::Meter, MenuContext::Normal, 0, 1).unwrap();
-        let empty_page = pages(Screen::Meter, MenuContext::Normal)[1];
+        let empty_slot = slot(Screen::Meter, MenuContext::Normal, 1, 3).unwrap();
+        let empty_page = pages(Screen::Help, MenuContext::Normal)[1];
         assert_eq!((empty_slot.label, empty_slot.dispatch()), ("", None));
         assert!(!empty_page.available());
     }
@@ -1387,6 +1409,12 @@ mod tests {
             Action::OpenAudioRecorder,
             Action::OpenMeter,
             Action::ResetMeter,
+            Action::BusSelectPrevious,
+            Action::BusSelectNext,
+            Action::BusLevelDecrease,
+            Action::BusLevelIncrease,
+            Action::BusMute,
+            Action::FinalRecordToggle,
             Action::TapTempo,
             Action::ResetParameters,
             Action::BeginRecord,

@@ -2,8 +2,8 @@
 
 SHR-DAW is a small music workstation built from several deliberately separate
 parts: one controller input, one managed software instrument, an FT2-style MIDI
-sequencer, a private WAV loop player, a synchronized multitrack recorder, and an optional owned
-effects graph. This guide connects those parts and explains what the musician
+sequencer, a private WAV loop player, a synchronized raw multitrack recorder,
+and an optional owned final performance bus. This guide connects those parts and explains what the musician
 can do with them. For exact configuration keys use
 [Configuration and routing](CONFIGURATION.md); for the DSP and real-time
 contract use [Audio graph and DSP contract](AUDIO_GRAPH.md).
@@ -25,18 +25,20 @@ screen, menus, pickup                           managed synth <-+  |
 
 FT2 scheduler -> each page's MIDI destination -> software or hardware instrument
 
-managed synth audio -> direct JACK playback
-                    or SOURCE -> AUX 1/2 -> MASTER -> FINAL OUT -> playback
+managed synth audio -> direct JACK playback (graph disabled)
+private WAV loop  --> direct JACK playback (graph disabled)
 
-private WAV loop -> region/interpolation/fades -> LOOP OUT meter -> playback
+managed synth SOURCE/AUX --+
+private WAV loop -----------+-> MASTER -> limiter -> FINAL OUT
+configured stereo input ----+                +-> final WAV + playback
 configured JACK sources -> shared callback timeline -> mono stems + manifest
 ```
 
-The last two audio paths are separate clients. The current master rack and
-`FINAL OUT` meter process only the one managed software instrument and its two
-aux returns. The WAV player has its own `LOOP OUT` meter, but still does not
-enter that graph. Neither meter secretly includes recorder input,
-external-instrument audio, hardware returns, or unrelated JACK clients.
+The raw-stem recorder remains separate. When enabled, the final bus owns the
+exact synth, loop, and one configured stereo-input pair and removes the direct
+synth/loop routes transactionally. `FINAL OUT`, final WAV, and playback then
+share the same post-limiter samples. They do not secretly include unrelated
+JACK clients or downstream interface processing.
 
 ## One input, controls, and musical notes
 
@@ -45,11 +47,47 @@ they reach an instrument:
 
 - menu buttons, the main encoder, encoder press, and the 12 mapped synthv1
   controls stay inside SHR-DAW;
-- command-pad note-on and note-off are both consumed, so releasing a menu pad
-  cannot leak a musical note;
+- command-pad note-on, note-off, velocity-zero release, and polyphonic pressure
+  are consumed only when note and optional channel both match, so releasing or
+  pressing a menu pad cannot leak while the same note on another channel stays
+  musical;
 - ordinary musical notes, velocity, and performance messages go to the active
   live or tracker destination; and
 - pad lock can temporarily treat command pads as notes when that is wanted.
+
+The reviewed MiniLab factory mapping uses channel 10 for notes 36–43. Its
+captured User 1 program uses the keyboard's channel 1 and is therefore not used
+for commands. CC27 is DAW Shift, not an SHR pad-lock control.
+
+The captured 12-byte Arturia program notification SysEx is still forwarded by
+the generic musical route when an instrument is active. It is device metadata,
+but SHR deliberately does not apply a manufacturer-wide SysEx filter: the
+current profile schema cannot distinguish that exact notification from other
+device traffic. There is no captured evidence that synthv1 acts on this foreign
+manufacturer message. An exact profile-qualified metadata rule can be added if
+a future workflow needs it; unrelated SysEx must continue to pass.
+
+## Controller clock ownership
+
+An optional dedicated output makes SHR the MiniLab clock/transport master. It
+uses the central tracker transport tempo but owns a separate exact ALSA
+standard-MIDI connection that can emit only Start, Timing Clock, and Stop. It
+never reuses a musical tracker page, so page notes/programs cannot feed back to
+the controller and multiple pages cannot multiply pulses. Its ALSA source port
+is non-exportable and every event is directly addressed to the selected port,
+preventing JACK's automatic sequencer bridge from becoming a second clock
+subscriber. Clock is 24 PPQN and
+continues evenly across event timing and live phase-preserving tempo changes.
+
+Clock runs whenever the feature is enabled and SHR is open, using the default
+tempo before the first transport run. This lets the MiniLab detect clock before
+Play; direct capture showed that Start sent before any detected clock was not
+enough to launch its External-Sync arpeggiator. With the feature enabled, an
+empty Pattern may run specifically for live arpeggiation. Every SHR play is a
+fresh launch (`FA`), not a resume; there is no `FB` Continue or `F2` Song
+Position Pointer because SHR has no pause/resume transport state. Stop and an
+active clean shutdown each produce one `FC` as appropriate, while `F8` keeps
+the stopped controller ready at the current tempo until SHR exits.
 
 A controller profile describes what a physical device sends. The setup wizard
 can apply a reviewed profile or learn absolute controls, either relative
@@ -205,17 +243,17 @@ would leave MIDI range.
 
 ## The managed audio graph
 
-Without the owned graph, the managed instrument connects directly to the two
-configured playback ports. With `audio.graph.enabled=true`, the same source is
-moved transactionally into this stereo route:
+Without the owned graph, the managed instrument and owned loop use their exact
+configured direct playback routes. With `audio.graph.enabled=true`, those two
+sources and one exact configured stereo JACK capture pair move transactionally
+into this route:
 
 ```text
-managed instrument -> SOURCE insert rack ---------------------------> dry sum
-       |                    |                                            ^
-       |                    +-> POST send -> wet AUX 1/2 -> return ------+
-       +----------------------> PRE send  -> wet AUX 1/2 -> return ------+
-
-dry sum -> MASTER rack -> FINAL OUT meter -> configured playback L/R
+managed instrument -> SOURCE inserts + AUX returns --+
+owned WAV loop ---------------------------------------+-> stereo sum
+configured capture L/R -------------------------------+
+ -> MASTER rack -> master level -> linked limiter -> FINAL OUT
+ -> final stereo WAV tap -> configured playback L/R
 ```
 
 There are four useful placement ideas:
@@ -291,8 +329,9 @@ continue to pass an already-wet signal or feed another active wet generator.
 
 Every processor publishes bounded input/output peak and RMS plus clip and
 non-finite state; compressor editing also exposes gain reduction. Each aux
-meters after its return gain. `FINAL OUT` is a dedicated post-master meter
-immediately before the graph playback ports, so master effects are included.
+meters after its return gain. `FINAL OUT` follows the master level and dedicated
+stereo-linked sample-peak limiter. The recorder tap and playback receive the
+same final buffer after that meter boundary.
 
 The FX rack and parameter editor remain available while the graph is disabled,
 so a Project can be designed silently without an audio callback to rebuild.
@@ -303,20 +342,21 @@ from the real-time callback. Stable instance IDs let compatible effects retain
 DSP state when moved. The callback uses fixed memory and atomics: no file
 access, subprocess, logging, allocation, or locks.
 
-The graph remains opt-in and disabled by default. A managed engine is connected
-directly first; the graph is activated muted, its exact boundary is connected,
-the two direct links are removed as one rollback-capable transaction, and only
-then is graph output published at a block boundary. Validation, activation, or
-connection failure leaves or restores direct playback. Shutdown deactivates
-the callback before restoring direct links, avoiding a doubled final block.
+The graph remains opt-in and disabled by default. The managed engine and loop
+are connected directly first. The graph is activated muted, all three exact
+input pairs plus its playback boundary are connected, and the four synth/loop
+direct links are removed as one rollback-capable transaction before graph
+output is published at a block boundary. Validation, activation, or connection
+failure leaves or restores the exact prior direct links. Shutdown deactivates
+the callback before restoring them, avoiding a doubled final block.
 
 FX state is saved in the Project while the graph is disabled, but direct
-playback cannot process or meter it. The graph owns exactly one current stereo
-source: the managed instrument. The typed model reserves future source/sink
-kinds, but there is currently no loop strip, live-input strip, external
-hardware return, hardware insert, multi-source master, or graph recording tap.
+playback cannot process or meter it. The graph instantiates exactly three
+source kinds: managed instrument, owned loop player, and one stereo live-input
+pair. It deliberately has no general strips, pan, solo, hardware insert,
+per-input effect chain, or arbitrary wiring.
 
-## WAV loops are a separate audio route
+## WAV loops and the final bus
 
 A Project may attach one privately imported mono or stereo WAV. The import
 inbox is only a browser source; the selected file is validated and copied
@@ -331,22 +371,19 @@ stretch or pitch-shift the WAV to the old tempo. Playback remains native-speed
 and requires the WAV sample rate to match JACK. Decoded audio is bounded to
 6,000,000 frames, about 125 seconds at 48 kHz.
 
-The loop player is a separate owned JACK client connected to its configured
-playback pair. Its callback meters the generated left/right samples after
-region selection, interpolation, transport gating, and edge fades, immediately
-before writing the same two existing output ports. `LOOP OUT` therefore means
-only this WAV loop: it includes none of the source/aux/master graph, external
-inputs, hardware gain, or unrelated clients. The callback uses a bounded
-stereo RMS/peak accumulator and atomic publication; UI smoothing, short peak
-hold, independent maxima, and clip hold have their own lifecycle and clear on
-stop, unload, failure, restart, or client loss.
+The loop player remains a separate owned JACK client. Its callback meters the
+generated left/right samples after region selection, interpolation, transport
+gating, and edge fades. In direct mode its ports connect to playback. An active
+performance bus transaction moves those exact ports into the sum and removes
+the direct loop links, so there is never a parallel doubled path. `LOOP OUT`
+still means only the loop; `FINAL OUT` includes all three bus sources.
 
 The player follows FT2 start, play-here, Pattern/Arrangement transitions,
-looping, and stop, but it does not pass through source inserts, aux sends,
-master effects, or `FINAL OUT`. No ports or connections are added for the
-meter. Project `REMOVE` only detaches the loop. The Library performs separate
-confirmed physical deletion and refuses current, saved-Project, symlinked,
-unsafe, or otherwise referenced files.
+looping, and stop. The loop receives only its bus level/mute, then shares the
+master, limiter, final meter, recorder, and playback with the other sources.
+Project `REMOVE` only detaches the loop. The Library performs separate confirmed
+physical deletion and refuses current, saved-Project, symlinked, unsafe, or
+otherwise referenced files.
 
 ## Note ownership and failure behavior
 
@@ -396,18 +433,15 @@ cleared demo manifest. See
 
 ## Performance information and honest limits
 
-MTR CPU rows show whole Linux CPU-core activity from `/proc/stat`, not the CPU
-used by one synth/effect, JACK callback duration, scheduling jitter, or xruns.
-The MTR stereo meter is available only from the active owned graph and covers
-only its post-master managed-instrument output. Direct mode reports audio
-metering unavailable instead of creating a hidden tap or displaying unrelated
-audio. The separate `LOOP OUT` bars live only on the WAV Loop screen and do not
-change that `FINAL OUT` boundary.
+With the graph disabled, MTR retains its CPU and legacy managed-source display.
+With the graph enabled, it shows the three source readiness/level/mute states,
+master level, post-limiter final stereo meter and clip state, limiter gain
+reduction, and final-recording status. Direct mode reports final-bus metering
+unavailable instead of creating a hidden tap or displaying unrelated audio.
 
 Maintainer checkpoints separately collect callback count, mean, p95, p99,
 maximum, deadline misses, oversized blocks, xruns, process/core CPU, memory,
-and shutdown behavior. The implemented one-source graph has passed its recorded
-Raspberry Pi engineering checkpoints. Those measurements establish bounded
-technical behavior for the tested routes; unfinished listening/curation and
-future multi-source routing remain documented as such rather than being
-silently presented as current features.
+and shutdown behavior. The earlier one-source graph passed its recorded
+Raspberry Pi engineering checkpoints. The three-source final bus has separate
+hardware-free stress evidence; full-duplex interface acceptance remains a
+future hardware test and is not implied by synthetic validation.

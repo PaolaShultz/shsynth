@@ -15,6 +15,7 @@ pub mod dsp;
 pub mod effect_schema;
 pub mod effects;
 mod engine;
+mod final_bus;
 mod fsutil;
 mod geometry;
 mod help;
@@ -54,6 +55,9 @@ fn real_main() -> Result<()> {
     if args.first().map(String::as_str) == Some("recorder-stress") {
         return recorder_stress_command(&args[1..]);
     }
+    if args.first().map(String::as_str) == Some("final-mix-stress") {
+        return final_mix_stress_command(&args[1..]);
+    }
     let runtime = config::RuntimeConfig::load(&state.join("shsynth.conf"))?;
     let preset_dir = preset_dir(&runtime)?;
     let catalogs = preset::discover_all(&runtime, &preset_dir);
@@ -87,6 +91,7 @@ fn real_main() -> Result<()> {
         "log" | "logs" => show_log(&state, args.get(1)),
         "ideas" => ideas_command(&args[1..], &presets, &state, &runtime),
         "pads" => pads_command(&args[1..], &state),
+        "clock" => clock_command(&args[1..], &runtime),
         "casio" => casio_command(&args[1..], &runtime),
         "effects-checkpoint" | "phase2-checkpoint" => {
             effects_checkpoint(&args[1..], &presets, &state, &runtime)
@@ -538,7 +543,22 @@ fn show_log(state: &Path, count: Option<&String>) -> Result<()> {
 }
 
 fn usage() {
-    println!("Usage: shr [menu|list|status|doctor|start PRESET|stop|log [LINES]|ideas COMMAND|pads COMMAND|casio diagnostic|effects-checkpoint PRESET [PROFILE] [SECONDS]|recorder-stress DEST [SECONDS] [CHANNELS] [RATE] [CALLBACK]|config init]\n\nController setup: shr pads ports|profiles|auto [PORT]|learn [PORT]|update\nWith no arguments, opens the terminal instrument browser.");
+    println!("Usage: shr [menu|list|status|doctor|start PRESET|stop|log [LINES]|ideas COMMAND|pads COMMAND|clock ports|casio diagnostic|effects-checkpoint PRESET [PROFILE] [SECONDS]|recorder-stress DEST [SECONDS] [CHANNELS] [RATE] [CALLBACK]|final-mix-stress DEST [SECONDS] [RATE] [CALLBACK]|config init]\n\nController setup: shr pads ports|profiles|auto [PORT]|learn [PORT]|update\nController sync discovery: shr clock ports\nWith no arguments, opens the terminal instrument browser.");
+}
+
+fn clock_command(args: &[String], config: &config::RuntimeConfig) -> Result<()> {
+    match args.first().map(String::as_str).unwrap_or("ports") {
+        "ports" => {
+            for name in
+                crate::loop_player::controller_clock_outputs(&config.controller_clock.client_name)?
+            {
+                println!("current: {name}");
+                println!("configure: {}", controller_learn::stable_input_match(&name));
+            }
+            Ok(())
+        }
+        other => bail!("unknown clock command {other:?}; use `shr clock ports`"),
+    }
 }
 
 fn recorder_stress_command(args: &[String]) -> Result<()> {
@@ -598,6 +618,63 @@ fn recorder_stress_command(args: &[String]) -> Result<()> {
         }
     );
     println!("SESSION {}", report.session.display());
+    Ok(())
+}
+
+fn final_mix_stress_command(args: &[String]) -> Result<()> {
+    let destination = PathBuf::from(
+        args.first()
+            .context("usage: shr final-mix-stress DEST [SECONDS] [RATE] [CALLBACK]")?,
+    );
+    let seconds = args
+        .get(1)
+        .map(|value| value.parse::<u64>())
+        .transpose()?
+        .unwrap_or(10);
+    let sample_rate = args
+        .get(2)
+        .map(|value| value.parse::<u32>())
+        .transpose()?
+        .unwrap_or(48_000);
+    let callback_frames = args
+        .get(3)
+        .map(|value| value.parse::<usize>())
+        .transpose()?
+        .unwrap_or(128);
+    if args.len() > 4 {
+        bail!("usage: shr final-mix-stress DEST [SECONDS] [RATE] [CALLBACK]");
+    }
+    let report = audio_recorder::run_final_mix_stress(
+        &destination,
+        Duration::from_secs(seconds),
+        sample_rate,
+        callback_frames,
+    )?;
+    println!(
+        "SYNTHETIC FINAL MIX PASS · 3 stereo sources · {} Hz · {} frames/callback",
+        report.sample_rate, report.callback_frames
+    );
+    println!(
+        "FRAMES {} · elapsed {:.3}s · callback mean {:.3}us · p95 {:.3}us · p99 {:.3}us · max {:.3}us",
+        report.total_frames,
+        report.elapsed.as_secs_f64(),
+        report.callback_mean_nanoseconds as f64 / 1000.0,
+        report.callback_p95_nanoseconds as f64 / 1000.0,
+        report.callback_p99_nanoseconds as f64 / 1000.0,
+        report.callback_maximum_nanoseconds as f64 / 1000.0,
+    );
+    println!(
+        "LIMITER MAX GR {:.2}dB · HIGH WATER {} frames · dropped {} · overflows {} · output/file {}",
+        report.maximum_gain_reduction_db,
+        report.writer_high_water_frames,
+        report.dropped_frames,
+        report.overflow_events,
+        if report.output_file_equal { "equal" } else { "MISMATCH" }
+    );
+    println!("WAV {}", report.wav.display());
+    if !report.output_file_equal {
+        bail!("final playback samples and stereo WAV PCM differ");
+    }
     Ok(())
 }
 
@@ -719,6 +796,22 @@ fn doctor(config: &config::RuntimeConfig, preset_dir: &Path, state: &Path) -> Re
                 .any(|wanted| ports.contains(&wanted.to_lowercase())),
             format!("MIDI input match: {}", wanted.join(", ")),
         );
+    }
+    if config.controller_clock.enabled {
+        match loop_player::controller_clock_outputs(&config.controller_clock.client_name) {
+            Ok(names) => check(
+                loop_player::matching_controller_output_index(
+                    &names,
+                    &config.controller_clock.output_match,
+                )
+                .is_ok(),
+                format!(
+                    "controller clock exact output: {}",
+                    config.controller_clock.output_match
+                ),
+            ),
+            Err(error) => check(false, format!("controller clock discovery: {error}")),
+        }
     }
     if problems > 0 {
         bail!("doctor found {problems} problem(s)");
@@ -920,12 +1013,20 @@ fn pads_command(args: &[String], state: &Path) -> Result<()> {
             let mut v = config.pads.iter().collect::<Vec<_>>();
             v.sort_by_key(|x| x.0);
             for (n, a) in v {
-                println!("note {n}: {a}");
+                if let Some(channel) = config.pad_channels.get(n) {
+                    println!("note {n}, channel {}: {a}", channel + 1);
+                } else {
+                    println!("note {n}, any channel: {a}");
+                }
             }
             let mut v = config.cc_buttons.iter().collect::<Vec<_>>();
             v.sort_by_key(|x| x.0);
             for (cc, action) in v {
-                println!("button CC {cc}: {action}");
+                if let Some(channel) = config.cc_button_channels.get(cc) {
+                    println!("button CC {cc}, channel {}: {action}", channel + 1);
+                } else {
+                    println!("button CC {cc}, any channel: {action}");
+                }
             }
             Ok(())
         }
@@ -939,6 +1040,7 @@ fn pads_command(args: &[String], state: &Path) -> Result<()> {
                 .context("usage: shr pads set NOTE ACTION")?
                 .parse()?;
             config.pads.insert(n, a);
+            config.pad_channels.remove(&n);
             config.save(&path)
         }
         "clear" => {
@@ -947,6 +1049,7 @@ fn pads_command(args: &[String], state: &Path) -> Result<()> {
                 "pad note",
             )?;
             config.pads.remove(&n);
+            config.pad_channels.remove(&n);
             config.save(&path)
         }
         "input" => {

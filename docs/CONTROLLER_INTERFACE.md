@@ -10,7 +10,7 @@ implemented.
 | Screen or mode | Existing user-facing operations and input paths |
 |---|---|
 | Presets | Select previous/next, page up/down, first/last (keyboard, wheel, encoder); previous/next engine (keyboard/pads); load selected sound (keyboard, mouse, encoder/pad); MTR, tracker, ideas, and audio screens (controller/keyboard as available); stop synth/panic. Application exit remains keyboard-only. |
-| MTR | Passively inspect four per-core CPU bars, optional configured CPU temperature, and the owned graph's live smoothed stereo RMS, short peak markers, independent non-decaying `MAX` peaks, and clip state; reset presentation holds; back, help, and panic. Mapped synthv1 Volume-down movement clears both maxima even before pickup. Direct audio remains direct and is explicitly unmetered. |
+| MTR | With the final bus enabled: choose Synth/Loop/Input, adjust its bounded smoothed level, toggle mute, inspect readiness/final peaks/clips/limiter reduction, and start/stop the callback-boundary final stereo recording. With it disabled: retain the passive CPU and legacy graph meter. Master level is visible; back, help, and panic remain reachable. |
 | Playback | Inspect held notes/chords, aligned decimal MIDI strike velocities, and keyboard state; reset the 12 mapped parameters in place (encoder press); record/stop/finish-and-save MIDI, play/stop take, save idea (keyboard/pads/mouse); presets/back, ideas, tracker, audio, and FX rack; tap tempo; stop/panic. The 12 configured synthv1 CC controls continuously adjust parameters with pickup. |
 | Ideas | Previous/next/first/last idea (keyboard, wheel, encoder); inspect (keyboard/mouse/pad); load with replace confirmation (encoder); play take; delete with repeat confirmation; record/stop MIDI; save timestamped or numbered idea; back/cancel, tracker, audio, presets, panic. |
 | FT2 normal | Previous/next row (keyboard/encoder); order/lane movement; play here/from start; prominent Play/Rec/Edit/N00B MODE page; child Tools screen for pages, files, loop, mute, and page switching. |
@@ -66,6 +66,11 @@ inventory for controller reachability.
   by page cycling. The interface exposes working actions only.
 - The rendered controller strip is centered and capped at 40 columns. Labels
   and brackets use their natural width instead of expanding with the terminal.
+- Command notes and CCs may be qualified by MIDI channel. The MiniLab factory
+  Arturia/DAW pads are notes 36–43 on channel 10: 36–39 select pages 1–4 and
+  40–43 activate items 1–4. Matching pressure and releases are consumed, while
+  the same notes on channel 1 remain keyboard input. User 1's captured
+  channel-1 pads cannot safely be commands because they collide with the keys.
 
 ## Complete controller map
 
@@ -77,7 +82,9 @@ Blank physical positions and wholly empty pages are omitted.
 | Presets | Engine | Engine− | Engine+ | — | Last |
 | Presets | Nav | MTR | Ideas | FT2 | Audio |
 | Presets | Sys | Panic | Help | — | — |
-| MTR | Ops | Reset holds | — | — | — |
+| MTR | Ops | Source− | Source+ | Level− | Level+ |
+| MTR | Mix | Mute | Final rec/stop | Reset holds | — |
+| MTR | Nav | FX | — | — | — |
 | MTR | Sys | Panic | — | Help | Exit |
 | Playback | Ops | Record MIDI | Rec end | Take | Save |
 | Playback | Sound | Reset controls | Finish + save | Tap tempo | FX |

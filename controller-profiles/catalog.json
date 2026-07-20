@@ -21,7 +21,6 @@
     "encoder_relative_cc": 28,
     "encoder_relative_reverse": false,
     "encoder_press_cc": 118,
-    "lock_cc": 27,
     "note_buttons": {
       "36": "page-1",
       "37": "page-2",
@@ -32,6 +31,16 @@
       "42": "item-3",
       "43": "item-4"
     },
-    "source": "SHR-DAW verified factory profile"
+    "note_button_channels": {
+      "36": 10,
+      "37": 10,
+      "38": 10,
+      "39": 10,
+      "40": 10,
+      "41": 10,
+      "42": 10,
+      "43": 10
+    },
+    "source": "SHR-DAW direct capture: Arturia/DAW factory pads, MIDI channel 10"
   }
 ]

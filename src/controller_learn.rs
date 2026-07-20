@@ -128,8 +128,8 @@ pub fn learn(config: &mut PadConfig, input_name: &str) -> Result<()> {
             &used_ccs(config),
             &used_notes(config),
         )? {
-            Button::Cc(cc) => config.encoder_press_cc = Some(cc),
-            Button::Note(note) => config.encoder_press_note = Some(note),
+            Button::Cc { cc, .. } => config.encoder_press_cc = Some(cc),
+            Button::Note { note, .. } => config.encoder_press_note = Some(note),
         }
     }
 
@@ -140,7 +140,9 @@ pub fn learn(config: &mut PadConfig, input_name: &str) -> Result<()> {
     if layout == 0 {
         config.layout = ControllerLayout::Four;
         config.pads.clear();
+        config.pad_channels.clear();
         config.cc_buttons.clear();
+        config.cc_button_channels.clear();
         config.lock_cc = None;
     }
     if layout > 0 {
@@ -151,7 +153,9 @@ pub fn learn(config: &mut PadConfig, input_name: &str) -> Result<()> {
             _ => unreachable!(),
         };
         config.pads.clear();
+        config.pad_channels.clear();
         config.cc_buttons.clear();
+        config.cc_button_channels.clear();
         let actions: &[PadAction] = match layout {
             4 => &[
                 PadAction::Item1,
@@ -186,11 +190,13 @@ pub fn learn(config: &mut PadConfig, input_name: &str) -> Result<()> {
                 &used_notes(config),
             )?;
             match binding {
-                Button::Cc(cc) => {
+                Button::Cc { cc, channel } => {
                     config.cc_buttons.insert(cc, action);
+                    config.cc_button_channels.insert(cc, channel);
                 }
-                Button::Note(note) => {
+                Button::Note { note, channel } => {
                     config.pads.insert(note, action);
+                    config.pad_channels.insert(note, channel);
                 }
             }
         }
@@ -248,8 +254,8 @@ pub fn backup(path: &Path) -> Result<Option<PathBuf>> {
 }
 
 enum Button {
-    Cc(u8),
-    Note(u8),
+    Cc { cc: u8, channel: u8 },
+    Note { note: u8, channel: u8 },
 }
 
 fn listen(input_name: &str) -> Result<(MidiInputConnection<()>, Receiver<Vec<u8>>)> {
@@ -303,14 +309,30 @@ fn capture_button(
     println!("{prompt} …");
     loop {
         let message = receiver.recv().context("MIDI learn input closed")?;
-        if message.len() < 3 || message[2] == 0 {
-            continue;
+        if let Some(button) = button_from_message(&message, used_ccs, used_notes) {
+            return Ok(button);
         }
-        match message[0] & 0xf0 {
-            0xb0 if !used_ccs.contains(&message[1]) => return Ok(Button::Cc(message[1])),
-            0x90 if !used_notes.contains(&message[1]) => return Ok(Button::Note(message[1])),
-            _ => {}
-        }
+    }
+}
+
+fn button_from_message(
+    message: &[u8],
+    used_ccs: &HashSet<u8>,
+    used_notes: &HashSet<u8>,
+) -> Option<Button> {
+    if message.len() < 3 || message[2] == 0 {
+        return None;
+    }
+    match message[0] & 0xf0 {
+        0xb0 if !used_ccs.contains(&message[1]) => Some(Button::Cc {
+            cc: message[1],
+            channel: message[0] & 0x0f,
+        }),
+        0x90 if !used_notes.contains(&message[1]) => Some(Button::Note {
+            note: message[1],
+            channel: message[0] & 0x0f,
+        }),
+        _ => None,
     }
 }
 
@@ -380,6 +402,23 @@ mod tests {
             stable_input_match("MiniLab3 MIDI:MiniLab3 MIDI 1 24:0"),
             "MiniLab3 MIDI:MiniLab3 MIDI 1"
         );
+    }
+
+    #[test]
+    fn button_learning_retains_observed_note_and_cc_channels() {
+        match button_from_message(&[0x99, 36, 100], &HashSet::new(), &HashSet::new()).unwrap() {
+            Button::Note { note, channel } => {
+                assert_eq!((note, channel), (36, 9));
+            }
+            Button::Cc { .. } => panic!("learned note as CC"),
+        }
+
+        match button_from_message(&[0xb2, 44, 127], &HashSet::new(), &HashSet::new()).unwrap() {
+            Button::Cc { cc, channel } => {
+                assert_eq!((cc, channel), (44, 2));
+            }
+            Button::Note { .. } => panic!("learned CC as note"),
+        }
     }
 
     #[test]

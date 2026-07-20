@@ -11,6 +11,7 @@ name = "shr"
 path = "src/main.rs"
 
 [dependencies]
+alsa = "0.7.1"
 anyhow = "1.0"
 crossterm = "0.26"
 hound = "3.5"

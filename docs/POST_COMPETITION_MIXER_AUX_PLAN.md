@@ -1,16 +1,20 @@
 # Post-competition mixer and shared-aux plan
 
-This plan deliberately starts after the competition appliance release. The
-competition build keeps Project format 3 and the current one-managed-source
-effects topology. Do not turn this plan into an implicit pre-release mixer
-rewrite.
+> **Historical proposal boundary:** SHR-DAW now has a deliberately narrow
+> three-source final performance bus and Project format 4. The general
+> multi-strip/shared-aux, pan/solo, hardware-insert, and free-routing work below
+> remains a proposal, not current behavior. See
+> [Final performance bus](FINAL_PERFORMANCE_BUS.md).
+
+This plan was written after the competition appliance release. Do not treat its
+historical format/topology descriptions as the current implementation.
 
 Two narrow correctness issues found during the routing audit are listed under
 the release boundary below. They can be repaired independently of this plan.
 
-## What exists now
+## Historical baseline when this plan was written
 
-The owned graph currently has this signal flow:
+At the time, the owned graph had this signal flow:
 
 ```text
 managed synth -> SOURCE inserts ---------------------------> sum
@@ -29,7 +33,7 @@ reverb expose independent dry and wet percentages in SOURCE and MASTER. On an
 aux they are forced to 0% dry and 100% wet; chorus, flanger, and phaser use the
 equivalent 0% dry and 100% effect mix.
 
-The important boundary is that the source is exactly one managed software
+The important historical boundary was that the source was exactly one managed software
 instrument. The WAV loop player remains directly connected, the recorder
 captures its separately configured stereo input, and external instruments have
 no owned audio return unless the user has arranged one outside this graph.
@@ -43,9 +47,8 @@ output or return.
 
 ## Release boundary and completed narrow corrections
 
-Keep the competition appliance's routing, limits, UI shape, and Project format
-unchanged apart from separately approved defect fixes. Do not add more engines,
-capture monitoring, loop rerouting, or a new mixer before that release.
+This release boundary is retained as history; it no longer specifies the
+current Project format or final-bus topology.
 
 The audit found two correctness issues. They were repaired in the competition
 graph without changing Project format 3, its one-managed-source topology, its

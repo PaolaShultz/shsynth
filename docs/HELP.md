@@ -70,11 +70,11 @@ playback will not process or meter it.
 
 ## Performance meters
 
-Presets NAV MTR, or keyboard m on Presets, opens a passive meter. CPU0–CPU3 use
-whole-core Linux `/proc/stat` counter changes: green is below 60%, yellow is
-60–85%, and red is above 85%. This is not synth/JACK process CPU, callback
-timing, xrun detection, or proof of audio safety. Configured CPU temperature is
-optional.
+Presets NAV MTR, or keyboard m on Presets, opens the meter/mix surface. With the
+owned graph disabled it retains the passive CPU and legacy output view. With
+the graph enabled it shows Synth, Loop, and Input readiness, level and mute;
+master level; final L/R peak and clip; limiter gain reduction; and final-record
+elapsed time, size, drop/error state, and path.
 
 Stereo bars show live smoothed RMS and a short, decaying peak marker on a −60
 to 0 dBFS scale. Each channel's `MAX` number separately holds its highest peak
@@ -85,14 +85,18 @@ equal values, and other controls leave them alone. Stopped, unavailable, and
 new meter sessions cannot carry an old `MAX` forward.
 
 FINAL OUT is available only for the active owned graph. It measures after all
-master inserts, immediately before playback, and covers the managed source and
-its wet returns—not WAV loops, inputs, hardware, or other JACK clients. Direct
-playback reports the meter unavailable and stays direct.
+three required sources, master inserts, master level, and linked limiter. The
+same final limited buffer feeds the stereo recorder and playback. Direct
+playback reports this final-bus meter unavailable and stays direct.
 
-The FT2 WAV Loop screen has its own `LOOP OUT` stereo RMS, peak, `MAX`, and clip
-display. It measures only the rendered loop at its separate JACK callback and
-clears when loop transport stops or the loop becomes unavailable. It is not
-part of `FINAL OUT`.
+The FT2 WAV Loop screen's `LOOP OUT` still measures only the rendered loop. When
+the final bus is active, that loop is one of the three sources in `FINAL OUT`.
+
+On MTR, SOURCE-/SOURCE+ choose a source, LEVEL-/LEVEL+ change it in 1 dB steps,
+MUTE toggles it, and REC starts/stops the final stereo WAV at callback
+boundaries. RESET clears presentation holds and, when the bus is unavailable,
+retries the same exact remembered source mapping. Source and master changes are
+smoothed; there are no pan, solo, aux, or per-input effect controls.
 
 ## MIDI ideas
 
@@ -114,6 +118,11 @@ actual JACK input.
 
 FT2 is a Pattern sequencer. PLAY starts at the cursor, START plays from the
 Project's Arrangement beginning, and STOP stops only the tracker transport.
+
+With controller clock enabled, SHR sends the current/default tempo at 24 PPQN
+to one exact controller MIDI port while the app is open; tracker transport adds
+Start/Stop. An empty Pattern may run for a live external-sync arpeggiator;
+tracker pages never send notes or programs back through the clock-only route.
 
 EDIT turns incoming notes into pattern data. Encoder press inserts a blank row.
 The ADD page chooses whether note entry, blank, erase, and note-off advance by

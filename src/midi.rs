@@ -145,6 +145,43 @@ mod tests {
     }
 
     #[test]
+    fn minilab_command_notes_are_channel_qualified_and_pressure_safe() {
+        let pads = PadConfig {
+            pads: (36..=43).map(|note| (note, PadAction::Item1)).collect(),
+            pad_channels: (36..=43).map(|note| (note, 9)).collect(),
+            ..PadConfig::default()
+        };
+        for note in 36..=43 {
+            for channel in 0..16 {
+                for message in [
+                    [0x90 | channel, note, 100],
+                    [0x80 | channel, note, 0],
+                    [0x90 | channel, note, 0],
+                    [0xa0 | channel, note, 64],
+                ] {
+                    let routed = route(&pads, BackendKind::Synthv1, &message);
+                    assert_eq!(routed.consumed, channel == 9);
+                    if channel == 9 {
+                        assert!(routed.forward.is_none());
+                    } else {
+                        assert_eq!(routed.forward, Some(&message[..]));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn daws_shift_cc_is_musical_data_when_no_lock_is_configured() {
+        let pads = PadConfig::default();
+        for message in [[0xb0, 27, 127], [0xb0, 27, 0]] {
+            let routed = route(&pads, BackendKind::Synthv1, &message);
+            assert!(!routed.consumed);
+            assert_eq!(routed.forward, Some(&message[..]));
+        }
+    }
+
+    #[test]
     fn encoder_commands_do_not_reach_the_synth() {
         let pads = PadConfig {
             encoder_relative_cc: Some(28),
