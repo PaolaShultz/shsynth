@@ -52,11 +52,13 @@ On the current Pi account, the plain `shr` command targets this checkout's
 `/home/patch/.local/bin/shr`. The alias previously hardcoded an old
 `target/release/shr` and therefore hid newer debug workflow builds; do not
 restore a build-specific alias. The launcher keeps all writable state below
-`user/` and selects whichever of `target/debug/shr` or `target/release/shr` was
-built most recently. Rebuilding either binary therefore updates what plain
-`shr` runs without changing shell startup files. This is machine-local state,
-not a tracked installation; verify or restore both entry points after moving
-the checkout or replacing the development system.
+`user/` and always selects `target/debug/shr`; release and installed binaries
+are used only through an explicit `SHSYNTH_BIN` override. The debug build is
+incremental and displays a `DEV` badge in the TUI (`REL` identifies an explicit
+release build). Rebuilding the debug binary therefore updates what plain `shr`
+runs without changing shell startup files. This is machine-local state, not a
+tracked installation; verify or restore both entry points after moving the
+checkout or replacing the development system.
 
 `SHSYNTH_USER_DIR` may replace `user/`. The launchers set `XDG_STATE_HOME`,
 `XDG_DATA_HOME`, `SHSYNTH_PRESET_DIR`, and `SHSYNTH_LOOP_INBOX`; do not replace
@@ -481,17 +483,22 @@ find presets/synthv1 user/presets/synthv1 -maxdepth 1 \
   -type f -name '*.synthv1' -print0 | xargs -0 -n1 xmllint --noout
 ```
 
-Use the repository-required Rust 1.85 toolchain for changes that touch Rust,
-Cargo metadata, installer behavior, runtime configuration, preset validation,
-or application behavior:
+Use the repository-required Rust 1.85 toolchain. Normal development uses fast
+incremental debug checks and focused tests; build the debug binary when it is
+ready for physical testing:
 
 ```sh
 export PATH=/home/patch/.rustup/toolchains/1.85.0-aarch64-unknown-linux-gnu/bin:$PATH
 cargo fmt -- --check
-cargo test --locked
-cargo clippy --locked -- -D warnings
-cargo build --release --locked
+cargo check --locked
+cargo test --locked FILTER
+cargo build --locked
 ```
+
+Do not run the full test suite, warning-denied Clippy, an optimized release
+build, or release stress validation unless the user explicitly requests full
+or release validation. Historical release results below remain evidence for
+their dated commits, not the default iteration policy.
 
 At the time this handoff was written, all 445 public-plus-private XML files
 validated, 133 Rust tests passed, the bundled MIDI-device JSON parsed and

@@ -86,8 +86,8 @@ Environment:
 
 - `SHSYNTH_USER_DIR` selects the private root. It defaults to the repository's
   ignored `user/` directory.
-- `SHSYNTH_BIN` may select an already-built `shr` executable. It defaults to
-  `target/release/shr` in this checkout.
+- `SHSYNTH_BIN` may explicitly select an already-built `shr` executable. It
+  defaults to `target/debug/shr` in this checkout.
 
 The wrapper exports:
 
@@ -129,13 +129,11 @@ SHSYNTH_USER_DIR=/absolute/private/path ./scripts/local.sh
 
 All arguments are passed unchanged to `shr`. The environment and private-preset
 copy rules match `setup-local.sh`. An explicit executable in `SHSYNTH_BIN`
-wins. Otherwise, the launcher uses whichever executable is newer between
-`target/debug/shr` and `target/release/shr`, then falls back to an installed
-`shr` from `PATH`. It resolves its own symlink before finding the repository,
-so a user-local `shr` symlink or shell alias may safely target this launcher;
-the launcher itself is excluded from both build-path and installed-binary
-fallbacks to prevent recursion. The launcher refuses to run until the local
-`shsynth.conf` exists.
+wins. Otherwise, the launcher always uses `target/debug/shr`; it never chooses
+an installed or release binary by timestamp. It resolves its own symlink before
+finding the repository, so a user-local `shr` symlink or shell alias may safely
+target this launcher. The launcher refuses to run until both the debug binary
+and local `shsynth.conf` exist.
 
 ### Why it uses `exec`
 
@@ -536,8 +534,8 @@ Match validation to the helper's effects:
   run the Rust structural test, inspect manifest provenance, and verify the
   staged package contains only `--files` output.
 - Installer, setup, runtime, Makefile, Rust fixture, Cargo, or application
-  behavior: run the complete pinned Rust format, test, warning-denied Clippy,
-  and locked release-build suite required by `AGENTS.md`.
+  behavior: follow the fast debug validation policy in `AGENTS.md`; run full
+  tests, warning-denied Clippy, and release validation only on explicit request.
 - Install layout: use a validated explicit `DESTDIR` fixture and confirm the
   nested manual chapters/images and cleared-only preset bank.
 

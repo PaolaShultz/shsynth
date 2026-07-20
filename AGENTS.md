@@ -16,14 +16,18 @@ physical controller. Keep it responsive at 40×20 and safe for live audio.
 The system `cargo` may be too old; use the installed Rust 1.85 toolchain:
 
 ```sh
-PATH=/home/patch/.rustup/toolchains/1.85.0-aarch64-unknown-linux-gnu/bin:$PATH cargo test --locked
+PATH=/home/patch/.rustup/toolchains/1.85.0-aarch64-unknown-linux-gnu/bin:$PATH cargo check --locked
 ```
 
-Before handoff for Rust, Cargo, installer, runtime configuration, preset, or
-behavior changes, also run `cargo fmt -- --check`, `cargo clippy --locked -- -D
-warnings`, and `cargo build --release --locked` with that PATH. For docs,
-README, screenshot, or image-only changes, do not run the full Rust suite just
-because a handoff or push is happening; run targeted checks instead, such as
+Optimize normal development for fast physical iteration on the Pi. Use
+incremental debug artifacts only: `cargo check --locked` while implementing,
+focused tests for the changed behavior, and `cargo build --locked` when a
+binary is needed for user testing. Plain `shr` must launch
+`target/debug/shr`, and the TUI must identify debug builds visibly. Do not run
+the complete test suite, warning-denied Clippy, an optimized/release build, or
+release-mode stress validation unless the user explicitly requests full or
+release validation. A commit or handoff alone is not such a request. For docs,
+README, screenshot, or image-only changes, use targeted checks such as
 link/reference checks, image size/format checks, `python3 -m py_compile` for
 Python helpers, and `git diff --check`.
 

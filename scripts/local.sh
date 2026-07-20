@@ -48,30 +48,17 @@ while IFS= read -r demo; do
 done < <("$ROOT/scripts/generate_demo_songs.py" --files)
 
 DEBUG_BIN="$ROOT/target/debug/shr"
-RELEASE_BIN="$ROOT/target/release/shr"
-RELEASE_BIN_AVAILABLE=false
-if [[ -x "$RELEASE_BIN" && "$(readlink -f "$RELEASE_BIN")" != "$SCRIPT_PATH" ]]; then
-  RELEASE_BIN_AVAILABLE=true
-fi
 
 if [[ -n "${SHSYNTH_BIN:-}" ]]; then
   [[ -x "$SHSYNTH_BIN" ]] || {
     printf 'SHSYNTH_BIN is not executable: %s\n' "$SHSYNTH_BIN" >&2
     exit 1
   }
-elif [[ -x "$DEBUG_BIN" && \
-  ("$RELEASE_BIN_AVAILABLE" == false || "$DEBUG_BIN" -nt "$RELEASE_BIN") ]]; then
+elif [[ -x "$DEBUG_BIN" ]]; then
   SHSYNTH_BIN="$DEBUG_BIN"
-elif [[ "$RELEASE_BIN_AVAILABLE" == true ]]; then
-  SHSYNTH_BIN="$RELEASE_BIN"
 else
-  INSTALLED_BIN="$(command -v shr || true)"
-  if [[ -n "$INSTALLED_BIN" && "$(readlink -f "$INSTALLED_BIN")" != "$SCRIPT_PATH" ]]; then
-    SHSYNTH_BIN="$INSTALLED_BIN"
-  else
-    printf 'Build or install SHR-DAW first.\n' >&2
-    exit 1
-  fi
+  printf 'Build the SHR-DAW debug binary first.\n' >&2
+  exit 1
 fi
 
 if [[ ! -f "$XDG_STATE_HOME/shsynth/shsynth.conf" ]]; then

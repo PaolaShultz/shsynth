@@ -67,6 +67,8 @@ const INSERT_EFFECTS: [EffectKind; 13] = [
     EffectKind::Crusher,
     EffectKind::Utility,
 ];
+
+const BUILD_BADGE: &str = if cfg!(debug_assertions) { "DEV" } else { "REL" };
 const FIRST_AUX_EFFECT_INDEX: usize = 3;
 
 fn effect_kind_label(kind: EffectKind) -> &'static str {
@@ -8590,7 +8592,11 @@ fn draw_status_bar<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     let area = rect(z.x, z.y + z.height - 1, z.width, 1);
     if let Some(notice) = a.fallback_notice() {
         f.render_widget(
-            Paragraph::new(truncate(&format!(" FALLBACK · {notice}"), z.width as usize)).style(
+            Paragraph::new(truncate(
+                &format!(" {BUILD_BADGE} FALLBACK · {notice}"),
+                z.width as usize,
+            ))
+            .style(
                 Style::default()
                     .fg(Color::Yellow)
                     .bg(Color::Rgb(32, 32, 32))
@@ -8602,7 +8608,7 @@ fn draw_status_bar<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     }
     let style = Style::default().fg(Color::Gray).bg(Color::Rgb(32, 32, 32));
     let left = format!(
-        " {} P{} {engine} {rec}",
+        " {BUILD_BADGE} {} P{} {engine} {rec}",
         a.screen.label(),
         a.menu_page() + 1
     );
@@ -8701,6 +8707,18 @@ fn draw_playing<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         .as_ref()
         .map(|p| format!("{} · {}", p.backend.label(), p.name))
         .unwrap_or_else(|| "none".into());
+    f.render_widget(
+        Paragraph::new(BUILD_BADGE).style(
+            Style::default()
+                .fg(if cfg!(debug_assertions) {
+                    Color::Yellow
+                } else {
+                    Color::Green
+                })
+                .add_modifier(Modifier::BOLD),
+        ),
+        rect(header.x, header.y, header.width.min(3), 1),
+    );
     f.render_widget(
         Paragraph::new(truncate(&name, usize::from(z.width.saturating_sub(8))))
             .alignment(Alignment::Center)
@@ -10721,6 +10739,26 @@ mod tests {
     }
 
     #[test]
+    fn debug_build_badge_is_visible_on_normal_and_playback_screens() {
+        let p = presets();
+        for screen in [Screen::Presets, Screen::Playback] {
+            let mut a = app(&p);
+            a.screen = screen;
+            let backend = TestBackend::new(40, 20);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| draw(frame, &mut a)).unwrap();
+            let text = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol.as_str())
+                .collect::<String>();
+            assert!(text.contains(BUILD_BADGE), "missing {BUILD_BADGE}: {text}");
+        }
+    }
+
+    #[test]
     fn every_populated_context_and_controller_page_renders_at_40x20() {
         let config = RuntimeConfig::default();
         for scenario in ScreenshotScenario::ALL {
@@ -11899,7 +11937,8 @@ mod tests {
         let title = (0..40)
             .map(|x| b.get(x, 0).symbol.as_str())
             .collect::<String>();
-        assert!(title.trim_start().starts_with("synthv1 · Preset 00"));
+        assert!(title.starts_with(BUILD_BADGE));
+        assert!(title.contains("synthv1 · Preset 00"));
         assert!(title.ends_with("PLY"));
         let left = title
             .chars()
