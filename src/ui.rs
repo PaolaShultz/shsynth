@@ -485,6 +485,7 @@ struct App {
     confirm_delete: Option<String>,
     confirm_load: Option<String>,
     midi_output: engine::SharedOutput,
+    midi_lifecycle: engine::MidiLifecycle,
     pickup: engine::SharedPickup,
     midi_backend: engine::SharedBackend,
     tracker_route: engine::SharedTrackerRoute,
@@ -582,6 +583,7 @@ struct App {
     learn_mode: engine::SharedLearnMode,
     fx_control_mode: engine::SharedFxControlMode,
     controller_online: bool,
+    performance_inputs: Vec<crate::engine::MidiInputState>,
     controller_learn: Option<crate::controller_learn::LearnSession>,
     bus_selected: usize,
     final_recording_last: crate::audio_recorder::FinalMixRecorderStatus,
@@ -594,6 +596,7 @@ struct TrackerIo {
     route: engine::SharedTrackerRoute,
     input: engine::SharedTrackerInput,
     playback_scale: engine::SharedPlaybackScale,
+    lifecycle: engine::MidiLifecycle,
 }
 
 #[derive(Clone)]
@@ -911,6 +914,7 @@ impl App {
             confirm_delete: None,
             confirm_load: None,
             midi_output,
+            midi_lifecycle: tracker_io.lifecycle,
             pickup,
             midi_backend,
             tracker_route: tracker_io.route,
@@ -1008,6 +1012,7 @@ impl App {
             learn_mode: Arc::new(AtomicBool::new(false)),
             fx_control_mode: Arc::new(AtomicBool::new(false)),
             controller_online: false,
+            performance_inputs: Vec::new(),
             controller_learn: None,
             bus_selected: 0,
             final_recording_last: crate::audio_recorder::FinalMixRecorderStatus::default(),
@@ -1174,17 +1179,47 @@ impl App {
         };
         self.controller_learn = Some(crate::controller_learn::LearnSession::new(&input));
         self.learn_mode.store(true, Ordering::Relaxed);
-        self.status =
-            "MIDI Learn active · all received messages are isolated from instruments".into();
+        self.status = "MIDI Learn active · controller messages isolated from instruments".into();
+    }
+
+    fn refresh_live_midi_connections(&mut self) {
+        if !self.config.midi_autoconnect {
+            self.controller_online = false;
+            self.performance_inputs.clear();
+            return;
+        }
+        let pads = self
+            .controller_config
+            .read()
+            .map(|pads| pads.clone())
+            .unwrap_or_default();
+        match crate::engine::inspect_midi_inputs(&self.config, &pads) {
+            Ok(availability) => {
+                self.controller_online = availability.controller_available();
+                self.performance_inputs = availability.performance;
+            }
+            Err(_) => {
+                self.controller_online = false;
+                self.performance_inputs.clear();
+            }
+        }
     }
 
     fn cancel_controller_learn(&mut self) {
+        if self
+            .controller_learn
+            .as_ref()
+            .is_some_and(crate::controller_learn::LearnSession::save_committed)
+        {
+            self.finish_saved_controller_learn();
+            return;
+        }
         self.learn_mode.store(false, Ordering::Relaxed);
         self.controller_learn = None;
         self.status = "MIDI Learn cancelled · previous controller mapping kept".into();
     }
 
-    fn save_controller_learn(&mut self, state: &Path) {
+    fn save_controller_learn(&mut self, state: &Path, wait_for_release: bool) {
         let Some(session) = self.controller_learn.as_ref() else {
             return;
         };
@@ -1192,6 +1227,11 @@ impl App {
             Ok(config) => config,
             Err(error) => {
                 self.status = format!("MIDI Learn validation: {error:#}");
+                if wait_for_release {
+                    if let Some(session) = self.controller_learn.as_mut() {
+                        session.mark_save_result(false);
+                    }
+                }
                 return;
             }
         };
@@ -1199,21 +1239,48 @@ impl App {
         if let Err(error) = crate::controller_learn::backup(&path).and_then(|_| config.save(&path))
         {
             self.status = format!("MIDI Learn save failed: {error:#}");
+            if wait_for_release {
+                if let Some(session) = self.controller_learn.as_mut() {
+                    session.mark_save_result(false);
+                }
+            }
             return;
         }
         if let Ok(mut active) = self.controller_config.write() {
             *active = config.clone();
         }
         self.controller_layout = config.layout;
+        if wait_for_release {
+            if let Some(session) = self.controller_learn.as_mut() {
+                session.mark_save_result(true);
+            }
+            self.status = format!(
+                "controller profile saved atomically · release encoder · {}",
+                path.display()
+            );
+            return;
+        }
         self.learn_mode.store(false, Ordering::Relaxed);
         self.controller_learn = None;
         self.status = format!("controller profile saved atomically · {}", path.display());
     }
 
-    fn receive_controller_learn(&mut self, message: &[u8]) {
-        if let Some(session) = self.controller_learn.as_mut() {
-            session.receive(message);
-        }
+    fn finish_saved_controller_learn(&mut self) {
+        self.learn_mode.store(false, Ordering::Relaxed);
+        self.controller_learn = None;
+        self.status = "controller profile saved and activated".into();
+    }
+
+    fn receive_controller_learn(
+        &mut self,
+        received: Instant,
+        message: &[u8],
+    ) -> crate::controller_learn::LearnAction {
+        self.controller_learn
+            .as_mut()
+            .map_or(crate::controller_learn::LearnAction::None, |session| {
+                session.receive(message, received)
+            })
     }
 
     fn menu_context(&self) -> MenuContext {
@@ -1680,6 +1747,9 @@ impl App {
 
     fn disable_tracker_route(&self) {
         if let Ok(mut route) = self.tracker_route.lock() {
+            for (target, channel) in route.destinations() {
+                self.tracker_live_input.cancel(&target, channel);
+            }
             let external = self.tracker_external_config();
             route.configure(crate::engine::TrackerRouteConfig {
                 enabled: false,
@@ -1758,7 +1828,8 @@ impl App {
             &self.song.insert_rack,
             &self.song.aux_routing,
         ) {
-            Ok(engine) => {
+            Ok(mut engine) => {
+                engine.bind_midi_lifecycle(self.midi_lifecycle.clone());
                 self.engine = Some(engine);
                 self.engine_owner = Some(EngineOwner::Tracker(name.to_owned()));
                 if let Ok(mut backend) = self.midi_backend.lock() {
@@ -6441,7 +6512,8 @@ impl App {
             &self.song.insert_rack,
             &self.song.aux_routing,
         ) {
-            Ok(e) => {
+            Ok(mut e) => {
+                e.bind_midi_lifecycle(self.midi_lifecycle.clone());
                 let audio_route = e.audio_route_status();
                 self.audio_fallback = audio_route
                     .as_ref()
@@ -6749,7 +6821,8 @@ impl App {
                     &self.song.insert_rack,
                     &self.song.aux_routing,
                 ) {
-                    Ok(engine) => {
+                    Ok(mut engine) => {
+                        engine.bind_midi_lifecycle(self.midi_lifecycle.clone());
                         let audio_route = engine.audio_route_status();
                         self.audio_fallback = audio_route
                             .as_ref()
@@ -6819,6 +6892,9 @@ impl App {
     }
     fn tick(&mut self) {
         let now = Instant::now();
+        if let Some(session) = self.controller_learn.as_mut() {
+            session.tick(now);
+        }
         self.refresh_cpu_temperature(now);
         if !self.loop_meter.is_presentation() {
             if let Some(snapshot) = self.loop_player.meter_snapshot() {
@@ -7001,6 +7077,10 @@ fn app_loop(
         .as_ref()
         .map(engine::MidiRouter::playback_scale)
         .unwrap_or_else(|_| Arc::new(std::sync::Mutex::new(None)));
+    let midi_lifecycle = router
+        .as_ref()
+        .map(engine::MidiRouter::lifecycle)
+        .unwrap_or_default();
     let controller_config = router
         .as_ref()
         .map(engine::MidiRouter::controller_config)
@@ -7028,6 +7108,7 @@ fn app_loop(
             route: tracker_route,
             input: tracker_input,
             playback_scale,
+            lifecycle: midi_lifecycle,
         },
         config.clone(),
         AudioPorts {
@@ -7044,7 +7125,10 @@ fn app_loop(
     app.controller_config = controller_config;
     app.learn_mode = learn_mode;
     app.fx_control_mode = fx_control_mode;
-    app.controller_online = router.is_ok();
+    if let Ok(router) = &router {
+        app.controller_online = router.availability().controller_available();
+        app.performance_inputs = router.availability().performance.clone();
+    }
     if let Some(notice) = controller_notice {
         app.status = format!("controller auto-wire: {notice}");
     }
@@ -7056,6 +7140,32 @@ fn app_loop(
         };
         app.status = notice.clone();
         app.controller_fallback = Some(notice);
+    } else if let Ok(router) = &router {
+        let mut notices = Vec::new();
+        if let Some(controller) = router
+            .availability()
+            .controller
+            .as_ref()
+            .filter(|state| !state.available())
+        {
+            notices.push(format!("controller {}", controller.description()));
+        }
+        let missing_performance = router
+            .availability()
+            .performance
+            .iter()
+            .filter(|state| !state.available())
+            .count();
+        if missing_performance > 0 {
+            notices.push(format!(
+                "{missing_performance} performance input(s) unavailable"
+            ));
+        }
+        if !notices.is_empty() {
+            let notice = format!("keyboard fallback · {}", notices.join(" · "));
+            app.status = notice.clone();
+            app.controller_fallback = Some(notice);
+        }
     }
     app.recommend_controller_learn_on_home();
     let _router = router.ok();
@@ -7170,30 +7280,15 @@ fn drain(
                     "pad lock off · command pads restored".into()
                 };
             }
-            MidiEvent::Learn(message) => {
-                let (navigation, action) = app
-                    .controller_learn
-                    .as_ref()
-                    .map_or((false, None), |session| session.navigation_action(&message));
-                if navigation {
-                    match action {
-                        Some(crate::pads::EncoderAction::Up) => {
-                            if let Some(session) = app.controller_learn.as_mut() {
-                                session.previous();
-                            }
-                        }
-                        Some(crate::pads::EncoderAction::Down) => {
-                            if let Some(session) = app.controller_learn.as_mut() {
-                                session.skip();
-                            }
-                        }
-                        Some(crate::pads::EncoderAction::Select) => {
-                            app.save_controller_learn(state);
-                        }
-                        None => {}
+            MidiEvent::Learn { received, bytes } => {
+                match app.receive_controller_learn(received, &bytes) {
+                    crate::controller_learn::LearnAction::None => {}
+                    crate::controller_learn::LearnAction::Save => {
+                        app.save_controller_learn(state, true);
                     }
-                } else {
-                    app.receive_controller_learn(&message);
+                    crate::controller_learn::LearnAction::FinishSaved => {
+                        app.finish_saved_controller_learn();
+                    }
                 }
             }
             MidiEvent::Error(e) => app.status = e,
@@ -7831,6 +7926,8 @@ fn perform(
         }
         Action::OpenRouting => {
             a.set_tracker_edit(false);
+            a.refresh_live_midi_connections();
+            a.refresh_page_targets();
             a.set_screen(Screen::Routing);
             a.status = "routing overview · run shr-setup outside SHR to change connections".into();
         }
@@ -8232,7 +8329,7 @@ fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<Mi
                     session.retry();
                 }
             }
-            KeyCode::Enter => a.save_controller_learn(state),
+            KeyCode::Enter => a.save_controller_learn(state, false),
             _ => {}
         }
         return false;
@@ -9225,7 +9322,7 @@ fn centered_text(value: &str, width: usize) -> String {
 
 fn draw_routing<B: Backend>(f: &mut Frame<B>, a: &App) {
     let z = f.size();
-    let (controller, mapping) = a.controller_config.read().map_or_else(
+    let (configured_controller, mapping) = a.controller_config.read().map_or_else(
         |_| ("unavailable".into(), "unavailable".into()),
         |config| {
             (
@@ -9238,25 +9335,40 @@ fn draw_routing<B: Backend>(f: &mut Frame<B>, a: &App) {
             )
         },
     );
-    let controller_state = if a.controller_online {
-        "connected"
+    let controller = if a.controller_online {
+        format!("connected · {configured_controller} · {mapping}")
     } else {
-        "offline"
+        "none connected".into()
     };
-    let external = if a.config.external_midi.enabled {
-        if a.config.external_midi.output_match.is_empty() {
-            "enabled · output missing".into()
-        } else {
-            a.config.external_midi.output_match.clone()
-        }
+    let connected_performance = a
+        .performance_inputs
+        .iter()
+        .filter(|state| state.available())
+        .filter_map(|state| state.resolved.as_deref())
+        .collect::<Vec<_>>();
+    let performance = if !connected_performance.is_empty() {
+        connected_performance.join(" + ")
+    } else if a.controller_online && a.config.midi_controller_musical_input {
+        "controller (combined)".into()
     } else {
-        "off".into()
+        "none connected".into()
     };
-    let profile = if a.config.external_midi.profile.is_empty() {
-        "none"
-    } else {
-        &a.config.external_midi.profile
-    };
+    let external = a
+        .config
+        .external_midi
+        .enabled
+        .then(|| {
+            sequencer::matching_output_index(
+                &a.available_page_outputs,
+                &a.config.external_midi.output_match,
+                true,
+            )
+            .ok()
+            .and_then(|index| a.available_page_outputs.get(index))
+            .cloned()
+        })
+        .flatten()
+        .unwrap_or_else(|| "none connected".into());
     let clock = if a.config.controller_clock.enabled {
         "on"
     } else {
@@ -9279,16 +9391,19 @@ fn draw_routing<B: Backend>(f: &mut Frame<B>, a: &App) {
                 .add_modifier(Modifier::BOLD),
         )),
         Spans::from(truncate(
-            &format!("Controller {controller_state} · {mapping}"),
+            &format!("Controller · {controller}"),
             z.width.saturating_sub(4) as usize,
         )),
-        Spans::from(truncate(&controller, z.width.saturating_sub(4) as usize)),
+        Spans::from(truncate(
+            &format!("Performance · {performance}"),
+            z.width.saturating_sub(4) as usize,
+        )),
         Spans::from(truncate(
             &format!("MIDI out · {external}"),
             z.width.saturating_sub(4) as usize,
         )),
         Spans::from(truncate(
-            &format!("Device {profile} · clock {clock}"),
+            &format!("Clock · {clock}"),
             z.width.saturating_sub(4) as usize,
         )),
         Spans::from("Audio out"),
@@ -9323,7 +9438,7 @@ fn draw_controller_learn<B: Backend>(f: &mut Frame<B>, a: &App) {
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         )),
-        Spans::from("Messages isolated · synth protected"),
+        Spans::from("Controller isolated · synth protected"),
         Spans::from(""),
         Spans::from(Span::styled(
             role.label(),
@@ -9333,9 +9448,9 @@ fn draw_controller_learn<B: Backend>(f: &mut Frame<B>, a: &App) {
                 .add_modifier(Modifier::BOLD),
         )),
         Spans::from(if session.can_finish() {
-            "Move/press to learn · rotary browses"
+            "Move once · auto-next after settle/release"
         } else {
-            "Learn rotary left, right, then click"
+            "Finish left, finish right, click/release"
         }),
         Spans::from(""),
         Spans::from(Span::styled(
@@ -9379,7 +9494,8 @@ fn draw_controller_learn<B: Backend>(f: &mut Frame<B>, a: &App) {
         lines.push(Spans::from("Save makes a backup and activates now"));
     } else if session.can_finish() {
         lines.push(Spans::from("←/→ browse · S skip · R retry"));
-        lines.push(Spans::from("Rotary click SAVE+EXIT · Esc cancel"));
+        lines.push(Spans::from("Rotary gestures latch · click saves"));
+        lines.push(Spans::from("Esc cancel keeps the previous file"));
     } else {
         lines.push(Spans::from("Master rotary required · Esc cancel"));
     }
@@ -12402,6 +12518,7 @@ fn screenshot_app(mut config: RuntimeConfig) -> App {
             route: Arc::new(std::sync::Mutex::new(engine::TrackerRoute::default())),
             input: Arc::new(std::sync::Mutex::new(None)),
             playback_scale: Arc::new(std::sync::Mutex::new(None)),
+            lifecycle: engine::MidiLifecycle::default(),
         },
         config,
         AudioPorts {
@@ -12932,6 +13049,7 @@ mod tests {
                 route: Arc::new(std::sync::Mutex::new(engine::TrackerRoute::default())),
                 input: Arc::new(std::sync::Mutex::new(None)),
                 playback_scale: Arc::new(std::sync::Mutex::new(None)),
+                lifecycle: engine::MidiLifecycle::default(),
             },
             config,
             AudioPorts {
@@ -12946,6 +13064,30 @@ mod tests {
             app.available_page_outputs = vec![app.config.external_midi.output_match.clone()];
         }
         app
+    }
+    fn learn_send(
+        a: &mut App,
+        now: &mut Instant,
+        message: &[u8],
+    ) -> crate::controller_learn::LearnAction {
+        *now += Duration::from_millis(1);
+        a.receive_controller_learn(*now, message)
+    }
+    fn learn_settle(a: &mut App, now: &mut Instant) {
+        *now += Duration::from_millis(200);
+        a.controller_learn.as_mut().unwrap().tick(*now);
+    }
+    fn learn_master(a: &mut App, rotary: u8, click: u8) -> Instant {
+        a.begin_controller_learn();
+        let mut now = Instant::now() + Duration::from_secs(1);
+        a.controller_learn.as_mut().unwrap().tick(now);
+        learn_send(a, &mut now, &[0xb0, rotary, 63]);
+        learn_settle(a, &mut now);
+        learn_send(a, &mut now, &[0xb0, rotary, 65]);
+        learn_settle(a, &mut now);
+        learn_send(a, &mut now, &[0xb0, click, 127]);
+        learn_send(a, &mut now, &[0xb0, click, 0]);
+        now
     }
     fn connect_test_midi_hardware(app: &mut App) {
         app.config.external_midi.enabled = true;
@@ -14162,6 +14304,32 @@ mod tests {
     }
 
     #[test]
+    fn routing_hides_disconnected_configured_midi_devices() {
+        let p = presets();
+        let mut app = app(&p);
+        app.screen = Screen::Routing;
+        app.controller_online = false;
+        app.config.external_midi.enabled = true;
+        app.config.external_midi.output_match = "Casiotone DIN".into();
+        app.config.external_midi.profile = "casio-casiotone-mt-240".into();
+        app.available_page_outputs.clear();
+        app.performance_inputs = vec![crate::engine::MidiInputState {
+            wanted: "Casiotone keyboard".into(),
+            resolved: None,
+            error: Some("not found".into()),
+        }];
+        *app.controller_config.write().unwrap() =
+            crate::pads::PadConfig::unmapped("Casiotone controller");
+
+        let text = buffer_text(&render_app(&mut app, 40, 20));
+        assert!(!text.to_ascii_lowercase().contains("casiotone"));
+        assert!(!text.contains("0/1 connected"));
+        assert!(text.contains("MIDI out · none connected"));
+        assert!(text.contains("Controller · none connected"));
+        assert!(text.contains("Performance · none connected"));
+    }
+
+    #[test]
     fn fx_rack_actions_preserve_ids_order_bypass_and_strict_parameters() {
         let p = presets();
         let mut a = app(&p);
@@ -14369,17 +14537,14 @@ mod tests {
         a.cancel_controller_learn();
         assert_eq!(*a.controller_config.read().unwrap(), original);
 
-        a.begin_controller_learn();
-        a.receive_controller_learn(&[0xb0, 28, 63]);
-        a.receive_controller_learn(&[0xb0, 28, 65]);
-        a.receive_controller_learn(&[0xb0, 118, 127]);
+        let mut now = learn_master(&mut a, 28, 118);
         for cc in 10..=21 {
-            a.receive_controller_learn(&[0xb0, cc, 64]);
-            a.controller_learn.as_mut().unwrap().skip();
+            learn_send(&mut a, &mut now, &[0xb0, cc, 64]);
+            learn_settle(&mut a, &mut now);
         }
-        for note in 36..=44 {
-            a.receive_controller_learn(&[0x99, note, 100]);
-            a.controller_learn.as_mut().unwrap().skip();
+        for note in 36..=43 {
+            learn_send(&mut a, &mut now, &[0x99, note, 100]);
+            learn_send(&mut a, &mut now, &[0x89, note, 0]);
         }
         let state = std::env::temp_dir().join(format!(
             "shr-in-app-learn-{}-{}",
@@ -14392,18 +14557,51 @@ mod tests {
         fs::create_dir_all(&state).unwrap();
         original.save(&state.join("controller.conf")).unwrap();
         let (tx, rx) = mpsc::channel();
-        tx.send(MidiEvent::Learn(vec![0xb0, 118, 127])).unwrap();
+        now += Duration::from_millis(1);
+        tx.send(MidiEvent::Learn {
+            received: now,
+            bytes: vec![0xb0, 118, 127],
+        })
+        .unwrap();
         drain(&rx, &mut a, &state, &tx);
-        assert!(a.controller_learn.is_none());
-        assert!(!a.learn_mode.load(Ordering::Relaxed));
+        assert!(a.controller_learn.is_some());
+        assert!(a.learn_mode.load(Ordering::Relaxed));
         let saved = crate::pads::PadConfig::load(&state.join("controller.conf")).unwrap();
         assert_eq!(saved.controls.len(), 12);
-        assert_eq!(saved.pads.len(), 9);
+        assert_eq!(saved.pads.len(), 8);
         assert_eq!(*a.controller_config.read().unwrap(), saved);
         assert!(fs::read_dir(&state)
             .unwrap()
             .filter_map(std::result::Result::ok)
             .any(|entry| entry.file_name().to_string_lossy().contains(".bak-")));
+
+        for value in [127, 127] {
+            now += Duration::from_millis(1);
+            tx.send(MidiEvent::Learn {
+                received: now,
+                bytes: vec![0xb0, 118, value],
+            })
+            .unwrap();
+        }
+        now += Duration::from_millis(1);
+        tx.send(MidiEvent::Learn {
+            received: now,
+            bytes: vec![0xb0, 118, 0],
+        })
+        .unwrap();
+        drain(&rx, &mut a, &state, &tx);
+        assert!(a.controller_learn.is_none());
+        assert!(!a.learn_mode.load(Ordering::Relaxed));
+
+        a.begin_controller_learn();
+        let reentry = a.controller_learn.as_mut().unwrap();
+        reentry.receive(&[0xb0, 118, 0], now + Duration::from_millis(1));
+        assert_eq!(
+            reentry.role(),
+            crate::controller_learn::LearnRole::EncoderCounterClockwise
+        );
+        assert_eq!(reentry.draft().encoder_relative_cc, None);
+        a.cancel_controller_learn();
         fs::remove_dir_all(state).unwrap();
     }
 
@@ -14414,10 +14612,7 @@ mod tests {
         a.controller_online = true;
         *a.controller_config.write().unwrap() =
             crate::pads::PadConfig::unmapped("Test Controller MIDI");
-        a.begin_controller_learn();
-        a.receive_controller_learn(&[0xb0, 28, 63]);
-        a.receive_controller_learn(&[0xb0, 28, 65]);
-        a.receive_controller_learn(&[0xb0, 118, 127]);
+        let mut now = learn_master(&mut a, 28, 118);
         assert_eq!(
             a.controller_learn.as_ref().unwrap().role(),
             crate::controller_learn::LearnRole::AbsoluteControl(0)
@@ -14434,20 +14629,45 @@ mod tests {
         fs::create_dir_all(&state).unwrap();
         let (tx, rx) = mpsc::channel();
 
-        tx.send(MidiEvent::Learn(vec![0xb0, 28, 65])).unwrap();
+        now += Duration::from_millis(1);
+        tx.send(MidiEvent::Learn {
+            received: now,
+            bytes: vec![0xb0, 28, 65],
+        })
+        .unwrap();
         drain(&rx, &mut a, &state, &tx);
         assert_eq!(
             a.controller_learn.as_ref().unwrap().role(),
             crate::controller_learn::LearnRole::AbsoluteControl(1)
         );
-        tx.send(MidiEvent::Learn(vec![0xb0, 28, 63])).unwrap();
+        now += Duration::from_millis(200);
+        a.controller_learn.as_mut().unwrap().tick(now);
+        now += Duration::from_millis(1);
+        tx.send(MidiEvent::Learn {
+            received: now,
+            bytes: vec![0xb0, 28, 63],
+        })
+        .unwrap();
         drain(&rx, &mut a, &state, &tx);
         assert_eq!(
             a.controller_learn.as_ref().unwrap().role(),
             crate::controller_learn::LearnRole::AbsoluteControl(0)
         );
 
-        tx.send(MidiEvent::Learn(vec![0xb0, 118, 127])).unwrap();
+        now += Duration::from_millis(200);
+        a.controller_learn.as_mut().unwrap().tick(now);
+        now += Duration::from_millis(1);
+        tx.send(MidiEvent::Learn {
+            received: now,
+            bytes: vec![0xb0, 118, 127],
+        })
+        .unwrap();
+        now += Duration::from_millis(1);
+        tx.send(MidiEvent::Learn {
+            received: now,
+            bytes: vec![0xb0, 118, 0],
+        })
+        .unwrap();
         drain(&rx, &mut a, &state, &tx);
         assert!(a.controller_learn.is_none());
         let saved = crate::pads::PadConfig::load(&state.join("controller.conf")).unwrap();
@@ -15134,6 +15354,7 @@ mod tests {
                 route: Arc::new(std::sync::Mutex::new(engine::TrackerRoute::default())),
                 input: Arc::new(std::sync::Mutex::new(None)),
                 playback_scale: Arc::new(std::sync::Mutex::new(None)),
+                lifecycle: engine::MidiLifecycle::default(),
             },
             config,
             AudioPorts {

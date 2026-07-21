@@ -74,6 +74,57 @@ pub enum EncoderAction {
     Select,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControllerButton {
+    Cc { channel: u8, cc: u8 },
+    Note { channel: u8, note: u8 },
+}
+
+impl ControllerButton {
+    fn matches(self, message: &[u8]) -> bool {
+        if message.len() < 3 {
+            return false;
+        }
+        match self {
+            Self::Cc { channel, cc } => {
+                message[0] & 0xf0 == 0xb0 && message[0] & 0x0f == channel && message[1] == cc
+            }
+            Self::Note { channel, note } => {
+                matches!(message[0] & 0xf0, 0x80 | 0x90)
+                    && message[0] & 0x0f == channel
+                    && message[1] == note
+            }
+        }
+    }
+
+    fn pressed(self, message: &[u8]) -> bool {
+        self.matches(message)
+            && match self {
+                Self::Cc { .. } => message[2] > 0,
+                Self::Note { .. } => message[0] & 0xf0 == 0x90 && message[2] > 0,
+            }
+    }
+
+    fn setting(self) -> String {
+        match self {
+            Self::Cc { channel, cc } => format!("cc.{}.{cc}", channel + 1),
+            Self::Note { channel, note } => format!("note.{}.{note}", channel + 1),
+        }
+    }
+}
+
+impl fmt::Display for ControllerButton {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.setting())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PageCycleChordState {
+    modifier_down: bool,
+    triggered: bool,
+}
+
 impl fmt::Display for PadAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -146,6 +197,11 @@ pub struct PadConfig {
     pub encoder_press_note: Option<u8>,
     /// Optional zero-based channel qualifier for either encoder press form.
     pub encoder_press_channel: Option<u8>,
+    /// Optional held modifier plus secondary gesture for page-cycle. The
+    /// trigger may reuse a normally mapped control because it is active only
+    /// while the modifier is held.
+    pub page_cycle_modifier: Option<ControllerButton>,
+    pub page_cycle_trigger: Option<ControllerButton>,
     /// Dedicated toggle control; this uses the raw Shift CC, not its shifted pad layer.
     pub lock_cc: Option<u8>,
     pub layout: ControllerLayout,
@@ -166,6 +222,8 @@ impl Default for PadConfig {
             encoder_press_cc: None,
             encoder_press_note: None,
             encoder_press_channel: None,
+            page_cycle_modifier: None,
+            page_cycle_trigger: None,
             lock_cc: None,
             layout: ControllerLayout::Eight,
         };
@@ -249,6 +307,15 @@ impl PadConfig {
             }
             if key.trim() == "encoder.press_channel" {
                 self.encoder_press_channel = optional_midi_channel(value, "encoder press channel")?;
+                continue;
+            }
+            if key.trim() == "page_cycle.modifier" {
+                self.page_cycle_modifier =
+                    optional_controller_button(value, "page-cycle modifier")?;
+                continue;
+            }
+            if key.trim() == "page_cycle.trigger" {
+                self.page_cycle_trigger = optional_controller_button(value, "page-cycle trigger")?;
                 continue;
             }
             if key.trim() == "lock.cc" {
@@ -402,6 +469,53 @@ impl PadConfig {
         {
             bail!("encoder press channel requires an encoder press CC or note and channel 1..16");
         }
+        if self.page_cycle_modifier.is_some() != self.page_cycle_trigger.is_some() {
+            bail!("page-cycle modifier and trigger must be configured together");
+        }
+        for (button, description) in [
+            (self.page_cycle_modifier, "page-cycle modifier"),
+            (self.page_cycle_trigger, "page-cycle trigger"),
+        ] {
+            match button {
+                Some(ControllerButton::Cc { channel, cc }) => {
+                    ensure_midi_number(cc, description)?;
+                    if channel > 15 {
+                        bail!("{description} channel must be 1..16");
+                    }
+                }
+                Some(ControllerButton::Note { channel, note }) => {
+                    ensure_midi_number(note, description)?;
+                    if channel > 15 {
+                        bail!("{description} channel must be 1..16");
+                    }
+                }
+                None => {}
+            }
+        }
+        if self.page_cycle_modifier.is_some() && self.page_cycle_modifier == self.page_cycle_trigger
+        {
+            bail!("page-cycle modifier and trigger must be different messages");
+        }
+        if let Some(modifier) = self.page_cycle_modifier {
+            let conflicts = match modifier {
+                ControllerButton::Cc { cc, .. } => {
+                    self.controls.contains_key(&cc)
+                        || self.cc_buttons.contains_key(&cc)
+                        || [
+                            self.encoder_relative_cc,
+                            self.encoder_press_cc,
+                            self.lock_cc,
+                        ]
+                        .contains(&Some(cc))
+                }
+                ControllerButton::Note { note, .. } => {
+                    self.pads.contains_key(&note) || self.encoder_press_note == Some(note)
+                }
+            };
+            if conflicts {
+                bail!("page-cycle modifier must be a dedicated, otherwise unmapped message");
+            }
+        }
         if self
             .encoder_press_note
             .is_some_and(|note| self.pads.contains_key(&note))
@@ -418,7 +532,7 @@ impl PadConfig {
         }
         let mut entries: Vec<_> = self.pads.iter().collect();
         entries.sort_by_key(|(note, _)| **note);
-        let mut text = String::from("# SHR-DAW controller profile v4\n");
+        let mut text = String::from("# SHR-DAW controller profile v5\n");
         if let Some(input) = &self.input_match {
             text.push_str(&format!("input={input}\n"));
         }
@@ -427,7 +541,7 @@ impl PadConfig {
             self.profile.as_deref().unwrap_or_default()
         ));
         text.push_str(&format!(
-            "menu.layout={}\nencoder.relative_cc={}\nencoder.relative_reverse={}\nencoder.press_cc={}\nencoder.press_note={}\nencoder.press_channel={}\nlock.cc={}\n",
+            "menu.layout={}\nencoder.relative_cc={}\nencoder.relative_reverse={}\nencoder.press_cc={}\nencoder.press_note={}\nencoder.press_channel={}\npage_cycle.modifier={}\npage_cycle.trigger={}\nlock.cc={}\n",
             match self.layout {
                 ControllerLayout::Eight => 8,
                 ControllerLayout::Five => 5,
@@ -445,6 +559,12 @@ impl PadConfig {
                 .unwrap_or_default(),
             self.encoder_press_channel
                 .map(|channel| (channel + 1).to_string())
+                .unwrap_or_default(),
+            self.page_cycle_modifier
+                .map(ControllerButton::setting)
+                .unwrap_or_default(),
+            self.page_cycle_trigger
+                .map(ControllerButton::setting)
                 .unwrap_or_default(),
             self.lock_cc.map(|cc| cc.to_string()).unwrap_or_default(),
         ));
@@ -527,18 +647,24 @@ impl PadConfig {
         self.controls.get(&incoming).copied()
     }
 
-    /// Arturia relative mode uses 64 as stationary, lower values for left and
-    /// higher values for right. Press and release are both consumed, while
-    /// only a non-zero press selects.
+    /// Centered relative mode uses 64 as stationary. Reversed/high-low mode
+    /// also treats its zero reset packet as stationary. Press and release are
+    /// both consumed, while only a non-zero press selects.
     pub fn encoder_action(&self, message: &[u8]) -> (bool, Option<EncoderAction>) {
         if message.len() < 3 || message[0] & 0xf0 != 0xb0 {
             return (false, None);
         }
         if self.encoder_relative_cc == Some(message[1]) {
-            let mut action = match message[2].cmp(&64) {
-                std::cmp::Ordering::Less => Some(EncoderAction::Up),
-                std::cmp::Ordering::Greater => Some(EncoderAction::Down),
-                std::cmp::Ordering::Equal => None,
+            let mut action = if self.encoder_relative_reverse && message[2] == 0 {
+                // Two's-complement/high-low relative encoders reset to zero.
+                // Zero is neutral, not another clockwise packet.
+                None
+            } else {
+                match message[2].cmp(&64) {
+                    std::cmp::Ordering::Less => Some(EncoderAction::Up),
+                    std::cmp::Ordering::Greater => Some(EncoderAction::Down),
+                    std::cmp::Ordering::Equal => None,
+                }
             };
             if self.encoder_relative_reverse {
                 action = action.map(|action| match action {
@@ -576,6 +702,37 @@ impl PadConfig {
         }
         let pressed = message[0] & 0xf0 == 0x90 && message[2] > 0;
         (true, pressed.then_some(EncoderAction::Select))
+    }
+
+    pub fn page_cycle_chord_action(
+        &self,
+        message: &[u8],
+        state: &mut PageCycleChordState,
+    ) -> (bool, Option<(PadAction, bool)>) {
+        let (Some(modifier), Some(trigger)) = (self.page_cycle_modifier, self.page_cycle_trigger)
+        else {
+            *state = PageCycleChordState::default();
+            return (false, None);
+        };
+        if modifier.matches(message) {
+            state.modifier_down = modifier.pressed(message);
+            if !state.modifier_down {
+                state.triggered = false;
+            }
+            return (true, None);
+        }
+        if state.modifier_down && trigger.matches(message) {
+            let pressed = trigger.pressed(message);
+            let action = (pressed && !state.triggered).then_some((PadAction::CyclePage, true));
+            if pressed {
+                state.triggered = true;
+            }
+            return (
+                true,
+                action.or_else(|| (!pressed).then_some((PadAction::CyclePage, false))),
+            );
+        }
+        (false, None)
     }
 
     /// Press and release are consumed; only a non-zero press toggles the lock.
@@ -622,6 +779,35 @@ fn optional_midi_channel(value: &str, description: &str) -> Result<Option<u8>> {
         bail!("{description} must be 1..16");
     }
     Ok(Some(channel - 1))
+}
+
+fn optional_controller_button(value: &str, description: &str) -> Result<Option<ControllerButton>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let parts = value.split('.').collect::<Vec<_>>();
+    if parts.len() != 3 {
+        bail!("{description} must be cc.CHANNEL.NUMBER or note.CHANNEL.NUMBER");
+    }
+    let channel = parts[1]
+        .parse::<u8>()
+        .with_context(|| format!("{description} channel must be 1..16"))?;
+    if !(1..=16).contains(&channel) {
+        bail!("{description} channel must be 1..16");
+    }
+    let number = midi_number(parts[2], description)?;
+    match parts[0] {
+        "cc" => Ok(Some(ControllerButton::Cc {
+            channel: channel - 1,
+            cc: number,
+        })),
+        "note" => Ok(Some(ControllerButton::Note {
+            channel: channel - 1,
+            note: number,
+        })),
+        _ => bail!("{description} must start with cc or note"),
+    }
 }
 
 fn command_binding(value: &str, description: &str) -> Result<(Option<u8>, u8)> {
@@ -745,6 +931,61 @@ mod tests {
         );
         assert_eq!(c.encoder_action(&[0xb0, 118, 0]), (true, None));
     }
+
+    #[test]
+    fn high_low_relative_encoder_treats_zero_as_neutral() {
+        let c = PadConfig {
+            encoder_relative_cc: Some(114),
+            encoder_relative_reverse: true,
+            ..PadConfig::default()
+        };
+        assert_eq!(
+            c.encoder_action(&[0xb0, 114, 125]),
+            (true, Some(EncoderAction::Up))
+        );
+        assert_eq!(
+            c.encoder_action(&[0xb0, 114, 1]),
+            (true, Some(EncoderAction::Down))
+        );
+        assert_eq!(c.encoder_action(&[0xb0, 114, 0]), (true, None));
+    }
+
+    #[test]
+    fn page_cycle_chord_latches_once_and_reuses_an_absolute_control() {
+        let c = PadConfig {
+            controls: HashMap::from([(10, crate::control::CONTROLS[0].cc)]),
+            page_cycle_modifier: Some(ControllerButton::Cc { channel: 0, cc: 27 }),
+            page_cycle_trigger: Some(ControllerButton::Cc { channel: 0, cc: 10 }),
+            ..PadConfig::default()
+        };
+        c.validate().unwrap();
+        let mut state = PageCycleChordState::default();
+        assert_eq!(
+            c.page_cycle_chord_action(&[0xb0, 10, 20], &mut state),
+            (false, None)
+        );
+        assert_eq!(
+            c.page_cycle_chord_action(&[0xb0, 27, 127], &mut state),
+            (true, None)
+        );
+        assert_eq!(
+            c.page_cycle_chord_action(&[0xb0, 10, 21], &mut state),
+            (true, Some((PadAction::CyclePage, true)))
+        );
+        assert_eq!(
+            c.page_cycle_chord_action(&[0xb0, 10, 22], &mut state),
+            (true, None)
+        );
+        assert_eq!(
+            c.page_cycle_chord_action(&[0xb0, 27, 0], &mut state),
+            (true, None)
+        );
+        c.page_cycle_chord_action(&[0xb0, 27, 127], &mut state);
+        assert_eq!(
+            c.page_cycle_chord_action(&[0xb0, 10, 23], &mut state),
+            (true, Some((PadAction::CyclePage, true)))
+        );
+    }
     #[test]
     fn older_controller_profile_keeps_unspecified_encoder_controls_unmapped() {
         let path =
@@ -792,7 +1033,7 @@ mod tests {
         ));
         fs::write(
             &path,
-            "pad.10.36=page-1\npad.37=page-2\nbutton.cc.10.44=item-1\nbutton.cc.45=item-2\n",
+            "pad.10.36=page-1\npad.37=page-2\nbutton.cc.10.44=item-1\nbutton.cc.45=item-2\npage_cycle.modifier=cc.1.27\npage_cycle.trigger=cc.1.10\n",
         )
         .unwrap();
         let config = PadConfig::load(&path).unwrap();
@@ -802,6 +1043,8 @@ mod tests {
         let loaded = PadConfig::load(&path).unwrap();
         assert_eq!(loaded.pad_channels, config.pad_channels);
         assert_eq!(loaded.cc_button_channels, config.cc_button_channels);
+        assert_eq!(loaded.page_cycle_modifier, config.page_cycle_modifier);
+        assert_eq!(loaded.page_cycle_trigger, config.page_cycle_trigger);
         assert!(loaded.route(&[0x90, 37, 100]).0);
         assert!(loaded.route(&[0x9f, 37, 100]).0);
         let _ = fs::remove_file(path);

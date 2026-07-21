@@ -16,20 +16,43 @@ offers non-audible MIDI learn for the missing controls. Learning never forwards
 messages to a synth. It can identify absolute knob/fader CCs, either direction
 convention for a relative encoder, a CC or note encoder press, and command
 buttons that send either notes or CCs. Each step keeps the first qualifying
-message and stays on that item; extra values from the same movement, matching
-button releases, and unrelated MIDI traffic are ignored without changing the
-accepted indication. In the in-app learner, first turn the master encoder left,
-turn it right, and click it. The learned encoder then browses the optional
-control and command-button roles. Its next click saves the mappings learned so
-far and exits; Esc cancels and keeps the previous file. Conflicting assignments
-from a different already-mapped control are rejected.
+gesture. The in-app learner visibly keeps `OK` on that role until the physical
+gesture is finished: a button advances on its matching CC-off, Note Off, or
+velocity-zero Note On, while a knob/fader or relative encoder advances
+automatically after its CC stream has been quiet for the short settle period.
+Extra values and encoder neutral/reset packets extend that same gesture instead
+of becoming the next role. On entry, release the control that opened MIDI Learn
+and wait for the ready indication; its release and already queued traffic are
+quarantined.
+
+First turn the master encoder left and let it settle, turn it right and let it
+settle, then click and release it. The learned encoder then browses the optional
+control and command-button roles. One rotary gesture moves by exactly one role,
+regardless of how many packets it emits. Each learned absolute control advances
+to the next control automatically after settling, and each learned command
+button advances after release. The next clean encoder click saves the mappings
+learned so far, makes a backup, activates the new file, and exits after release;
+Esc cancels and keeps the previous file. Conflicting assignments from a
+different already-mapped control are rejected without replacing an accepted
+`OK` message with errors from trailing traffic. Relative encoders using either
+the center-64 convention or high/low values such as 125–127 left, 1–3 right,
+and neutral 0 are supported.
 
 SHR does not guess how many buttons the controller has. Command roles are
-optional: browse past roles that the hardware does not need. Learning any
-dedicated page button selects the eight-button layout; learning page-cycle
-without dedicated page buttons selects the five-button layout; item buttons
-alone use the four-button layout. Partial layouts are valid, so spare hardware
-buttons can remain musical or unassigned.
+optional: browse past roles that the hardware does not need. The page choices
+are mutually exclusive. If any of page 1–4 is learned, the separate page-cycle
+role is bypassed; after all four are skipped, page-cycle is offered as the
+five-button alternative before item 1–4. Item buttons alone use the four-button
+layout.
+
+Page-cycle may be one dedicated button or a held modifier plus another control.
+For a dedicated button, press and release it once, then press it again to
+confirm; this prevents a single exploratory Shift press from becoming the
+mapping. For a chord, hold the modifier and move or press the intended trigger,
+then release the modifier. The trigger may reuse a normally mapped knob or
+button because it cycles the page only while that learned modifier is held;
+one held chord triggers once regardless of packet count. Partial layouts are
+valid, so spare hardware buttons can remain musical or unassigned.
 
 The generic installed `controller.conf` is deliberately empty. An unknown
 device therefore remains a normal musical MIDI input instead of accidentally
@@ -96,6 +119,9 @@ note or CC command, and save/load retains it.
 Encoder, press, and optional lock messages are separate so they cannot collide
 with continuous controls. All physical note and CC numbers must be valid MIDI
 data bytes (0–127), and an encoder press cannot reuse a command-button note.
+Learned page-cycle chords are stored as `page_cycle.modifier` and
+`page_cycle.trigger` values such as `cc.1.27`; the modifier and trigger must be
+different messages, while the trigger may deliberately reuse a normal mapping.
 
 Profiles may be partial. After one is loaded, `shr pads learn` asks only for
 continuous controls and encoder functions that are still empty; command-button

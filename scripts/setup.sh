@@ -421,7 +421,9 @@ alsa_ports() {
       port=$2
       if (client != "System" && client != "Midi Through" &&
           client !~ /^SHR-DAW/ && client !~ /^shs-/ && port != "") {
-        print client " " port
+        # Match the stable RtMidi/midir ALSA client:port-name form. Numeric
+        # client:port addresses are deliberately not persisted.
+        print client ":" port
       }
     }
   ' | awk '!seen[tolower($0)]++'
@@ -496,12 +498,16 @@ if ((${#cards[@]})) && ask_yes_no 'Select the ALSA card JACK should use on its n
 fi
 
 mapfile -t midi_sources < <(alsa_ports -i)
-choose_value 'Controller MIDI input (0 keeps keyboard-only fallback)' yes "${midi_sources[@]}"
+choose_value 'Control-surface MIDI input (0 for no hardware controller)' yes "${midi_sources[@]}"
 controller_input="$CHOSEN"
 if [[ -n "$controller_input" ]]; then
-  replace_values "$RUNTIME_CONFIG" midi.autoconnect true
   replace_values "$RUNTIME_CONFIG" midi.input "$controller_input"
   replace_values "$CONTROLLER_CONFIG" input "$controller_input"
+  if ask_yes_no 'Should unmatched notes/messages from this controller also play music?' yes; then
+    replace_values "$RUNTIME_CONFIG" midi.controller_musical_input true
+  else
+    replace_values "$RUNTIME_CONFIG" midi.controller_musical_input false
+  fi
   profile_result="$(SHSYNTH_STATE_DIR="$STATE_DIR" "$SHSYNTH_BIN" pads auto "$controller_input")"
   printf '%s\n' "$profile_result"
   if [[ "$profile_result" == *'no known profile'* ]] && \
@@ -509,10 +515,36 @@ if [[ -n "$controller_input" ]]; then
     SHSYNTH_STATE_DIR="$STATE_DIR" "$SHSYNTH_BIN" pads learn "$controller_input"
   fi
 else
-  replace_values "$RUNTIME_CONFIG" midi.autoconnect false
   replace_values "$RUNTIME_CONFIG" midi.input
+  replace_values "$RUNTIME_CONFIG" midi.controller_musical_input false
   replace_values "$CONTROLLER_CONFIG" input
-  printf 'No MIDI input selected; the computer keyboard remains available.\n'
+  printf 'No control surface selected; computer-keyboard control remains available.\n'
+fi
+
+performance_inputs=()
+while true; do
+  choose_value 'Performance-keyboard MIDI input (0 when finished)' yes "${midi_sources[@]}"
+  [[ -n "$CHOSEN" ]] || break
+  already_selected=false
+  for selected in "${performance_inputs[@]}"; do
+    if [[ "${selected,,}" == "${CHOSEN,,}" ]]; then
+      already_selected=true
+      break
+    fi
+  done
+  if [[ "$already_selected" == true ]]; then
+    printf 'That performance input is already selected.\n'
+  else
+    performance_inputs+=("$CHOSEN")
+  fi
+  ask_yes_no 'Add another performance MIDI input?' no || break
+done
+replace_values "$RUNTIME_CONFIG" midi.performance_input "${performance_inputs[@]}"
+if [[ -n "$controller_input" || ${#performance_inputs[@]} -gt 0 ]]; then
+  replace_values "$RUNTIME_CONFIG" midi.autoconnect true
+else
+  replace_values "$RUNTIME_CONFIG" midi.autoconnect false
+  printf 'No hardware MIDI input selected; the computer keyboard remains available.\n'
 fi
 if [[ -n "${SHSYNTH_PRESET_DIR:-}" ]]; then
   replace_values "$RUNTIME_CONFIG" synthv1.presets "$SHSYNTH_PRESET_DIR"

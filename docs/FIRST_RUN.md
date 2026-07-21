@@ -15,7 +15,8 @@ shr doctor
 shr
 ```
 
-The setup wizard selects English or German note spelling, installs four starter
+The setup wizard selects the control surface and performance keyboard inputs
+separately, selects English or German note spelling, installs four starter
 loops and ten cleared demo Projects, and finds ALSA MIDI and JACK audio ports. It can also
 download four private MusicRadar drum loops after showing the redistribution
 restriction. You can enter an exact port name if automatic detection is not
@@ -48,7 +49,9 @@ remains separate. Read
 
 - Use the configured control surface for the primary four-page/four-button
   menus and synth controls.
-- Add a MIDI keyboard to play velocity, chords, and live recordings.
+- Add one or more performance MIDI keyboards to play velocity, chords, and live
+  recordings. They bypass controller mappings even when note or CC numbers
+  overlap.
 - If the controller is not ready yet, use the computer keyboard fallback to
   navigate setup and enter tracker notes with `Z S X D C V G B H N J M`.
 - Open **FILES** in FT2 to load one of the seeded demo Projects; its `AUTO`

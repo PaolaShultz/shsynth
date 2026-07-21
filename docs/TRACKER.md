@@ -84,7 +84,7 @@ the usable inner area is 36×16 at `(2,2)`.
 
 ## Step editing
 
-Step entry accepts notes and chords from a MIDI controller. A chord fills up to
+Step entry accepts notes and chords from any configured musical input. A chord fills up to
 four lanes and keeps its velocities. The **ADD** controller page chooses a
 persistent advance of 1, 2, 4, or 8 rows for note/chord entry, blank, erase,
 and note-off. This makes evenly spaced bass notes and drum hits quick to enter;
@@ -143,7 +143,7 @@ in the draft and show an error.
 
 Choosing **PROGRAM** opens a full-height sound browser. A matching MIDI device
 profile adds the instrument's slot labels and sound names. Without a profile,
-all MIDI programs 1–128 remain available. Controller notes audition the
+all MIDI programs 1–128 remain available. Performance notes audition the
 draft sound on that page's exact target and selected-column channel. Confirm
 keeps the cell override without changing the column master; cancel restores
 the previous value and selection.
@@ -155,6 +155,9 @@ notes are placed on its four lanes and quantized to pattern rows. Each assigned
 lane auditions through that column's channel/instrument setup. During
 recording, those notes do not also pass to the loaded software synth. They are
 auditioned only through the page's hardware MIDI target and column channels.
+The source port, not a special MIDI channel, separates a performance keyboard
+from a control-only surface. A combined device retains channel-qualified
+controller mappings.
 
 Real-time recording is hardware-page-only. A page targeting a Pattern-owned
 synthv1 preset, or an `AUTO`/preferred page currently resolved to the internal

@@ -1,7 +1,7 @@
 # How SHR-DAW works
 
 SHR-DAW is a small music workstation built from several deliberately separate
-parts: one controller input, one managed software instrument, an FT2-style MIDI
+parts: role-separated controller/performance inputs, one managed software instrument, an FT2-style MIDI
 sequencer, a private WAV loop player, a synchronized raw multitrack recorder,
 and an optional owned final performance bus. This guide connects those parts and explains what the musician
 can do with them. For exact configuration keys use
@@ -40,10 +40,10 @@ synth/loop routes transactionally. `FINAL OUT`, final WAV, and playback then
 share the same post-limiter samples. They do not secretly include unrelated
 JACK clients or downstream interface processing.
 
-## One input, controls, and musical notes
+## Controller and performance input roles
 
-SHR-DAW opens one configured ALSA MIDI input. Messages are classified before
-they reach an instrument:
+SHR-DAW opens each exact ALSA source at most once, then classifies messages by
+the configured role before they reach an instrument:
 
 - menu buttons, the main encoder, encoder press, and the 12 mapped synthv1
   controls stay inside SHR-DAW;
@@ -51,16 +51,27 @@ they reach an instrument:
   are consumed only when note and optional channel both match, so releasing or
   pressing a menu pad cannot leak while the same note on another channel stays
   musical;
-- ordinary musical notes, velocity, and performance messages go to the active
-  live or tracker destination; and
+- performance-only inputs bypass every controller mapping; ordinary notes,
+  velocity-zero releases, sustain/modulation CCs, pitch bend, channel pressure,
+  polyphonic pressure, and other supported channel messages keep the musical
+  path;
+- a combined input consumes its mapped commands and passes unmatched musical
+  messages, while a control-only input suppresses unmatched traffic; and
 - pad lock can temporarily treat command pads as notes when that is wanted.
+
+Controller learning listens only to the selected controller source. Separate
+performance devices do not need special MIDI channels; channel-qualified
+mappings remain available for one combined port. Active-note ownership includes
+source, channel, and note, so one device's release, All Notes Off, disconnect,
+or route change cannot release an identical note still owned by another.
 
 The reviewed MiniLab factory mapping uses channel 10 for notes 36–43. Its
 captured User 1 program uses the keyboard's channel 1 and is therefore not used
 for commands. CC27 is DAW Shift, not an SHR pad-lock control.
 
-The captured 12-byte Arturia program notification SysEx is still forwarded by
-the generic musical route when an instrument is active. It is device metadata,
+On a combined input, the captured 12-byte Arturia program notification SysEx is
+still forwarded by the generic musical route when an instrument is active. A
+control-only input suppresses it with other unmatched traffic. It is device metadata,
 but SHR deliberately does not apply a manufacturer-wide SysEx filter: the
 current profile schema cannot distinguish that exact notification from other
 device traffic. There is no captured evidence that synthv1 acts on this foreign

@@ -69,7 +69,8 @@ its sounds.
 
 - Browse synthv1, Yoshimi, and FluidSynth sounds without layering managed
   engines.
-- Route one controller to software or external MIDI instruments.
+- Use one combined controller/keyboard, or separate control-surface and
+  performance-keyboard inputs, with multiple simultaneous performance sources.
 - Learn the master rotary first, then use it to browse optional controller
   mappings; each item keeps its first movement until the rotary moves on.
 - Optionally drive a controller arpeggiator from SHR's dedicated 24-PPQN

@@ -83,6 +83,7 @@ fn real_main() -> Result<()> {
         }
         "status" => {
             println!("{}", engine::status(&state));
+            print_midi_input_status(&runtime, &state);
             Ok(())
         }
         "doctor" => doctor(&runtime, &preset_dir, &state),
@@ -174,6 +175,7 @@ fn effects_checkpoint(
         &rack,
         &aux_routing,
     )?;
+    engine.bind_midi_lifecycle(router.lifecycle());
     let sample_rate = engine
         .audio_graph_sample_rate()
         .context("owned graph sample rate unavailable")?;
@@ -781,24 +783,41 @@ fn doctor(config: &config::RuntimeConfig, preset_dir: &Path, state: &Path) -> Re
         );
     }
     if config.midi_autoconnect {
-        let wanted = controller
-            .as_ref()
-            .and_then(|controller| controller.input_match.clone())
-            .map(|input| vec![input])
-            .unwrap_or_else(|| config.midi_input_matches.clone());
-        let ports = Command::new("aconnect")
-            .arg("-l")
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .map(|output| String::from_utf8_lossy(&output.stdout).to_lowercase())
-            .unwrap_or_default();
-        check(
-            wanted
-                .iter()
-                .any(|wanted| ports.contains(&wanted.to_lowercase())),
-            format!("MIDI input match: {}", wanted.join(", ")),
-        );
+        let default_controller = pads::PadConfig::default();
+        let controller = controller.as_ref().unwrap_or(&default_controller);
+        match engine::inspect_midi_inputs(config, controller) {
+            Ok(availability) => {
+                if let Some(controller) = availability.controller {
+                    check(
+                        controller.available(),
+                        format!("controller MIDI: {}", controller.description()),
+                    );
+                } else {
+                    println!("[--] controller MIDI: not configured");
+                }
+                if availability.performance.is_empty() {
+                    println!(
+                        "[--] performance MIDI: {}",
+                        if config.midi_controller_musical_input {
+                            "combined with controller/legacy input"
+                        } else {
+                            "not configured"
+                        }
+                    );
+                }
+                for performance in availability.performance {
+                    check(
+                        performance.available(),
+                        format!(
+                            "performance MIDI {}: {}",
+                            performance.wanted,
+                            performance.description()
+                        ),
+                    );
+                }
+            }
+            Err(error) => check(false, format!("MIDI input discovery: {error:#}")),
+        }
     }
     if config.controller_clock.enabled {
         match loop_player::controller_clock_outputs(&config.controller_clock.client_name) {
@@ -820,6 +839,42 @@ fn doctor(config: &config::RuntimeConfig, preset_dir: &Path, state: &Path) -> Re
         bail!("doctor found {problems} problem(s)");
     }
     Ok(())
+}
+
+fn print_midi_input_status(config: &config::RuntimeConfig, state: &Path) {
+    if !config.midi_autoconnect {
+        println!("Controller MIDI: disabled");
+        println!("Performance MIDI: disabled");
+        return;
+    }
+    let controller = pads::PadConfig::load(&state.join("controller.conf")).unwrap_or_default();
+    match engine::inspect_midi_inputs(config, &controller) {
+        Ok(availability) => {
+            println!(
+                "Controller MIDI: {}",
+                availability
+                    .controller
+                    .as_ref()
+                    .map(engine::MidiInputState::description)
+                    .unwrap_or_else(|| "not configured".into())
+            );
+            if availability.performance.is_empty() {
+                println!(
+                    "Performance MIDI: {}",
+                    if config.midi_controller_musical_input {
+                        "combined with controller/legacy input"
+                    } else {
+                        "not configured"
+                    }
+                );
+            } else {
+                for input in availability.performance {
+                    println!("Performance MIDI {}: {}", input.wanted, input.description());
+                }
+            }
+        }
+        Err(error) => println!("MIDI input discovery unavailable: {error:#}"),
+    }
 }
 
 fn command_exists(program: &str) -> bool {
@@ -896,7 +951,8 @@ fn ideas_command(
                 *backend = p.backend;
             }
             router.arm_pickup(&values);
-            let engine = engine::Engine::start(&p, state, router.output(), config)?;
+            let mut engine = engine::Engine::start(&p, state, router.output(), config)?;
+            engine.bind_midi_lifecycle(router.lifecycle());
             if engine.supports_parameter_reset() {
                 engine.set_mapped_parameters(&values)?;
             }
@@ -1008,6 +1064,11 @@ fn pads_command(args: &[String], state: &Path) -> Result<()> {
                 .map(|cc| format!("CC {cc}"))
                 .unwrap_or_else(|| "off".into());
             println!("encoder: turn {encoder_turn}, press {encoder_press}; pad lock {lock}");
+            if let (Some(modifier), Some(trigger)) =
+                (config.page_cycle_modifier, config.page_cycle_trigger)
+            {
+                println!("page-cycle chord: hold {modifier}, trigger {trigger}");
+            }
             let mut controls = config.controls.iter().collect::<Vec<_>>();
             controls.sort_by_key(|x| x.0);
             for (incoming, target) in controls {

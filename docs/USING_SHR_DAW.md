@@ -107,9 +107,11 @@ plus provenance live in the XDG demo directory.
   multistem take.
 - **FX Rack** shapes the managed instrument with source inserts, two parallel
   pre/post aux sends and wet returns, then a master rack and final meter.
-- **Routing** shows the current controller, tracker output/profile,
-  controller-clock, and audio-output state. It is deliberately read-only:
-  leave SHR and run `shr-setup` to change hardware routes safely.
+- **Routing** shows only MIDI endpoints currently visible to SHR plus the live
+  audio route. Configured but disconnected controller, performance, downstream
+  device-profile, and MIDI-output names are not presented as current
+  connections. It is deliberately read-only: leave SHR and run `shr-setup` to
+  change hardware preferences safely.
 - **MIDI Learn** opens directly from Home and learns rotary left, right, then
   click before browsing optional mappings.
 
@@ -118,7 +120,8 @@ has no matching reviewed profile, or has an incomplete learned encoder. The
 reason appears directly on Home. A learned controller is considered navigable
 once encoder turn and click work; skipped optional command mappings do not make
 it a failure. Opening Home never starts learning or sends MIDI, and saving a
-new mapping still requires confirmation in the isolated Learn workflow.
+new mapping still requires confirmation in the controller-isolated Learn
+workflow. Separate performance inputs are never candidates for learning.
 
 Home is a plain centered inverted-selection list. Other screens show their current
 controller page and available actions; empty actions and pages are hidden. The

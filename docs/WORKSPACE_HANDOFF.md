@@ -628,6 +628,20 @@ optional mapping. The learned encoder browses control and command roles; click
 saves the partial or complete learned profile and exits, while Esc cancels.
 Command roles are optional and infer the four-, five-, or eight-button layout
 instead of assuming the connected device has eight buttons.
+Dedicated page 1–4 roles and page-cycle are mutually exclusive in Learn: any
+learned dedicated page button bypasses page-cycle, while skipping all four
+offers the five-button page-cycle role. Page-cycle accepts either a twice-
+confirmed standalone button or a held modifier plus secondary control; the
+modifier press is not captured by itself, the trigger may reuse a normal
+mapping, and the runtime chord is latched once until modifier release.
+The physical-gesture lifecycle is explicit and timestamped: entry waits for
+controller quiet, relative turns and absolute controls settle on same-CC quiet,
+button roles wait for their matching release, and accepted `OK` feedback remains
+visible during that wait. A gesture cannot spill into the next role; absolute
+controls advance automatically, multi-packet browse turns move one role, and a
+save click is latched through its release. Retry clears only the current draft
+role, cancel never writes, and the selected controller's learn messages remain
+isolated from musical routing.
 The active private controller state is
 `user/state/shsynth/controller.conf`, using reviewed profile
 `arturia-minilab-3` and exact input `Minilab3:Minilab3 MIDI`; its pre-refresh
@@ -666,6 +680,37 @@ immediately, without the earlier manual transport restart. `/tmp` evidence is
 not expected to survive a reboot. DAW and User 1 were not repeated because the
 dedicated clock protocol and endpoint do not depend on controller program, and
 their no-clock behavior plus pad channels were already captured separately.
+
+## Role-separated MIDI inputs (2026-07-21 implementation)
+
+Runtime configuration v5 keeps `controller.conf input=` as the explicit
+control-surface selector and retains repeated `midi.input` as ordered legacy
+controller fallbacks. `midi.controller_musical_input` defaults true for old
+combined-device behavior; false makes unmatched controller traffic silent.
+Every repeated `midi.performance_input` is an independent musical source that
+bypasses controller mappings and learning. Exact controller/performance matches
+to the same ALSA port are merged before opening, so there is one subscription
+and no doubled event stream.
+
+The router now owns multiple independent connections and reports controller and
+performance availability separately. A missing or ambiguous role does not
+disable another available input or computer-keyboard operation. Active live
+notes are keyed by exact source plus source channel/note and reference-counted
+at each output destination. Velocity-zero releases, sustain, source/channel All
+Notes Off/All Sound Off, FT2 route changes, detected source disappearance,
+panic, stop, and router shutdown cannot let one input release another input's
+identical held note. Only opened/configured source routes toward SHR-owned synth
+destinations are considered for duplicate-direct-route cleanup.
+
+The setup wizard now selects the control surface, combined/control-only mode,
+and zero or more performance inputs separately while retaining its timestamped
+backups and atomic key replacement. `shr status`, `shr doctor`, and the Routing
+screen distinguish the roles. No current private controller configuration was
+rewritten by implementation or validation.
+The Routing screen is a live-only view: it omits configured names and device
+profiles when their controller/performance/MIDI endpoint is not currently
+visible. In particular, a remembered downstream DIN instrument profile is not
+evidence that the instrument itself is connected.
 
 ## Preset provenance decision
 

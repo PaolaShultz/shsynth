@@ -189,7 +189,15 @@ pub struct RuntimeConfig {
     pub startup_timeout: Duration,
     pub note_naming: NoteNaming,
     pub midi_autoconnect: bool,
+    /// Legacy controller fallbacks. These remain ordered alternatives rather
+    /// than multiple simultaneously opened inputs.
     pub midi_input_matches: Vec<String>,
+    /// Independent musical/performance sources. Every configured match is
+    /// opened when available.
+    pub midi_performance_input_matches: Vec<String>,
+    /// Preserve the original combined-controller behavior unless explicitly
+    /// disabled for a control-surface-only port.
+    pub midi_controller_musical_input: bool,
     pub audio_autoconnect: bool,
     pub audio_outputs: Vec<String>,
     /// Ordered internal-device fallbacks used only when `audio_outputs` is not
@@ -315,6 +323,8 @@ impl Default for RuntimeConfig {
             note_naming: NoteNaming::German,
             midi_autoconnect: false,
             midi_input_matches: Vec::new(),
+            midi_performance_input_matches: Vec::new(),
+            midi_controller_musical_input: true,
             audio_autoconnect: false,
             audio_outputs: Vec::new(),
             audio_internal_outputs: Vec::new(),
@@ -393,6 +403,7 @@ impl RuntimeConfig {
 
     fn merge(&mut self, text: &str, path: &Path) -> Result<()> {
         let mut saw_midi_input = false;
+        let mut saw_midi_performance_input = false;
         let mut saw_audio_output = false;
         let mut saw_audio_internal_output = false;
         let mut saw_yoshimi_roots = false;
@@ -500,6 +511,18 @@ impl RuntimeConfig {
                     if !value.is_empty() {
                         self.midi_input_matches.push(value.to_owned());
                     }
+                }
+                "midi.performance_input" => {
+                    replace_list_once(
+                        &mut self.midi_performance_input_matches,
+                        &mut saw_midi_performance_input,
+                    );
+                    if !value.is_empty() {
+                        self.midi_performance_input_matches.push(value.to_owned());
+                    }
+                }
+                "midi.controller_musical_input" => {
+                    self.midi_controller_musical_input = boolean(key, value)?
                 }
                 "audio.autoconnect" => self.audio_autoconnect = boolean(key, value)?,
                 "audio.output" => {
@@ -712,9 +735,8 @@ impl RuntimeConfig {
                 _ => bail!("{}:{}: unknown setting {key}", path.display(), line_no + 1),
             }
         }
-        if self.midi_autoconnect && self.midi_input_matches.is_empty() {
-            bail!("midi.autoconnect requires at least one midi.input");
-        }
+        // The controller selector lives in controller.conf, so an empty runtime
+        // input list can still be a valid controller-only configuration.
         if self.audio_autoconnect && self.audio_outputs.is_empty() {
             bail!("audio.autoconnect requires at least one audio.output");
         }
@@ -802,7 +824,7 @@ impl RuntimeConfig {
             fs::create_dir_all(parent)?;
         }
         let mut text = format!(
-            "# SHR-DAW runtime and routing configuration v4\n\
+            "# SHR-DAW runtime and routing configuration v5\n\
              synthv1.command={}\n\
              synthv1.client={}\n\
              synth.startup_timeout_ms={}\n\
@@ -854,6 +876,16 @@ impl RuntimeConfig {
         }
         if self.midi_input_matches.is_empty() {
             text.push_str("midi.input=\n");
+        }
+        text.push_str(&format!(
+            "midi.controller_musical_input={}\n",
+            self.midi_controller_musical_input
+        ));
+        for input in &self.midi_performance_input_matches {
+            text.push_str(&format!("midi.performance_input={input}\n"));
+        }
+        if self.midi_performance_input_matches.is_empty() {
+            text.push_str("midi.performance_input=\n");
         }
         text.push_str(&format!("audio.autoconnect={}\n", self.audio_autoconnect));
         for output in &self.audio_outputs {
@@ -1092,6 +1124,8 @@ mod tests {
         let config = RuntimeConfig::load(&path).unwrap();
         assert_eq!(config.client_name, "my-synth");
         assert_eq!(config.midi_input_matches, ["Controller X"]);
+        assert!(config.midi_performance_input_matches.is_empty());
+        assert!(config.midi_controller_musical_input);
         assert_eq!(config.audio_outputs, ["usb:out_1"]);
         assert_eq!(config.yoshimi.backend.command, "yoshimi");
         assert_eq!(config.fluidsynth.backend.command, "fluidsynth");
@@ -1338,6 +1372,7 @@ mod tests {
         config.yoshimi.categories.clear();
         config.fluidsynth.soundfonts.clear();
         config.midi_input_matches.clear();
+        config.midi_performance_input_matches.clear();
         config.audio_outputs.clear();
         config.audio_internal_outputs.clear();
         config.audio_headphone_output = None;
@@ -1351,12 +1386,76 @@ mod tests {
         assert!(loaded.yoshimi.categories.is_empty());
         assert!(loaded.fluidsynth.soundfonts.is_empty());
         assert!(loaded.midi_input_matches.is_empty());
+        assert!(loaded.midi_performance_input_matches.is_empty());
         assert!(loaded.audio_outputs.is_empty());
         assert!(loaded.audio_internal_outputs.is_empty());
         assert!(loaded.audio_headphone_output.is_none());
         assert!(loaded.external_midi.percussion_notes.is_empty());
         assert!(loaded.capture.inputs.is_empty());
         assert!(loaded.loop_player.outputs.is_empty());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn performance_inputs_and_controller_mode_parse_and_round_trip() {
+        let path = std::env::temp_dir().join(format!(
+            "shsynth-midi-input-roles-{}.conf",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            "midi.autoconnect=true\nmidi.input=Surface\nmidi.controller_musical_input=false\nmidi.performance_input=Keyboard A\nmidi.performance_input=Keyboard B\n",
+        )
+        .unwrap();
+        let config = RuntimeConfig::load(&path).unwrap();
+        assert_eq!(config.midi_input_matches, ["Surface"]);
+        assert_eq!(
+            config.midi_performance_input_matches,
+            ["Keyboard A", "Keyboard B"]
+        );
+        assert!(!config.midi_controller_musical_input);
+        config.save(&path).unwrap();
+        let loaded = RuntimeConfig::load(&path).unwrap();
+        assert_eq!(
+            loaded.midi_performance_input_matches,
+            config.midi_performance_input_matches
+        );
+        assert!(!loaded.midi_controller_musical_input);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn performance_only_configuration_does_not_require_legacy_controller_input() {
+        let path = std::env::temp_dir().join(format!(
+            "shsynth-midi-performance-only-{}.conf",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            "midi.autoconnect=true\nmidi.input=\nmidi.controller_musical_input=false\nmidi.performance_input=Keyboard\n",
+        )
+        .unwrap();
+        let config = RuntimeConfig::load(&path).unwrap();
+        assert!(config.midi_input_matches.is_empty());
+        assert_eq!(config.midi_performance_input_matches, ["Keyboard"]);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn controller_conf_only_configuration_does_not_require_runtime_input() {
+        let path = std::env::temp_dir().join(format!(
+            "shsynth-controller-conf-only-{}.conf",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            "midi.autoconnect=true\nmidi.input=\nmidi.performance_input=\n",
+        )
+        .unwrap();
+        let config = RuntimeConfig::load(&path).unwrap();
+        assert!(config.midi_autoconnect);
+        assert!(config.midi_input_matches.is_empty());
+        assert!(config.midi_performance_input_matches.is_empty());
         let _ = fs::remove_file(path);
     }
 

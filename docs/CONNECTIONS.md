@@ -30,13 +30,32 @@ Those devices proved the workflow, but SHR-DAW is not designed around them.
 
 ## MIDI input
 
-SHR-DAW opens the configured controller input once. It consumes menu buttons,
-the main encoder, and mapped synth controls inside the application. Musical
-notes pass to the selected destination.
+SHR-DAW treats a control surface and performance keyboards as separate roles.
+The controller supplies menu buttons, the main encoder, pads, and mapped synth
+controls. Every configured performance input bypasses those mappings, so a
+keyboard note or CC cannot accidentally invoke a menu command. The controller
+can either pass its unmatched musical messages (the compatible default for one
+combined device) or be explicitly control-only.
+
+If both roles resolve to the same exact ALSA port, SHR opens it once and
+classifies its messages as the established combined-device path. If they
+resolve to different ports, SHR opens separate connections. Repeated
+performance inputs are simultaneous sources; repeated legacy `midi.input`
+entries remain ordered controller fallbacks. Missing inputs fail independently,
+and computer-keyboard control remains available.
+
+Source identity remains attached to active notes. Two keyboards may hold the
+same channel/note without either Note Off releasing the other's note. Route
+changes, source loss, panic, stop, and shutdown release the affected ownership;
+All Notes Off, All Sound Off, and sustain are also isolated per source/channel.
 
 Do not also connect the controller directly to the same synth with a desktop
 MIDI patching tool. Two paths can cause doubled notes. Use `shr-setup` or the
 configuration files to choose the route in one place.
+
+A USB audio/MIDI interface may be full-duplex: its MIDI input can be a
+performance source while its MIDI output remains an FT2 destination. Input and
+`external_midi.output` are independent directions.
 
 Some distributions enable a standalone FluidSynth daemon or `amidiminder`,
 which connects hardware and application MIDI ports broadly. Accept the

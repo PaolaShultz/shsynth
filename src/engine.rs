@@ -31,7 +31,7 @@ pub enum MidiEvent {
     Pad(PadAction, bool),
     Encoder(EncoderAction),
     PadLock(bool),
-    Learn(Vec<u8>),
+    Learn { received: Instant, bytes: Vec<u8> },
     Error(String),
 }
 
@@ -49,6 +49,7 @@ pub struct Engine {
     final_recording_last: crate::audio_recorder::FinalMixRecorderStatus,
     audio_graph_fallback: Option<String>,
     audio_route_notice: Option<String>,
+    midi_lifecycle: Option<MidiLifecycle>,
 }
 
 pub type SharedOutput = Arc<Mutex<Option<MidiOutputConnection>>>;
@@ -60,6 +61,31 @@ pub type SharedPlaybackScale = Arc<Mutex<Option<crate::scale::Scale>>>;
 pub type SharedControllerConfig = Arc<RwLock<PadConfig>>;
 pub type SharedLearnMode = Arc<AtomicBool>;
 pub type SharedFxControlMode = Arc<AtomicBool>;
+
+#[derive(Clone, Debug)]
+pub struct MidiLifecycle {
+    state: Arc<Mutex<LiveMidiState>>,
+}
+
+impl Default for MidiLifecycle {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(LiveMidiState::default())),
+        }
+    }
+}
+
+impl MidiLifecycle {
+    fn new(state: Arc<Mutex<LiveMidiState>>) -> Self {
+        Self { state }
+    }
+
+    pub fn clear_after_all_notes_off(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            *state = LiveMidiState::default();
+        }
+    }
+}
 
 pub struct TrackerRouteConfig<'a> {
     pub enabled: bool,
@@ -102,6 +128,82 @@ struct CallbackRouting {
     controller: SharedControllerConfig,
     learn_mode: SharedLearnMode,
     fx_control_mode: SharedFxControlMode,
+    live_state: Arc<Mutex<LiveMidiState>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct InputRoles {
+    controller: bool,
+    performance: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PlannedMidiInput {
+    name: String,
+    roles: InputRoles,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MidiInputState {
+    pub wanted: String,
+    pub resolved: Option<String>,
+    pub error: Option<String>,
+}
+
+impl MidiInputState {
+    pub fn available(&self) -> bool {
+        self.resolved.is_some() && self.error.is_none()
+    }
+
+    pub fn description(&self) -> String {
+        match (&self.resolved, &self.error) {
+            (Some(name), None) => format!("connected · {name}"),
+            (_, Some(error)) => format!("unavailable · {error}"),
+            (None, None) => "not configured".into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MidiInputAvailability {
+    pub controller: Option<MidiInputState>,
+    pub performance: Vec<MidiInputState>,
+}
+
+impl MidiInputAvailability {
+    pub fn controller_available(&self) -> bool {
+        self.controller
+            .as_ref()
+            .is_some_and(MidiInputState::available)
+    }
+
+    #[cfg(test)]
+    pub fn performance_available(&self) -> usize {
+        self.performance
+            .iter()
+            .filter(|state| state.available())
+            .count()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct MidiInputPlan {
+    inputs: Vec<PlannedMidiInput>,
+    availability: MidiInputAvailability,
+}
+
+#[derive(Debug, Default)]
+struct LiveMidiState {
+    tracker_revision: u64,
+    tracker_next_column: std::collections::BTreeMap<String, usize>,
+    tracker_programs: std::collections::BTreeMap<(crate::sequencer::PageTarget, u8), u8>,
+    tracker_notes:
+        crate::note_lifecycle::SourceNoteLifecycle<String, (crate::sequencer::PageTarget, u8, u8)>,
+    tracker_destinations: std::collections::BTreeMap<(crate::sequencer::PageTarget, u8, u8), usize>,
+    direct_notes: crate::note_lifecycle::SourceNoteLifecycle<String, (u8, u8)>,
+    direct_destinations: std::collections::BTreeMap<(u8, u8), usize>,
+    sustain_sources: std::collections::BTreeSet<(String, u8)>,
+    sustain_counts: [usize; 16],
 }
 
 impl Default for TrackerRoute {
@@ -188,6 +290,7 @@ impl TrackerRoute {
     }
 }
 
+#[cfg(test)]
 fn tracker_route_consumes_note(route: Option<&TrackerRoute>, message: &[u8]) -> bool {
     route.is_some_and(|route| route.enabled && valid_note_message(message))
 }
@@ -211,7 +314,7 @@ fn invalid_note_message(message: &[u8]) -> bool {
 }
 
 pub struct MidiRouter {
-    _input: MidiInputConnection<()>,
+    _inputs: Vec<MidiInputConnection<()>>,
     output: SharedOutput,
     pickup: SharedPickup,
     backend: SharedBackend,
@@ -221,6 +324,11 @@ pub struct MidiRouter {
     controller: SharedControllerConfig,
     learn_mode: SharedLearnMode,
     fx_control_mode: SharedFxControlMode,
+    live_state: Arc<Mutex<LiveMidiState>>,
+    availability: MidiInputAvailability,
+    tx: Sender<MidiEvent>,
+    monitor_stop: Arc<AtomicBool>,
+    monitor_thread: Option<thread::JoinHandle<()>>,
 }
 
 impl MidiRouter {
@@ -238,39 +346,75 @@ impl MidiRouter {
         let tracker_route = Arc::new(Mutex::new(TrackerRoute::default()));
         let tracker_input = Arc::new(Mutex::new(None));
         let playback_scale = Arc::new(Mutex::new(None));
-        let mut last_error = None;
-        let mut input = None;
-        for _ in 0..25 {
-            match connect_midi_input(
-                tx.clone(),
-                Arc::clone(&controller),
-                config,
-                CallbackRouting {
-                    output: Arc::clone(&output),
-                    pickup: Arc::clone(&pickup),
-                    backend: Arc::clone(&backend),
-                    tracker_route: Arc::clone(&tracker_route),
-                    tracker_input: Arc::clone(&tracker_input),
-                    playback_scale: Arc::clone(&playback_scale),
-                    controller: Arc::clone(&controller),
-                    learn_mode: Arc::clone(&learn_mode),
-                    fx_control_mode: Arc::clone(&fx_control_mode),
-                },
-            ) {
+        let live_state = Arc::new(Mutex::new(LiveMidiState::default()));
+        let pads_snapshot = controller
+            .read()
+            .map(|pads| pads.clone())
+            .unwrap_or_default();
+        let names = midi_input_names()?;
+        let mut plan = plan_midi_inputs(&names, &pads_snapshot, config);
+        let mut inputs = Vec::new();
+        let mut opened_names = Vec::new();
+        for planned in plan.inputs.clone() {
+            let routing = CallbackRouting {
+                output: Arc::clone(&output),
+                pickup: Arc::clone(&pickup),
+                backend: Arc::clone(&backend),
+                tracker_route: Arc::clone(&tracker_route),
+                tracker_input: Arc::clone(&tracker_input),
+                playback_scale: Arc::clone(&playback_scale),
+                controller: Arc::clone(&controller),
+                learn_mode: Arc::clone(&learn_mode),
+                fx_control_mode: Arc::clone(&fx_control_mode),
+                live_state: Arc::clone(&live_state),
+            };
+            match connect_midi_input(tx.clone(), &planned, config, routing) {
                 Ok(connection) => {
-                    input = Some(connection);
-                    break;
+                    opened_names.push(planned.name.clone());
+                    inputs.push(connection);
                 }
-                Err(error) => {
-                    last_error = Some(error);
-                    thread::sleep(Duration::from_millis(200));
-                }
+                Err(error) => mark_input_open_error(
+                    &mut plan.availability,
+                    &planned,
+                    format!("{}: {error:#}", planned.name),
+                ),
             }
         }
-        let input =
-            input.ok_or_else(|| last_error.unwrap_or_else(|| anyhow!("MIDI input unavailable")))?;
+        let monitor_stop = Arc::new(AtomicBool::new(false));
+        let monitor_thread = (!opened_names.is_empty()).then(|| {
+            let stop = Arc::clone(&monitor_stop);
+            let state = Arc::clone(&live_state);
+            let output = Arc::clone(&output);
+            let tracker_input = Arc::clone(&tracker_input);
+            let tx = tx.clone();
+            thread::spawn(move || {
+                let mut disconnected = std::collections::BTreeSet::new();
+                while !stop.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(250));
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let visible = midi_input_names().unwrap_or_default();
+                    for source in &opened_names {
+                        if visible.iter().any(|name| name == source) {
+                            continue;
+                        }
+                        if disconnected.insert(source.clone()) {
+                            let deliveries = state
+                                .lock()
+                                .map(|mut state| release_source(&mut state, source))
+                                .unwrap_or_default();
+                            deliver_midi(deliveries, Instant::now(), &tx, &output, &tracker_input);
+                            let _ = tx.send(MidiEvent::Error(format!(
+                                "MIDI input disconnected: {source}"
+                            )));
+                        }
+                    }
+                }
+            })
+        });
         Ok(Self {
-            _input: input,
+            _inputs: inputs,
             output,
             pickup,
             backend,
@@ -280,6 +424,11 @@ impl MidiRouter {
             controller,
             learn_mode,
             fx_control_mode,
+            live_state,
+            availability: plan.availability,
+            tx,
+            monitor_stop,
+            monitor_thread,
         })
     }
 
@@ -319,10 +468,38 @@ impl MidiRouter {
         Arc::clone(&self.fx_control_mode)
     }
 
+    pub fn availability(&self) -> &MidiInputAvailability {
+        &self.availability
+    }
+
+    pub fn lifecycle(&self) -> MidiLifecycle {
+        MidiLifecycle::new(Arc::clone(&self.live_state))
+    }
+
     pub fn arm_pickup(&self, values: &std::collections::HashMap<u8, f32>) {
         if let Ok(mut pickup) = self.pickup.lock() {
             pickup.arm(values);
         }
+    }
+}
+
+impl Drop for MidiRouter {
+    fn drop(&mut self) {
+        self.monitor_stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.monitor_thread.take() {
+            let _ = thread.join();
+        }
+        let deliveries = self
+            .live_state
+            .lock()
+            .map_or_else(|_| Vec::new(), |mut state| release_all_inputs(&mut state));
+        deliver_midi(
+            deliveries,
+            Instant::now(),
+            &self.tx,
+            &self.output,
+            &self.tracker_input,
+        );
     }
 }
 
@@ -433,12 +610,10 @@ impl Engine {
                 &config.external_midi.client_name,
                 &config.external_midi.output_match,
             );
-            let input_matches = controller
-                .input_match
-                .iter()
-                .chain(config.midi_input_matches.iter());
-            for source in input_matches {
-                disconnect_direct_midi(source, &backend_config.client_name);
+            if let Ok(names) = midi_input_names() {
+                for source in plan_midi_inputs(&names, &controller, config).inputs {
+                    disconnect_direct_midi(&source.name, &backend_config.client_name);
+                }
             }
             fs::write(
                 state.join("current"),
@@ -476,6 +651,7 @@ impl Engine {
             final_recording_last: crate::audio_recorder::FinalMixRecorderStatus::default(),
             audio_graph_fallback,
             audio_route_notice,
+            midi_lifecycle: None,
         };
         if preset.backend == BackendKind::FluidSynth {
             engine.select_fluidsynth(preset)?;
@@ -485,6 +661,10 @@ impl Engine {
 
     pub fn backend(&self) -> BackendKind {
         self.backend
+    }
+
+    pub fn bind_midi_lifecycle(&mut self, lifecycle: MidiLifecycle) {
+        self.midi_lifecycle = Some(lifecycle);
     }
 
     pub fn alive(&mut self) -> bool {
@@ -669,6 +849,9 @@ impl Engine {
     pub fn panic(&self) {
         for message in crate::recording::all_notes_off() {
             let _ = self.send(&message);
+        }
+        if let Some(lifecycle) = &self.midi_lifecycle {
+            lifecycle.clear_after_all_notes_off();
         }
     }
 
@@ -976,9 +1159,437 @@ fn write_synthv1_config(home: &Path, controller: &PadConfig) -> Result<()> {
     Ok(())
 }
 
+fn midi_input_names() -> Result<Vec<String>> {
+    let input = MidiInput::new("SHR-DAW MIDI discovery")?;
+    input
+        .ports()
+        .iter()
+        .map(|port| input.port_name(port).map_err(anyhow::Error::from))
+        .collect()
+}
+
+pub fn inspect_midi_inputs(
+    config: &RuntimeConfig,
+    pads: &PadConfig,
+) -> Result<MidiInputAvailability> {
+    Ok(plan_midi_inputs(&midi_input_names()?, pads, config).availability)
+}
+
+fn plan_midi_inputs(names: &[String], pads: &PadConfig, config: &RuntimeConfig) -> MidiInputPlan {
+    let mut plan = MidiInputPlan::default();
+    let controller_wanted = pads
+        .input_match
+        .as_ref()
+        .map(|wanted| vec![wanted.clone()])
+        .unwrap_or_else(|| config.midi_input_matches.clone());
+    if !controller_wanted.is_empty() {
+        let mut state = MidiInputState {
+            wanted: controller_wanted.join(", "),
+            resolved: None,
+            error: None,
+        };
+        for wanted in &controller_wanted {
+            match unique_name_match(names, wanted, "controller MIDI input") {
+                Ok(Some(index)) => {
+                    let name = names[index].clone();
+                    state.resolved = Some(name.clone());
+                    merge_planned_input(
+                        &mut plan.inputs,
+                        name,
+                        InputRoles {
+                            controller: true,
+                            performance: config.midi_controller_musical_input,
+                        },
+                    );
+                    break;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    state.error = Some(error.to_string());
+                    break;
+                }
+            }
+        }
+        if state.resolved.is_none() && state.error.is_none() {
+            state.error = Some(format!("not found (wanted: {})", state.wanted));
+        }
+        plan.availability.controller = Some(state);
+    }
+    for wanted in &config.midi_performance_input_matches {
+        let mut state = MidiInputState {
+            wanted: wanted.clone(),
+            resolved: None,
+            error: None,
+        };
+        match unique_name_match(names, wanted, "performance MIDI input") {
+            Ok(Some(index)) => {
+                let name = names[index].clone();
+                state.resolved = Some(name.clone());
+                merge_planned_input(
+                    &mut plan.inputs,
+                    name,
+                    InputRoles {
+                        controller: false,
+                        performance: true,
+                    },
+                );
+            }
+            Ok(None) => state.error = Some(format!("not found (wanted: {wanted})")),
+            Err(error) => state.error = Some(error.to_string()),
+        }
+        plan.availability.performance.push(state);
+    }
+    plan
+}
+
+fn merge_planned_input(inputs: &mut Vec<PlannedMidiInput>, name: String, roles: InputRoles) {
+    if let Some(existing) = inputs.iter_mut().find(|input| input.name == name) {
+        existing.roles.controller |= roles.controller;
+        existing.roles.performance |= roles.performance;
+    } else {
+        inputs.push(PlannedMidiInput { name, roles });
+    }
+}
+
+fn mark_input_open_error(
+    availability: &mut MidiInputAvailability,
+    planned: &PlannedMidiInput,
+    error: String,
+) {
+    if planned.roles.controller {
+        if let Some(state) = availability.controller.as_mut() {
+            state.error = Some(error.clone());
+        }
+    }
+    if planned.roles.performance {
+        for state in &mut availability.performance {
+            if state.resolved.as_deref() == Some(&planned.name) {
+                state.error = Some(error.clone());
+            }
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum MidiDelivery {
+    Raw(Vec<u8>),
+    Direct(Vec<u8>),
+    Tracker(crate::sequencer::PageTarget, Vec<u8>),
+}
+
+fn controller_allows_musical(
+    roles: InputRoles,
+    mapped_control: bool,
+    forced_note_release: bool,
+) -> bool {
+    roles.performance || mapped_control || forced_note_release
+}
+
+fn controller_learning_owns_message(roles: InputRoles, learning: bool) -> bool {
+    roles.controller && learning
+}
+
+fn decrement_destination<K: Ord + Clone>(
+    counts: &mut std::collections::BTreeMap<K, usize>,
+    destination: &K,
+) -> bool {
+    let Some(count) = counts.get_mut(destination) else {
+        return true;
+    };
+    *count = count.saturating_sub(1);
+    if *count == 0 {
+        counts.remove(destination);
+        true
+    } else {
+        false
+    }
+}
+
+fn release_tracker_notes(
+    state: &mut LiveMidiState,
+    notes: Vec<(crate::sequencer::PageTarget, u8, u8)>,
+) -> Vec<MidiDelivery> {
+    notes
+        .into_iter()
+        .filter_map(|destination| {
+            let (target, channel, note) = destination.clone();
+            decrement_destination(&mut state.tracker_destinations, &destination).then(|| {
+                let message = vec![0x80 | channel, note, 0];
+                vec![
+                    MidiDelivery::Raw(message.clone()),
+                    MidiDelivery::Tracker(target, message),
+                ]
+            })
+        })
+        .flatten()
+        .collect()
+}
+
+fn release_direct_notes(state: &mut LiveMidiState, notes: Vec<(u8, u8)>) -> Vec<MidiDelivery> {
+    notes
+        .into_iter()
+        .filter_map(|destination @ (channel, note)| {
+            decrement_destination(&mut state.direct_destinations, &destination).then(|| {
+                let message = vec![0x80 | channel, note, 0];
+                vec![
+                    MidiDelivery::Raw(message.clone()),
+                    MidiDelivery::Direct(message),
+                ]
+            })
+        })
+        .flatten()
+        .collect()
+}
+
+fn release_source_channel(
+    state: &mut LiveMidiState,
+    source: &String,
+    channel: u8,
+) -> Vec<MidiDelivery> {
+    let tracker = state.tracker_notes.drain_source_channel(source, channel);
+    let direct = state.direct_notes.drain_source_channel(source, channel);
+    let mut deliveries = release_tracker_notes(state, tracker);
+    deliveries.extend(release_direct_notes(state, direct));
+    if state.sustain_sources.remove(&(source.clone(), channel)) {
+        state.sustain_counts[usize::from(channel)] =
+            state.sustain_counts[usize::from(channel)].saturating_sub(1);
+        if state.sustain_counts[usize::from(channel)] == 0 {
+            let message = vec![0xb0 | channel, 64, 0];
+            deliveries.push(MidiDelivery::Raw(message.clone()));
+            deliveries.push(MidiDelivery::Direct(message));
+        }
+    }
+    deliveries
+}
+
+fn release_source(state: &mut LiveMidiState, source: &String) -> Vec<MidiDelivery> {
+    let tracker = state.tracker_notes.drain_source(source);
+    let direct = state.direct_notes.drain_source(source);
+    let mut deliveries = release_tracker_notes(state, tracker);
+    deliveries.extend(release_direct_notes(state, direct));
+    for channel in 0..16u8 {
+        if state.sustain_sources.remove(&(source.clone(), channel)) {
+            state.sustain_counts[usize::from(channel)] =
+                state.sustain_counts[usize::from(channel)].saturating_sub(1);
+            if state.sustain_counts[usize::from(channel)] == 0 {
+                let message = vec![0xb0 | channel, 64, 0];
+                deliveries.push(MidiDelivery::Raw(message.clone()));
+                deliveries.push(MidiDelivery::Direct(message));
+            }
+        }
+    }
+    state.tracker_next_column.remove(source);
+    deliveries
+}
+
+fn release_all_inputs(state: &mut LiveMidiState) -> Vec<MidiDelivery> {
+    let tracker = state.tracker_notes.drain();
+    let mut deliveries = release_tracker_notes(state, tracker);
+    let direct = state.direct_notes.drain();
+    deliveries.extend(release_direct_notes(state, direct));
+    for channel in 0..16u8 {
+        if state.sustain_counts[usize::from(channel)] > 0 {
+            let message = vec![0xb0 | channel, 64, 0];
+            deliveries.push(MidiDelivery::Raw(message.clone()));
+            deliveries.push(MidiDelivery::Direct(message));
+        }
+    }
+    state.sustain_sources.clear();
+    state.sustain_counts.fill(0);
+    state.tracker_next_column.clear();
+    state.tracker_programs.clear();
+    deliveries
+}
+
+fn route_live_message(
+    state: &mut LiveMidiState,
+    source: &String,
+    message: &[u8],
+    route: Option<&TrackerRoute>,
+    playback_scale: Option<crate::scale::Scale>,
+) -> Vec<MidiDelivery> {
+    let mut deliveries = Vec::new();
+    let revision = route.map_or(0, |route| route.revision);
+    if revision != state.tracker_revision {
+        let tracker = state.tracker_notes.drain();
+        deliveries.extend(release_tracker_notes(state, tracker));
+        let direct = state.direct_notes.drain();
+        deliveries.extend(release_direct_notes(state, direct));
+        state.tracker_next_column.clear();
+        state.tracker_programs.clear();
+        state.tracker_revision = revision;
+    }
+    let status = message.first().copied().unwrap_or(0);
+    let channel = status & 0x0f;
+    if message.len() == 3 && status & 0xf0 == 0xb0 && matches!(message[1], 120 | 123) {
+        deliveries.extend(release_source_channel(state, source, channel));
+        return deliveries;
+    }
+    if valid_note_message(message) && route.is_some_and(|route| route.enabled) {
+        let source_note = message[1];
+        let note_off = status & 0xf0 == 0x80 || message[2] == 0;
+        if note_off {
+            if let Some(destination) = state.tracker_notes.note_off(source, channel, source_note) {
+                let (target, output_channel, output_note) = destination.clone();
+                if decrement_destination(&mut state.tracker_destinations, &destination) {
+                    let output = vec![status & 0xf0 | output_channel, output_note, message[2]];
+                    deliveries.push(MidiDelivery::Raw(output.clone()));
+                    deliveries.push(MidiDelivery::Tracker(target, output));
+                }
+            }
+            return deliveries;
+        }
+        let route = route.expect("enabled tracker route");
+        let Some(mapped_note) = route.mapped_note(source_note) else {
+            return deliveries;
+        };
+        let next = state
+            .tracker_next_column
+            .entry(source.clone())
+            .or_insert(route.start_column);
+        let column = route.column(*next);
+        *next = (*next + 1) % crate::sequencer::LANES_PER_PAGE;
+        let destination = (route.target.clone(), column.channel, mapped_note);
+        state
+            .tracker_notes
+            .note_on(source, channel, source_note, destination.clone());
+        let destination_count = state
+            .tracker_destinations
+            .entry(destination.clone())
+            .or_default();
+        let first_owner = *destination_count == 0;
+        *destination_count += 1;
+        if !first_owner {
+            return deliveries;
+        }
+        if let Some(program) = column.program.filter(|program| {
+            state
+                .tracker_programs
+                .get(&(route.target.clone(), column.channel))
+                != Some(program)
+        }) {
+            match route.bank_select {
+                crate::config::BankSelectMode::Off => {}
+                crate::config::BankSelectMode::Cc0 => deliveries.push(MidiDelivery::Tracker(
+                    route.target.clone(),
+                    vec![0xb0 | column.channel, 0, column.bank_msb],
+                )),
+                crate::config::BankSelectMode::Cc0Cc32 => {
+                    deliveries.push(MidiDelivery::Tracker(
+                        route.target.clone(),
+                        vec![0xb0 | column.channel, 0, column.bank_msb],
+                    ));
+                    deliveries.push(MidiDelivery::Tracker(
+                        route.target.clone(),
+                        vec![0xb0 | column.channel, 32, column.bank_lsb],
+                    ));
+                }
+            }
+            deliveries.push(MidiDelivery::Tracker(
+                route.target.clone(),
+                vec![0xc0 | column.channel, program],
+            ));
+            state
+                .tracker_programs
+                .insert((route.target.clone(), column.channel), program);
+        }
+        let output = vec![status & 0xf0 | column.channel, mapped_note, message[2]];
+        deliveries.push(MidiDelivery::Raw(output.clone()));
+        deliveries.push(MidiDelivery::Tracker(route.target.clone(), output));
+        return deliveries;
+    }
+    if valid_note_message(message) {
+        if !playback_filter_allows(playback_scale, message) {
+            return deliveries;
+        }
+        let note = message[1];
+        let destination = (channel, note);
+        let note_off = status & 0xf0 == 0x80 || message[2] == 0;
+        if note_off {
+            let owned = state.direct_notes.note_off(source, channel, note);
+            if owned.is_some() {
+                if !decrement_destination(&mut state.direct_destinations, &destination) {
+                    return deliveries;
+                }
+            } else if state.direct_destinations.contains_key(&destination) {
+                return deliveries;
+            }
+        } else {
+            state
+                .direct_notes
+                .note_on(source, channel, note, destination);
+            let destination_count = state.direct_destinations.entry(destination).or_default();
+            let first_owner = *destination_count == 0;
+            *destination_count += 1;
+            if !first_owner {
+                return deliveries;
+            }
+        }
+        deliveries.push(MidiDelivery::Raw(message.to_vec()));
+        deliveries.push(MidiDelivery::Direct(message.to_vec()));
+        return deliveries;
+    }
+    if message.len() == 3 && status & 0xf0 == 0xb0 && message[1] == 64 {
+        let key = (source.clone(), channel);
+        if message[2] >= 64 {
+            if state.sustain_sources.insert(key) {
+                state.sustain_counts[usize::from(channel)] += 1;
+                if state.sustain_counts[usize::from(channel)] > 1 {
+                    return deliveries;
+                }
+            } else {
+                return deliveries;
+            }
+        } else if state.sustain_sources.remove(&key) {
+            state.sustain_counts[usize::from(channel)] =
+                state.sustain_counts[usize::from(channel)].saturating_sub(1);
+            if state.sustain_counts[usize::from(channel)] > 0 {
+                return deliveries;
+            }
+        } else if state.sustain_counts[usize::from(channel)] > 0 {
+            return deliveries;
+        }
+    }
+    deliveries.push(MidiDelivery::Raw(message.to_vec()));
+    deliveries.push(MidiDelivery::Direct(message.to_vec()));
+    deliveries
+}
+
+fn deliver_midi(
+    deliveries: Vec<MidiDelivery>,
+    received: Instant,
+    tx: &Sender<MidiEvent>,
+    output: &SharedOutput,
+    tracker_input: &SharedTrackerInput,
+) {
+    for delivery in deliveries {
+        match delivery {
+            MidiDelivery::Raw(bytes) => {
+                let _ = tx.send(MidiEvent::Raw { received, bytes });
+            }
+            MidiDelivery::Direct(bytes) => {
+                if let Ok(mut output) = output.lock() {
+                    if let Some(output) = output.as_mut() {
+                        if let Err(error) = output.send(&bytes) {
+                            let _ = tx.send(MidiEvent::Error(format!("MIDI forward: {error}")));
+                        }
+                    }
+                }
+            }
+            MidiDelivery::Tracker(target, bytes) => {
+                if let Ok(input) = tracker_input.lock() {
+                    if let Some(input) = input.as_ref() {
+                        input.send(&target, &bytes);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn connect_midi_input(
     tx: Sender<MidiEvent>,
-    controller: SharedControllerConfig,
+    planned: &PlannedMidiInput,
     config: &RuntimeConfig,
     routing: CallbackRouting,
 ) -> Result<MidiInputConnection<()>> {
@@ -992,11 +1603,8 @@ fn connect_midi_input(
         controller: callback_controller,
         learn_mode,
         fx_control_mode,
+        live_state,
     } = routing;
-    let pads = controller
-        .read()
-        .map(|config| config.clone())
-        .unwrap_or_default();
     let mut input = MidiInput::new("SHR-DAW MIDI input")?;
     input.ignore(Ignore::None);
     let ports = input.ports();
@@ -1004,225 +1612,135 @@ fn connect_midi_input(
         .iter()
         .map(|port| input.port_name(port).map_err(anyhow::Error::from))
         .collect::<Result<Vec<_>>>()?;
-    let port_index = if let Some(wanted) = pads.input_match.as_ref() {
-        unique_name_match(&names, wanted, "MIDI input")?
-    } else {
-        let mut selected = None;
-        for wanted in &config.midi_input_matches {
-            if let Some(index) = unique_name_match(&names, wanted, "MIDI input")? {
-                selected = Some(index);
-                break;
-            }
-        }
-        selected
-    }
-    .ok_or_else(|| {
-        let wanted = pads
-            .input_match
-            .as_deref()
-            .map(str::to_owned)
-            .unwrap_or_else(|| config.midi_input_matches.join(", "));
-        anyhow!("MIDI input not found (wanted: {wanted})")
-    })?;
+    let port_index = unique_name_match(&names, &planned.name, "MIDI input")?
+        .ok_or_else(|| anyhow!("MIDI input disappeared before open"))?;
     let port = &ports[port_index];
     let input_name = names[port_index].clone();
-    let output2 = Arc::clone(&output);
+    let source_id = input_name.clone();
+    let roles = planned.roles;
     let mut pad_locked = false;
     let mut lock_pressed = false;
-    let mut preview_notes = crate::note_lifecycle::NoteLifecycle::default();
-    let mut preview_next_column = 0usize;
-    let mut preview_programs = std::collections::BTreeMap::new();
+    let mut page_cycle_chord = crate::pads::PageCycleChordState::default();
     let mut locked_pad_notes = std::collections::HashMap::new();
-    let mut route_revision = 0;
     let connection = input
         .connect(
             port,
             "SHR-DAW monitor",
             move |_stamp, message, _| {
                 let received = Instant::now();
-                if learn_mode.load(Ordering::Relaxed) {
-                    let _ = tx.send(MidiEvent::Learn(message.to_vec()));
+                if controller_learning_owns_message(roles, learn_mode.load(Ordering::Relaxed)) {
+                    let _ = tx.send(MidiEvent::Learn {
+                        received,
+                        bytes: message.to_vec(),
+                    });
                     return;
                 }
-                let Ok(pads) = callback_controller.read() else {
-                    let _ = tx.send(MidiEvent::Error("controller mapping lock failed".into()));
-                    return;
-                };
                 if invalid_note_message(message) {
                     let _ = tx.send(MidiEvent::Error(
                         "ignored malformed MIDI note message".into(),
                     ));
                     return;
                 }
-                let backend = backend
-                    .lock()
-                    .map(|kind| *kind)
-                    .unwrap_or(BackendKind::Synthv1);
-                let (lock_message, lock_down) = pads.lock_action(message);
-                if lock_message && lock_down && !lock_pressed {
-                    pad_locked = !pad_locked;
-                    let _ = tx.send(MidiEvent::PadLock(pad_locked));
-                }
-                if lock_message {
-                    lock_pressed = lock_down;
-                }
-                let forced_pad_release =
-                    locked_pad_release(&pads, message, pad_locked, &mut locked_pad_notes);
-                let fx_value = (fx_control_mode.load(Ordering::Relaxed)
-                    && message.len() >= 3
-                    && message[0] & 0xf0 == 0xb0)
-                    .then(|| pads.target_cc(message[1]))
-                    .flatten()
-                    .and_then(control::by_cc)
-                    .map(|control| (control.cc, control::value_from_cc(control, message[2])));
-                if let Some((cc, value)) = fx_value {
-                    let _ = tx.send(MidiEvent::MappedControl(cc, value));
-                    return;
-                }
-                let routed = crate::midi::route_with_pad_lock(&pads, backend, message, pad_locked);
-                if let Some((cc, value)) = routed.value {
-                    let _ = tx.send(MidiEvent::MappedControl(cc, value));
-                }
-                let accepted = routed
-                    .value
-                    .map(|(cc, value)| {
-                        pickup
-                            .lock()
-                            .map(|mut pickup| pickup.accept(cc, value))
-                            .unwrap_or(true)
-                    })
-                    .unwrap_or(true);
-                if !pad_locked {
-                    if let Some((action, pressed)) = pads.action_state(message) {
-                        let _ = tx.send(MidiEvent::Pad(action, pressed));
+                let mut musical = roles.performance.then(|| message.to_vec());
+                if roles.controller {
+                    let Ok(pads) = callback_controller.read() else {
+                        let _ = tx.send(MidiEvent::Error("controller mapping lock failed".into()));
+                        return;
+                    };
+                    let backend = backend
+                        .lock()
+                        .map(|kind| *kind)
+                        .unwrap_or(BackendKind::Synthv1);
+                    let (chord_message, chord_action) =
+                        pads.page_cycle_chord_action(message, &mut page_cycle_chord);
+                    if chord_message {
+                        if let Some((action, pressed)) = chord_action {
+                            let _ = tx.send(MidiEvent::Pad(action, pressed));
+                        }
+                        return;
                     }
-                }
-                if let Some(action) = routed.encoder {
-                    let _ = tx.send(MidiEvent::Encoder(action));
-                }
-                if accepted {
+                    let (lock_message, lock_down) = pads.lock_action(message);
+                    if lock_message && lock_down && !lock_pressed {
+                        pad_locked = !pad_locked;
+                        let _ = tx.send(MidiEvent::PadLock(pad_locked));
+                    }
+                    if lock_message {
+                        lock_pressed = lock_down;
+                    }
+                    let forced_pad_release =
+                        locked_pad_release(&pads, message, pad_locked, &mut locked_pad_notes);
+                    let fx_value = (fx_control_mode.load(Ordering::Relaxed)
+                        && message.len() >= 3
+                        && message[0] & 0xf0 == 0xb0)
+                        .then(|| pads.target_cc(message[1]))
+                        .flatten()
+                        .and_then(control::by_cc)
+                        .map(|control| (control.cc, control::value_from_cc(control, message[2])));
+                    if let Some((cc, value)) = fx_value {
+                        let _ = tx.send(MidiEvent::MappedControl(cc, value));
+                        return;
+                    }
+                    let routed =
+                        crate::midi::route_with_pad_lock(&pads, backend, message, pad_locked);
+                    if let Some((cc, value)) = routed.value {
+                        let _ = tx.send(MidiEvent::MappedControl(cc, value));
+                    }
+                    let accepted = routed
+                        .value
+                        .map(|(cc, value)| {
+                            pickup
+                                .lock()
+                                .map(|mut pickup| pickup.accept(cc, value))
+                                .unwrap_or(true)
+                        })
+                        .unwrap_or(true);
+                    if !pad_locked {
+                        if let Some((action, pressed)) = pads.action_state(message) {
+                            let _ = tx.send(MidiEvent::Pad(action, pressed));
+                        }
+                    }
+                    if let Some(action) = routed.encoder {
+                        let _ = tx.send(MidiEvent::Encoder(action));
+                    }
+                    if !accepted {
+                        return;
+                    }
                     if let Some((cc, value)) = routed.value {
                         let _ = tx.send(MidiEvent::Value(cc, value));
                     }
-                    let translated = routed.translated;
-                    if let Some(message) = translated
-                        .as_ref()
-                        .map(|bytes| &bytes[..])
-                        .or(routed.forward)
-                        .or_else(|| forced_pad_release.then_some(message))
-                    {
-                        let status = message.first().copied().unwrap_or(0);
-                        let note_message = valid_note_message(message);
-                        let route = tracker_route.lock().ok().map(|route| route.clone());
-                        let tracker_consumes_note =
-                            tracker_route_consumes_note(route.as_ref(), message);
-                        if route
-                            .as_ref()
-                            .is_some_and(|route| route.revision != route_revision)
-                        {
-                            if let Ok(input) = tracker_input.lock() {
-                                if let Some(input) = input.as_ref() {
-                                    for (target, channel, note) in preview_notes.drain() {
-                                        input.send(&target, &[0x80 | channel, note, 0]);
-                                    }
-                                }
-                            }
-                            route_revision = route.as_ref().map_or(0, |route| route.revision);
-                            preview_next_column =
-                                route.as_ref().map_or(0, |route| route.start_column);
-                            preview_programs.clear();
-                        }
-                        let mut preview = None;
-                        let mut program = None;
-                        if note_message {
-                            let source_note = message[1];
-                            let source_channel = status & 0x0f;
-                            let note_off = status & 0xf0 == 0x80 || message[2] == 0;
-                            if note_off {
-                                preview = preview_notes.note_off(source_channel, source_note);
-                            } else if let Some(route) = route.filter(|route| route.enabled) {
-                                let Some(mapped_note) = route.mapped_note(source_note) else {
-                                    return;
-                                };
-                                let column = route.column(preview_next_column);
-                                preview_next_column =
-                                    (preview_next_column + 1) % crate::sequencer::LANES_PER_PAGE;
-                                let destination =
-                                    (route.target.clone(), column.channel, mapped_note);
-                                preview_notes.note_on(
-                                    source_channel,
-                                    source_note,
-                                    destination.clone(),
-                                );
-                                preview = Some(destination);
-                                program = column.program.map(|program| {
-                                    (program, route.bank_select, column.bank_msb, column.bank_lsb)
-                                });
-                            }
-                        }
-                        if let Some((target, channel, note)) = preview {
-                            let preview_message = [status & 0xf0 | channel, note, message[2]];
-                            let _ = tx.send(MidiEvent::Raw {
-                                received,
-                                bytes: preview_message.to_vec(),
-                            });
-                            if let Ok(input) = tracker_input.lock() {
-                                if let Some(input) = input.as_ref() {
-                                    if let Some((program, bank_select, bank_msb, bank_lsb)) =
-                                        program.filter(|(program, _, _, _)| {
-                                            preview_programs.get(&(target.clone(), channel))
-                                                != Some(program)
-                                        })
-                                    {
-                                        match bank_select {
-                                            crate::config::BankSelectMode::Off => {}
-                                            crate::config::BankSelectMode::Cc0 => {
-                                                input.send(&target, &[0xb0 | channel, 0, bank_msb]);
-                                            }
-                                            crate::config::BankSelectMode::Cc0Cc32 => {
-                                                input.send(&target, &[0xb0 | channel, 0, bank_msb]);
-                                                input
-                                                    .send(&target, &[0xb0 | channel, 32, bank_lsb]);
-                                            }
-                                        }
-                                        input.send(&target, &[0xc0 | channel, program]);
-                                        preview_programs.insert((target.clone(), channel), program);
-                                    }
-                                    input.send(&target, &preview_message);
-                                }
-                            }
-                        } else if !tracker_consumes_note {
-                            let scale = playback_scale.lock().ok().and_then(|scale| *scale);
-                            if !playback_filter_allows(scale, message) {
-                                return;
-                            }
-                            let _ = tx.send(MidiEvent::Raw {
-                                received,
-                                bytes: message.to_vec(),
-                            });
-                            if let Ok(mut output) = output2.lock() {
-                                if let Some(output) = output.as_mut() {
-                                    if let Err(error) = output.send(message) {
-                                        let _ = tx.send(MidiEvent::Error(format!(
-                                            "MIDI forward: {error}"
-                                        )));
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    let mapped = routed.value.is_some() || routed.translated.is_some();
+                    musical = routed
+                        .translated
+                        .map(|bytes| bytes.to_vec())
+                        .or_else(|| {
+                            controller_allows_musical(roles, mapped, forced_pad_release)
+                                .then(|| routed.forward.map(<[u8]>::to_vec))
+                                .flatten()
+                        })
+                        .or_else(|| forced_pad_release.then(|| message.to_vec()));
                 }
+                let Some(message) = musical else {
+                    return;
+                };
+                let route = tracker_route.lock().ok().map(|route| route.clone());
+                let scale = playback_scale.lock().ok().and_then(|scale| *scale);
+                let deliveries = live_state
+                    .lock()
+                    .map(|mut state| {
+                        route_live_message(&mut state, &source_id, &message, route.as_ref(), scale)
+                    })
+                    .unwrap_or_default();
+                deliver_midi(deliveries, received, &tx, &output, &tracker_input);
             },
             (),
         )
-        .map_err(|error| anyhow!("connect controller MIDI input: {error}"))?;
-    let source = input_name.split(':').next().unwrap_or(&input_name);
+        .map_err(|error| anyhow!("connect MIDI input: {error}"))?;
     for client in [
         &config.client_name,
         &config.yoshimi.backend.client_name,
         &config.fluidsynth.backend.client_name,
     ] {
-        disconnect_direct_midi(source, client);
+        disconnect_direct_midi(&input_name, client);
     }
     Ok(connection)
 }
@@ -1262,10 +1780,18 @@ fn disconnect_direct_midi(source: &str, client_name: &str) {
 /// supplied SHR-DAW-owned/configured clients. Other clients and routes are
 /// never reconfigured.
 pub fn disconnect_midi_routes(source_match: &str, destination_matches: &[&str]) {
-    let clients = parse_alsa_clients(&command_lines("aconnect", &["-l"]));
-    let Some((source_id, _)) = unique_client_match(&clients, source_match) else {
+    let lines = command_lines("aconnect", &["-l"]);
+    let clients = parse_alsa_clients(&lines);
+    let sources = parse_alsa_source_ports(&lines);
+    let source_names = sources
+        .iter()
+        .map(|(_, _, name)| name.clone())
+        .collect::<Vec<_>>();
+    let wanted = crate::controller_learn::stable_input_match(source_match);
+    let Ok(Some(source_index)) = unique_name_match(&source_names, &wanted, "MIDI source") else {
         return;
     };
+    let (source_id, source_port, _) = &sources[source_index];
     let destination_ids = destination_matches
         .iter()
         .filter_map(|wanted| unique_client_match(&clients, wanted).map(|(id, _)| *id))
@@ -1274,13 +1800,52 @@ pub fn disconnect_midi_routes(source_match: &str, destination_matches: &[&str]) 
         let _ = Command::new("aconnect")
             .args([
                 "-d",
-                &format!("{source_id}:0"),
+                &format!("{source_id}:{source_port}"),
                 &format!("{destination_id}:0"),
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
     }
+}
+
+fn parse_alsa_source_ports(lines: &[String]) -> Vec<(u32, u32, String)> {
+    let mut sources = Vec::new();
+    let mut client = None;
+    for line in lines {
+        if let Some(raw) = line.strip_prefix("client ") {
+            let Some((id, rest)) = raw.split_once(':') else {
+                client = None;
+                continue;
+            };
+            let name = rest
+                .split('\'')
+                .nth(1)
+                .map(str::to_owned)
+                .unwrap_or_default();
+            client = id.parse::<u32>().ok().map(|id| (id, name));
+            continue;
+        }
+        let Some((client_id, client_name)) = client.as_ref() else {
+            continue;
+        };
+        let trimmed = line.trim_start();
+        let Some((port, rest)) = trimmed.split_once(' ') else {
+            continue;
+        };
+        let Ok(port) = port.parse::<u32>() else {
+            continue;
+        };
+        let port_name = rest
+            .split('\'')
+            .nth(1)
+            .map(str::to_owned)
+            .unwrap_or_default();
+        if !port_name.is_empty() {
+            sources.push((*client_id, port, format!("{client_name}:{port_name}")));
+        }
+    }
+    sources
 }
 
 /// Keeps only the configured destination on an SHR-DAW-owned ALSA source port.
@@ -1811,6 +2376,7 @@ pub fn daemon(preset: Preset, state: PathBuf, config: RuntimeConfig) -> Result<(
     }
     router.arm_pickup(&initial_values(&preset)?);
     let mut engine = Engine::start(&preset, &state, router.output(), &config)?;
+    engine.bind_midi_lifecycle(router.lifecycle());
     if let Some(route) = engine.audio_route_status() {
         eprintln!("AUDIO ROUTE · {route}");
     }
@@ -2034,6 +2600,8 @@ mod tests {
     fn alsa_graph_parser_finds_clients_and_owned_destinations() {
         let lines = [
             "client 28: 'AudioBox USB 96' [type=kernel]".into(),
+            "    0 'AudioBox MIDI'".into(),
+            "    1 'AudioBox Control'".into(),
             "client 133: 'shs-casio' [type=user]".into(),
             "    0 'SHR-DAW accompaniment'".into(),
             "\tConnecting To: 28:0, 134:0, 28:0[real:0]".into(),
@@ -2048,6 +2616,14 @@ mod tests {
             ]
         );
         assert_eq!(parse_alsa_destinations(&lines, 133), [(28, 0), (134, 0)]);
+        assert_eq!(
+            parse_alsa_source_ports(&lines),
+            [
+                (28, 0, "AudioBox USB 96:AudioBox MIDI".into()),
+                (28, 1, "AudioBox USB 96:AudioBox Control".into()),
+                (133, 0, "shs-casio:SHR-DAW accompaniment".into())
+            ]
+        );
         let clients = parse_alsa_clients(&lines);
         assert_eq!(
             unique_client_match(&clients, "AudioBox").map(|client| client.0),
@@ -2077,6 +2653,311 @@ mod tests {
         assert_eq!(
             unique_client_match(&clients, "synth-one").map(|client| client.0),
             Some(1)
+        );
+    }
+
+    fn input_role_config() -> RuntimeConfig {
+        let mut config = RuntimeConfig::default();
+        config.midi_input_matches.clear();
+        config.midi_performance_input_matches.clear();
+        config
+    }
+
+    #[test]
+    fn legacy_controller_input_remains_a_combined_musical_source() {
+        let mut config = input_role_config();
+        config.midi_input_matches = vec!["Combined".into()];
+        let plan = plan_midi_inputs(&["Combined Device".into()], &PadConfig::default(), &config);
+        assert_eq!(plan.inputs.len(), 1);
+        assert_eq!(
+            plan.inputs[0].roles,
+            InputRoles {
+                controller: true,
+                performance: true
+            }
+        );
+        assert!(plan.availability.controller_available());
+    }
+
+    #[test]
+    fn separate_controller_and_performance_ports_keep_separate_roles() {
+        let mut config = input_role_config();
+        config.midi_input_matches = vec!["Surface".into()];
+        config.midi_performance_input_matches = vec!["Keyboard".into()];
+        config.midi_controller_musical_input = false;
+        let plan = plan_midi_inputs(
+            &["Surface MIDI".into(), "Keyboard MIDI".into()],
+            &PadConfig::default(),
+            &config,
+        );
+        assert_eq!(plan.inputs.len(), 2);
+        assert_eq!(
+            plan.inputs[0].roles,
+            InputRoles {
+                controller: true,
+                performance: false
+            }
+        );
+        assert_eq!(
+            plan.inputs[1].roles,
+            InputRoles {
+                controller: false,
+                performance: true
+            }
+        );
+    }
+
+    #[test]
+    fn same_exact_port_is_deduplicated_and_combines_roles() {
+        let mut config = input_role_config();
+        config.midi_input_matches = vec!["Shared MIDI".into()];
+        config.midi_performance_input_matches = vec!["Shared MIDI".into()];
+        config.midi_controller_musical_input = false;
+        let plan = plan_midi_inputs(&["Shared MIDI".into()], &PadConfig::default(), &config);
+        assert_eq!(plan.inputs.len(), 1);
+        assert_eq!(
+            plan.inputs[0].roles,
+            InputRoles {
+                controller: true,
+                performance: true
+            }
+        );
+        assert_eq!(plan.availability.performance_available(), 1);
+    }
+
+    #[test]
+    fn missing_and_ambiguous_roles_do_not_hide_available_inputs() {
+        let mut config = input_role_config();
+        config.midi_input_matches = vec!["Missing Surface".into()];
+        config.midi_performance_input_matches =
+            vec!["Keyboard".into(), "Ambiguous".into(), "Missing Keys".into()];
+        let plan = plan_midi_inputs(
+            &[
+                "Keyboard".into(),
+                "Ambiguous A".into(),
+                "Ambiguous B".into(),
+            ],
+            &PadConfig::default(),
+            &config,
+        );
+        assert_eq!(plan.inputs.len(), 1);
+        assert_eq!(plan.inputs[0].name, "Keyboard");
+        assert!(!plan.availability.controller_available());
+        assert_eq!(plan.availability.performance_available(), 1);
+        assert!(plan.availability.performance[1]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("ambiguous")));
+        assert!(plan.availability.performance[2]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("not found")));
+    }
+
+    #[test]
+    fn control_only_suppresses_unmapped_music_but_keeps_mapped_controls() {
+        let roles = InputRoles {
+            controller: true,
+            performance: false,
+        };
+        assert!(!controller_allows_musical(roles, false, false));
+        assert!(controller_allows_musical(roles, true, false));
+        assert!(controller_allows_musical(roles, false, true));
+    }
+
+    #[test]
+    fn learning_accepts_only_the_selected_controller_role() {
+        assert!(controller_learning_owns_message(
+            InputRoles {
+                controller: true,
+                performance: false
+            },
+            true
+        ));
+        assert!(!controller_learning_owns_message(
+            InputRoles {
+                controller: false,
+                performance: true
+            },
+            true
+        ));
+        assert!(!controller_learning_owns_message(
+            InputRoles {
+                controller: true,
+                performance: true
+            },
+            false
+        ));
+    }
+
+    #[test]
+    fn performance_path_bypasses_controller_command_note_mapping() {
+        let mut state = LiveMidiState::default();
+        let source = "performance keyboard".to_owned();
+        let deliveries = route_live_message(&mut state, &source, &[0x90, 36, 100], None, None);
+        assert_eq!(
+            deliveries,
+            [
+                MidiDelivery::Raw(vec![0x90, 36, 100]),
+                MidiDelivery::Direct(vec![0x90, 36, 100])
+            ]
+        );
+    }
+
+    #[test]
+    fn performance_note_uses_selected_tracker_page_and_output_channel() {
+        let external = RuntimeConfig::default().external_midi;
+        let mut route = TrackerRoute::default();
+        route.configure(TrackerRouteConfig {
+            enabled: true,
+            target: crate::sequencer::PageTarget::Midi("selected keyboard target".into()),
+            columns: [(6, (0, 0, 0)); crate::sequencer::LANES_PER_PAGE],
+            start_column: 0,
+            percussion: false,
+            audition_note: None,
+            scale: None,
+            external: &external,
+        });
+        let mut state = LiveMidiState::default();
+        let source = "performance keyboard".to_owned();
+        let deliveries =
+            route_live_message(&mut state, &source, &[0x91, 72, 101], Some(&route), None);
+        assert_eq!(
+            deliveries,
+            [
+                MidiDelivery::Tracker(
+                    crate::sequencer::PageTarget::Midi("selected keyboard target".into()),
+                    vec![0xc6, 0]
+                ),
+                MidiDelivery::Raw(vec![0x96, 72, 101]),
+                MidiDelivery::Tracker(
+                    crate::sequencer::PageTarget::Midi("selected keyboard target".into()),
+                    vec![0x96, 72, 101]
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn identical_notes_from_two_sources_release_only_after_both_note_offs() {
+        let mut state = LiveMidiState::default();
+        let first = "first".to_owned();
+        let second = "second".to_owned();
+        route_live_message(&mut state, &first, &[0x92, 60, 90], None, None);
+        route_live_message(&mut state, &second, &[0x92, 60, 110], None, None);
+        assert!(route_live_message(&mut state, &first, &[0x82, 60, 0], None, None).is_empty());
+        assert_eq!(
+            route_live_message(&mut state, &second, &[0x92, 60, 0], None, None),
+            [
+                MidiDelivery::Raw(vec![0x92, 60, 0]),
+                MidiDelivery::Direct(vec![0x92, 60, 0])
+            ]
+        );
+    }
+
+    #[test]
+    fn source_all_notes_off_and_disconnect_preserve_other_source_notes() {
+        let mut state = LiveMidiState::default();
+        let first = "first".to_owned();
+        let second = "second".to_owned();
+        route_live_message(&mut state, &first, &[0x90, 64, 90], None, None);
+        route_live_message(&mut state, &second, &[0x90, 64, 110], None, None);
+        assert!(route_live_message(&mut state, &first, &[0xb0, 123, 0], None, None).is_empty());
+        assert_eq!(
+            release_source(&mut state, &second),
+            [
+                MidiDelivery::Raw(vec![0x80, 64, 0]),
+                MidiDelivery::Direct(vec![0x80, 64, 0])
+            ]
+        );
+    }
+
+    #[test]
+    fn performance_channel_messages_remain_byte_exact() {
+        for message in [
+            vec![0xb1, 1, 99],
+            vec![0xa1, 60, 44],
+            vec![0xd1, 55],
+            vec![0xe1, 0, 96],
+            vec![0xc1, 12],
+        ] {
+            let mut state = LiveMidiState::default();
+            let deliveries =
+                route_live_message(&mut state, &"keyboard".into(), &message, None, None);
+            assert_eq!(
+                deliveries,
+                [
+                    MidiDelivery::Raw(message.clone()),
+                    MidiDelivery::Direct(message)
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn route_change_and_shutdown_release_every_owned_destination() {
+        let config = RuntimeConfig::default().external_midi;
+        let mut route = TrackerRoute::default();
+        route.configure(TrackerRouteConfig {
+            enabled: true,
+            target: crate::sequencer::PageTarget::Midi("first output".into()),
+            columns: [(2, (0, 0, 0)); crate::sequencer::LANES_PER_PAGE],
+            start_column: 0,
+            percussion: false,
+            audition_note: None,
+            scale: None,
+            external: &config,
+        });
+        let mut state = LiveMidiState::default();
+        let source = "keyboard".to_owned();
+        route_live_message(&mut state, &source, &[0x90, 60, 100], Some(&route), None);
+        route.configure(TrackerRouteConfig {
+            enabled: true,
+            target: crate::sequencer::PageTarget::Midi("second output".into()),
+            columns: [(5, (0, 0, 0)); crate::sequencer::LANES_PER_PAGE],
+            start_column: 0,
+            percussion: false,
+            audition_note: None,
+            scale: None,
+            external: &config,
+        });
+        let changed = route_live_message(&mut state, &source, &[0xb0, 1, 64], Some(&route), None);
+        assert!(changed.contains(&MidiDelivery::Tracker(
+            crate::sequencer::PageTarget::Midi("first output".into()),
+            vec![0x82, 60, 0]
+        )));
+        route_live_message(&mut state, &source, &[0x95, 67, 100], Some(&route), None);
+        let shutdown = release_all_inputs(&mut state);
+        assert!(shutdown.contains(&MidiDelivery::Tracker(
+            crate::sequencer::PageTarget::Midi("second output".into()),
+            vec![0x85, 67, 0]
+        )));
+        assert!(release_all_inputs(&mut state).is_empty());
+    }
+
+    #[test]
+    fn all_notes_off_lifecycle_reset_clears_stale_source_ownership() {
+        let shared = Arc::new(Mutex::new(LiveMidiState::default()));
+        let lifecycle = MidiLifecycle::new(Arc::clone(&shared));
+        let source = "keyboard".to_owned();
+        {
+            let mut state = shared.lock().unwrap();
+            route_live_message(&mut state, &source, &[0x90, 60, 100], None, None);
+        }
+        lifecycle.clear_after_all_notes_off();
+        let replayed = route_live_message(
+            &mut shared.lock().unwrap(),
+            &source,
+            &[0x90, 60, 110],
+            None,
+            None,
+        );
+        assert_eq!(
+            replayed,
+            [
+                MidiDelivery::Raw(vec![0x90, 60, 110]),
+                MidiDelivery::Direct(vec![0x90, 60, 110])
+            ]
         );
     }
 

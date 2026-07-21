@@ -198,9 +198,12 @@ both `shsynth.conf` and `controller.conf`. It then:
 2. asks whether note names use English `B` or German `H`/`B` spelling;
 3. optionally selects an ALSA interface and writes a backed-up `~/.jackdrc` for
    the user's next manual JACK restart;
-4. selects the controller input and writes the same exact match to runtime and
-   controller configuration, or explicitly keeps keyboard-only operation;
-5. runs non-audible `shr pads auto`, optionally followed by `shr pads learn` if
+4. selects the controller input, chooses combined or control-only behavior,
+   then selects zero or more independent performance inputs; controller-only,
+   keyboard-only, combined, and separate-device setups are all explicit;
+5. writes the controller exact match to runtime/controller configuration and
+   repeated performance matches only to runtime configuration, then runs
+   non-audible `shr pads auto`, optionally followed by `shr pads learn` if
    no reviewed profile matches;
 6. discovers physical JACK playback ports, writes the same preferred stereo
    pair for synth and loop playback, then optionally records a named internal
@@ -238,6 +241,8 @@ both `shsynth.conf` and `controller.conf`. It then:
   Restore with `systemctl --user unmask fluidsynth.service` and
   `sudo systemctl unmask amidiminder.service`; setup does not start either unit.
 - Controller learning is non-audible: learned MIDI is not forwarded to a synth.
+- Controller learning listens only to the selected controller source;
+  performance-only inputs bypass command interpretation.
 - Existing configuration is backed up rather than silently discarded.
 - Hardware discovery never overwrites a remembered route merely because that
   hardware is absent. The user must explicitly choose a changed/disabled route.

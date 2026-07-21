@@ -17,7 +17,7 @@ overrides are documented in [Installation](INSTALLATION.md).
 
 ## Runtime key reference
 
-Repeated `midi.input`, `audio.output`, `audio.internal_output`, `yoshimi.preset_root`,
+Repeated `midi.performance_input`, `audio.output`, `audio.internal_output`, `yoshimi.preset_root`,
 `yoshimi.category`, `fluidsynth.soundfont`, `external_midi.channel`,
 `external_midi.percussion_note`, `capture.input`, `capture.track`, and `loop.output` keys build
 ordered lists. Empty optional values disable that choice. The current parser
@@ -30,7 +30,7 @@ accepts:
 | synthv1 | `synthv1.command`, `.client`, `.presets`, `.midi_output`; legacy `synth.command`, `synth.client`, `presets.directory`, and `midi.synth_output` remain accepted |
 | Yoshimi | `yoshimi.command`, `.client`, `.midi_output`, repeated `.preset_root` and `.category`, `.presets_per_category` |
 | FluidSynth | `fluidsynth.command`, `.client`, `.midi_output`, `.gain`, repeated `.soundfont` |
-| Managed MIDI/audio | `midi.autoconnect`, repeated `midi.input`; `audio.autoconnect`, exactly two preferred `audio.output` entries, ordered `audio.internal_output=NAME|LEFT|RIGHT` fallbacks, final optional `audio.headphone_output=NAME|LEFT|RIGHT`; optional `audio.engine_cpu` |
+| Managed MIDI/audio | `midi.autoconnect`; legacy ordered controller fallbacks in repeated `midi.input`; `midi.controller_musical_input`; simultaneous repeated `midi.performance_input`; `audio.autoconnect`, exactly two preferred `audio.output` entries, ordered `audio.internal_output=NAME|LEFT|RIGHT` fallbacks, final optional `audio.headphone_output=NAME|LEFT|RIGHT`; optional `audio.engine_cpu` |
 | Owned final bus | `audio.graph.enabled`, `.client`, `.maximum_callback_frames` (1–4096), `.input`, monitoring confirmations |
 | External tracker MIDI | `external_midi.enabled`, `.client`, `.output`, `.max_tracks`, repeated `.channel`, `.melody_channel`, optional `.percussion_channel` and `.percussion_program`, `.percussion_input_base`, repeated `.percussion_note`, `.bank_select` (`off`, `cc0`, or `cc0+cc32`), `.program_changes`, `.send_transport`, `.default_tempo` (20–300), `.pattern_rows` (1–256), `.steps_per_beat` (1–16), `.live_thru`, `.profile`, `.gate_percent` (1–100), `.gesture_settle_ms` |
 | Controller clock | `controller_clock.enabled`, `.client`, `.output`; disabled by default, with one exact stable ALSA MIDI output name required when enabled |
@@ -48,6 +48,36 @@ positions. The default is `german`, matching the existing central-European B
 and H convention; `english` names those pitch classes A# and B. `shr-setup`
 asks with the two example scales `C D E F G A B C` and
 `C D E F G A H C (B means B-flat)` and writes this key.
+
+## Controller and performance MIDI inputs
+
+`controller.conf input=` is the explicit control-surface selector. When it is
+empty, repeated `midi.input=` values are tried in order as legacy alternatives;
+they do not open multiple devices. The default
+`midi.controller_musical_input=true` preserves combined-device behavior:
+mapped commands are consumed and unmatched notes or performance messages pass
+to the active route. Set it to `false` for a control-only surface.
+
+Each non-empty repeated `midi.performance_input=` is an independent musical
+source and is opened when available. Performance sources never enter controller
+command, encoder, mapped-control, or learning interpretation. The same exact
+resolved ALSA port may be named for both roles; SHR deduplicates it to one
+connection. Partial absence and ambiguous substring matches are reported per
+role without disabling the other inputs or the computer keyboard.
+
+```text
+midi.autoconnect=true
+midi.input=Control Surface MIDI
+midi.controller_musical_input=false
+midi.performance_input=Performance Keyboard MIDI
+midi.performance_input=Second Keyboard MIDI
+```
+
+For a combined controller/keyboard, omit the performance entries and leave the
+controller musical setting true. For keyboard-only use, leave both controller
+selectors empty, set the controller musical setting false, and configure one or
+more performance inputs. `external_midi.output` is an output destination, not
+an input; one interface may safely be configured in both directions.
 
 ## Dedicated controller clock and transport
 
@@ -251,8 +281,9 @@ status names the fallback and missing preferred pair. If none is visible,
 audio reports unavailable while retaining the preference for the next
 activation.
 
-Failure to open the preferred `midi.input` leaves the TUI and tracker computer
-keyboard active and shows which input is missing. An exact Project MIDI target
+Failure to open a controller or performance input leaves the TUI and tracker
+computer keyboard active and reports each role independently. Other available
+MIDI inputs still open. An exact Project MIDI target
 falls back first to the configured external output, then to the already loaded
 internal instrument. The target text in the Project never changes, and
 transport resolves it again on the next play so reconnected hardware is used.
@@ -308,6 +339,19 @@ pad.41=item-2
 pad.42=item-3
 pad.43=item-4
 ```
+
+The page-cycle action may instead be a held chord. This example holds CC27 and
+uses CC93 on the same MIDI channel; the trigger may also be a normally mapped
+control because its ordinary behavior remains active when the modifier is not
+held:
+
+```text
+menu.layout=5
+page_cycle.modifier=cc.1.27
+page_cycle.trigger=cc.1.93
+```
+
+Use `note.CHANNEL.NUMBER` for a note-based modifier or trigger.
 
 Four-button layout:
 

@@ -182,6 +182,8 @@ impl ControllerProfile {
         config.encoder_press_cc = self.encoder_press_cc;
         config.encoder_press_note = self.encoder_press_note;
         config.encoder_press_channel = self.encoder_press_channel.map(|channel| channel - 1);
+        config.page_cycle_modifier = None;
+        config.page_cycle_trigger = None;
         config.lock_cc = self.lock_cc;
         config.pads = self
             .note_buttons

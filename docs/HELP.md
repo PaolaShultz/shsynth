@@ -16,7 +16,8 @@ The main encoder moves one visible row or value at a time. Press it to select
 the highlighted row, confirm a field, or follow a help link.
 
 Home centers every label in one equal-width bar. MIDI Learn, Routing, and
-Effects are separate destinations. Routing reports current controller, MIDI,
+Effects are separate destinations. Routing reports current controller,
+performance-input, MIDI-output,
 clock, and audio connections without changing them; use `shr-setup` outside
 SHR to change routes.
 
@@ -24,8 +25,9 @@ If a configured controller is offline, has no reviewed profile, or has not
 learned encoder turn and click, Home highlights MIDI Learn and explains why.
 Keyboard Up/Down/Enter still work. Optional command buttons may be skipped once
 the learned encoder can turn and click. Home does not learn or send MIDI by
-itself; Learn keeps received messages isolated until an explicit save or
-cancel.
+itself; Learn keeps selected-controller messages isolated until an explicit
+save or cancel. Separate performance inputs continue to bypass controller
+interpretation.
 
 The controller menu has four pages. Page 1 is OPS. On child screens, page
 4 item 4 is EXIT and returns one level. Empty buttons are hidden and silent.
