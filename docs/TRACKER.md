@@ -33,12 +33,18 @@ the same pattern until you explicitly clone or paste a new pattern.
 Each FT2 Pattern owns its own rows, meter, master tempo, pages, page targets,
 per-column MIDI channels/banks/programs, velocity defaults, mutes, percussion
 settings, lane settings, and cell data. A new Project starts with one pattern
-containing three four-track pages:
+whose FT2 workspace exposes four musician-facing pages:
 
-1. `Software Synth`, using the first available synthv1 preset;
-2. `MIDI`, using the configured external output, MIDI channel 1, and program 1;
-3. `Drums`, using the configured external output, MIDI channel 10, program 1,
-   and the existing percussion-note mapping.
+1. `Software Synth`, a four-track page using the first available synthv1 preset;
+2. `MIDI`, a four-track page using the configured external output, MIDI channel
+   1, and program 1;
+3. `Drums`, a four-track page using the configured external output, MIDI
+   channel 10, program 1, and the existing percussion-note mapping;
+4. `Loop Player`, the Project-wide WAV source in an explicit `UNLOADED` state.
+
+The Loop Player is a page in the musician-facing FT2 workflow, not four empty
+MIDI lanes. Page next/previous and **NAV** → **PAGE** open it directly, so a new
+Project does not require adding or naming a page before importing a WAV.
 
 The Loop Player's white position bar uses a green playhead to show the
 approximate position within the selected WAV region while the shared FT2

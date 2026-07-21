@@ -1834,7 +1834,10 @@ impl App {
 
     fn overlay_row_count_for(&self, overlay: &OverlayState) -> usize {
         match overlay.kind {
-            OverlayKind::TrackerPage => self.current_pages().len() * LANES_PER_PAGE + 1,
+            // MIDI pages contribute four selectable columns. The Project-wide
+            // loop player is the final musician-facing FT2 page and contributes
+            // one row of its own, followed by the page manager launcher.
+            OverlayKind::TrackerPage => self.current_pages().len() * LANES_PER_PAGE + 2,
             OverlayKind::TrackerPattern => self.overlay_pattern_locations().len() + 2,
             OverlayKind::TrackerSong => self.song.order.len() + 3,
             OverlayKind::TrackerRoute => RouteField::ROWS,
@@ -2214,6 +2217,9 @@ impl App {
                     if !self.leave_noob_on_percussion() {
                         self.sync_tracker_route();
                     }
+                } else if selection == page_rows {
+                    self.close_overlay(false);
+                    self.open_tracker_loop();
                 } else {
                     self.close_overlay(false);
                     self.open_page_manager();
@@ -2679,6 +2685,12 @@ impl App {
     fn current_total_lanes(&self) -> usize {
         self.current_pattern()
             .map_or(0, sequencer::Pattern::total_lanes)
+    }
+    fn tracker_page_count(&self) -> usize {
+        self.current_pages().len() + 1
+    }
+    fn tracker_loop_page_number(&self) -> usize {
+        self.tracker_page_count()
     }
     fn clamp_tracker_cursor(&mut self) {
         let pages = self.current_pages().len();
@@ -3863,6 +3875,12 @@ impl App {
     fn move_tracker_page(&mut self, direction: i8) {
         self.cancel_tracker_gesture();
         let pages = self.current_pages().len().max(1);
+        let leaving_edge = (direction < 0 && self.tracker_page == 0)
+            || (direction >= 0 && self.tracker_page + 1 >= pages);
+        if leaving_edge {
+            self.open_tracker_loop();
+            return;
+        }
         self.tracker_page = wrapped_index(self.tracker_page, pages, direction);
         if !self.leave_noob_on_percussion() {
             self.sync_tracker_route();
@@ -4641,6 +4659,21 @@ impl App {
         self.loop_selected = self
             .loop_selected
             .min(self.loop_imports.len().saturating_sub(1));
+    }
+
+    fn open_tracker_loop(&mut self) {
+        self.loop_library_mode = false;
+        self.set_screen(Screen::TrackerLoop);
+        self.refresh_loop_imports();
+        self.reset_context_page();
+        self.status = if self.song.audio_loop.is_some() {
+            "loop page ready".into()
+        } else {
+            format!(
+                "loop page unloaded · {} WAV file(s) in inbox",
+                self.loop_imports.len()
+            )
+        };
     }
 
     fn load_current_loop(&mut self) -> bool {
@@ -8650,13 +8683,7 @@ fn perform(
             a.status = "song files · select an action".into();
         }
         Action::OpenTrackerArrange => a.open_arrange(),
-        Action::OpenTrackerLoop => {
-            a.loop_library_mode = false;
-            a.set_screen(Screen::TrackerLoop);
-            a.refresh_loop_imports();
-            a.reset_context_page();
-            a.status = format!("loop inbox · {} WAV file(s)", a.loop_imports.len());
-        }
+        Action::OpenTrackerLoop => a.open_tracker_loop(),
         Action::OpenTrackerLoopAlign => {
             a.set_screen(Screen::TrackerLoopAlign);
             a.reset_context_page();
@@ -11208,7 +11235,9 @@ fn draw_tracker_loop<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         let bar_unit = i32::from(a.current_meter().clamp(1, 16));
         let offset_bars = f64::from(settings.offset_beats) / f64::from(bar_unit);
         format!(
-            "FT2 WAV LOOP\n{}\n\nSource {:>6.2} BPM  {}\nProject tempo {:>3} BPM\nRegion beat {} +{}\nOffset {:+.0} bar(s)\nCut {} · meter {}/4\n\n{}  {} / {}\n{} Hz · {}ch\nNative pitch playback",
+            "P{:02}/{:02} · FT2 WAV LOOP\n{}\n\nSource {:>6.2} BPM  {}\nProject tempo {:>3} BPM\nRegion beat {} +{}\nOffset {:+.0} bar(s)\nCut {} · meter {}/4\n\n{}  {} / {}\n{} Hz · {}ch\nNative pitch playback",
+            a.tracker_loop_page_number(),
+            a.tracker_page_count(),
             truncate(
                 player.file.as_deref().unwrap_or(&settings.file),
                 z.width.saturating_sub(2) as usize
@@ -11229,7 +11258,9 @@ fn draw_tracker_loop<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         )
     } else {
         format!(
-            "FT2 WAV LOOP\n\nInbox: {}\nSelected: {}\n\nTurn encoder to choose\nIMPORT copies to private storage\n\nAUTO estimates beat length.\nProject tempo follows WAV.",
+            "P{:02}/{:02} · FT2 WAV LOOP\nUNLOADED\n\nInbox: {}\nSelected: {}\n\nTurn encoder to choose\nIMPORT copies to private storage\n\nAUTO estimates beat length.\nProject tempo follows WAV.",
+            a.tracker_loop_page_number(),
+            a.tracker_page_count(),
             truncate(
                 &a.config.loop_player.import_directory.display().to_string(),
                 z.width.saturating_sub(2) as usize
@@ -11407,6 +11438,18 @@ fn overlay_rows(a: &App, overlay: &OverlayState) -> Vec<String> {
                     ));
                 }
             }
+            rows.push(if let Some(settings) = &a.song.audio_loop {
+                format!(
+                    "P{:02} LOOP PLAYER · {}",
+                    a.tracker_loop_page_number(),
+                    truncate(&settings.file, 18)
+                )
+            } else {
+                format!(
+                    "P{:02} LOOP PLAYER · UNLOADED",
+                    a.tracker_loop_page_number()
+                )
+            });
             rows.push("MANAGE PAGES / TRACKS…".into());
             rows
         }
@@ -12324,7 +12367,7 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         format!(
             "P{}/{} {} L{} ch{} {} {}{}",
             a.tracker_page + 1,
-            pattern.pages.len(),
+            a.tracker_page_count(),
             page.name,
             a.tracker_track + 1,
             sequencer::musician_channel(column.channel),
@@ -12613,7 +12656,7 @@ fn draw_tracker_pages<B: Backend>(f: &mut Frame<B>, a: &mut App) {
             f.render_widget(
                 Paragraph::new(lines).block(
                     Block::default()
-                        .title(format!(" {} pages ", a.current_pages().len()))
+                        .title(format!(" {} MIDI pages ", a.current_pages().len()))
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Green)),
                 ),
@@ -14275,6 +14318,26 @@ mod tests {
         assert_eq!(a.screen, Screen::FxRack);
         assert_eq!(a.fx_target, 1);
         assert_eq!(a.fx_rack_parent, Screen::Meter);
+    }
+
+    #[test]
+    fn ft2_page_overlay_exposes_the_unloaded_loop_after_the_midi_pages() {
+        let p = presets();
+        let mut a = app(&p);
+        a.screen = Screen::Tracker;
+
+        a.open_overlay(Action::OpenPageOverlay);
+        let overlay = a.overlay.as_ref().unwrap();
+        let rows = overlay_rows(&a, overlay);
+        assert_eq!(rows.len(), 3 * LANES_PER_PAGE + 2);
+        assert_eq!(rows[3 * LANES_PER_PAGE], "P04 LOOP PLAYER · UNLOADED");
+
+        a.overlay.as_mut().unwrap().selection = 3 * LANES_PER_PAGE;
+        a.activate_overlay();
+        assert!(a.overlay.is_none());
+        assert_eq!(a.screen, Screen::TrackerLoop);
+        assert!(a.song.audio_loop.is_none());
+        assert!(a.status.contains("loop page unloaded"));
     }
 
     #[test]
@@ -16675,6 +16738,30 @@ mod tests {
             .map(|c| c.symbol.as_str())
             .collect::<String>();
         assert!(text.contains("Drums"));
+    }
+
+    #[test]
+    fn next_page_after_drums_opens_the_unloaded_fourth_loop_page() {
+        let p = presets();
+        let mut a = app(&p);
+        a.screen = Screen::Tracker;
+        a.tracker_page = 2;
+
+        a.switch_tracker_page();
+        assert_eq!(a.screen, Screen::TrackerLoop);
+        assert!(a.song.audio_loop.is_none());
+        let b = TestBackend::new(40, 20);
+        let mut t = Terminal::new(b).unwrap();
+        t.draw(|f| draw(f, &mut a)).unwrap();
+        let text = t
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol.as_str())
+            .collect::<String>();
+        assert!(text.contains("P04/04 · FT2 WAV LOOP"));
+        assert!(text.contains("UNLOADED"));
     }
     #[test]
     fn page_management_is_fully_reachable_with_pads_and_encoder_actions() {
