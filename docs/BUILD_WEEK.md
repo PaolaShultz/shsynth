@@ -69,13 +69,15 @@ does not replace theory or claim measured educational results. It explains why
 beginner readability, visible names, compact feedback, and fast experimentation
 are central product requirements rather than incidental extras.
 
-The OpenAI Build Week email arrived late in that process. SHR-DAW was not
-started for the competition. After reading the rules, the creator treated it
-openly as a pre-existing project and used the last pre-opening handoff as the
-baseline. The late decision brought a different challenge: decide quickly what
-could be completed and demonstrated before the deadline, what would be
-overreach, where to freeze the submission, and what should wait for
-post-competition development.
+The creator first learned about the challenge from an OpenAI Build Week email
+received at 22:14 on Friday, July 17, 2026, as shown by the inbox timestamp:
+only four calendar days before submission day. SHR-DAW was not started for the
+competition. After reading the rules, the creator treated it openly as a
+pre-existing project and used the last pre-opening handoff as the baseline. The
+late decision brought a different challenge: decide quickly what could be
+completed and demonstrated before the deadline, what would be overreach, where
+to freeze the submission, and what should wait for post-competition
+development.
 
 SHR-DAW is a weekend/free-time side project, sometimes developed in parallel
 with the creator's primary `bee247.hr` portal work. Its first public commit was
