@@ -10292,24 +10292,13 @@ fn draw<B: Backend>(f: &mut Frame<B>, a: &mut App) {
 fn draw_home<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     let z = f.size();
     f.render_widget(Block::default().style(Style::default().bg(Color::Black)), z);
-    f.render_widget(
-        Paragraph::new(format!("{BUILD_BADGE} · SHR-DAW · HOME"))
-            .alignment(Alignment::Center)
-            .style(
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::Black)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        rect(z.x, z.y + 1, z.width, 1),
-    );
     let recommendation = a.controller_learn_reason();
-    let bottom_rows = if recommendation.is_some() { 4 } else { 2 };
+    let bottom_rows = if recommendation.is_some() { 3 } else { 1 };
     let available = rect(
         z.x + 2,
-        z.y + 3,
+        z.y,
         z.width.saturating_sub(4),
-        z.height.saturating_sub(3 + bottom_rows),
+        z.height.saturating_sub(bottom_rows),
     );
     let rows = usize::from(available.height).min(HOME_ENTRIES.len());
     a.ensure_home_visible(rows);
@@ -10346,12 +10335,6 @@ fn draw_home<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         Paragraph::new(lines).style(Style::default().bg(Color::Black)),
         list,
     );
-    f.render_widget(
-        Paragraph::new("↑↓ / rotary browse · Enter / click open · Esc quit")
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(Color::DarkGray).bg(Color::Black)),
-        rect(z.x, z.y + z.height.saturating_sub(2), z.width, 1),
-    );
     if let Some(reason) = recommendation {
         f.render_widget(
             Paragraph::new(vec![
@@ -10368,17 +10351,20 @@ fn draw_home<B: Backend>(f: &mut Frame<B>, a: &mut App) {
                 )),
             ])
             .alignment(Alignment::Center),
-            rect(z.x, z.y + z.height.saturating_sub(4), z.width, 2),
+            rect(z.x, z.y + z.height.saturating_sub(3), z.width, 2),
         );
     }
-    if a.status != "Ready" {
-        f.render_widget(
-            Paragraph::new(truncate(&a.status, z.width as usize))
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(Color::DarkGray).bg(Color::Black)),
-            rect(z.x, z.y + z.height.saturating_sub(1), z.width, 1),
-        );
-    }
+    let status = if a.status == "Ready" {
+        "↑↓ / rotary browse · Enter / click open · Esc quit"
+    } else {
+        &a.status
+    };
+    f.render_widget(
+        Paragraph::new(truncate(status, z.width as usize))
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::DarkGray).bg(Color::Black)),
+        rect(z.x, z.y + z.height.saturating_sub(1), z.width, 1),
+    );
 }
 
 fn centered_text(value: &str, width: usize) -> String {
@@ -15279,7 +15265,10 @@ mod tests {
         assert!(text.contains("RECORDER"));
         assert!(text.contains("ROUTING"));
         assert!(text.contains("MIDI LEARN"));
+        assert!(!text.contains("SHR-DAW · HOME"));
         assert!(!text.contains("controller menu below"));
+        assert!(row_text(buffer, 19).contains("rotary browse"));
+        assert!(!row_text(buffer, 18).contains("rotary browse"));
         assert!(buffer.content.iter().any(|cell| {
             cell.fg == Color::Black
                 && cell.bg == Color::White
@@ -15293,7 +15282,7 @@ mod tests {
         let mut app = app(&p);
         let buffer = render_app(&mut app, 40, 20);
 
-        assert_eq!(app.hits.list, Rect::new(2, 6, 36, 9));
+        assert_eq!(app.hits.list, Rect::new(2, 5, 36, 9));
         for (index, entry) in HOME_ENTRIES.iter().enumerate() {
             let row = app.hits.list.y + index as u16;
             let text = row_text(&buffer, row);
@@ -15339,13 +15328,15 @@ mod tests {
     }
 
     #[test]
-    fn home_scrolls_without_truncation_or_overflow_at_compact_size() {
+    fn home_fits_without_truncation_or_overflow_at_compact_size() {
         let p = presets();
         let mut app = app(&p);
         for selected in 0..HOME_ENTRIES.len() {
             app.home_selected = selected;
             let buffer = render_app(&mut app, 38, 10);
             assert_eq!((app.hits.list.x, app.hits.list.width), (2, 34));
+            assert_eq!(app.hits.list.height, HOME_ENTRIES.len() as u16);
+            assert_eq!(app.home_offset, 0);
             let selected_row = (app.hits.list.y..app.hits.list.y + app.hits.list.height)
                 .find(|row| buffer_cell(&buffer, 2, *row).bg == Color::White)
                 .expect("selected Home row remains visible");
