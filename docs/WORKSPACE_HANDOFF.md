@@ -114,9 +114,9 @@ Keep transport/recording stopped and do not attach routes. Verify the shared
 38×18 overlay at `(1,1)`, its caller reveal and single highlighted launcher;
 encoder/keyboard parity and wrap behavior; silent hidden launchers; two-step
 Back behavior; ROUTE draft cancellation without Project mutation; the Loop
-Library's inbox/private selection and return behavior; and the MTR FX caller
-returning with its prior controller page intact. Record observed failures
-before changing behavior.
+Library's inbox/private selection and return behavior; and every entered screen,
+including an MTR FX caller return, starting on controller-menu page 1. Record
+observed failures before changing behavior.
 
 A later user-authorized musical/hardware pass should exercise the
 standalone/FT2 synth ownership split, N00B versus Play/REC/Edit, independent

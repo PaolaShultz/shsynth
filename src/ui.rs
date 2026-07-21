@@ -2410,6 +2410,7 @@ impl App {
             if self.screen == Screen::TrackerFiles && self.song_previewing {
                 self.stop_song_preview();
             }
+            self.menu_page_by_screen[screen.index()] = 0;
             self.page_select_mode = false;
             self.prepare_confirmation_action(Action::Noop);
         }
@@ -4555,8 +4556,9 @@ impl App {
         self.set_tracker_mode(TrackerMode::Play);
         self.cancel_tracker_gesture();
         let (order, row) = (self.tracker_order, self.tracker_row);
-        let messages = match sequencer::schedule(&self.song, &self.config.external_midi, order, row)
-        {
+        // The first pass starts at the cursor; every following pass starts at
+        // row zero of this Arrangement Step, so preflight the complete loop.
+        let messages = match sequencer::schedule(&self.song, &self.config.external_midi, order, 0) {
             Ok(messages) => messages,
             Err(error) => {
                 self.status = format!("tracker cannot play: {error}");
@@ -4571,8 +4573,7 @@ impl App {
             })
             .count();
         if notes == 0 && self.song.audio_loop.is_none() && !self.config.controller_clock.enabled {
-            self.status =
-                "tracker has no notes from this position · enable EDIT and enter notes".into();
+            self.status = "tracker has no notes in this loop · enable EDIT and enter notes".into();
             return;
         }
         let loop_status = self.loop_player.status();
@@ -8489,12 +8490,12 @@ fn dispatch_encoder_input(
         || app.screen == Screen::FxEditor
         || app.screen == Screen::Routing
         || app.confirm_routing_defaults;
-    let tracker_column_turn = physical
+    let tracker_transport_turn = physical
         && app.screen == Screen::Tracker
         && !value_editor_owns_encoder
         && !(app.controller_layout == ControllerLayout::Four && app.page_select_mode)
-        && matches!(app.tracker_mode, TrackerMode::Play | TrackerMode::Rec);
-    if tracker_column_turn {
+        && (app.sequencer.status().playing || app.tracker_recording.is_some());
+    if tracker_transport_turn {
         match action {
             crate::pads::EncoderAction::Up => app.move_tracker_rotary_column(-1),
             crate::pads::EncoderAction::Down => app.move_tracker_rotary_column(1),
@@ -9127,7 +9128,9 @@ fn perform(
             }
             a.confirm_delete = None;
             a.confirm_load = None;
-            a.set_tracker_edit(false);
+            if is_tracker_screen(a.screen) {
+                a.set_tracker_edit(false);
+            }
             let next_screen = match a.screen {
                 Screen::Home => Screen::Home,
                 Screen::Presets
@@ -14031,7 +14034,7 @@ fn configure_screenshot_scenario(app: &mut App, scenario: ScreenshotScenario) {
         ScreenshotScenario::TrackerPlay => {
             fill_demo_song(app);
             app.tracker_mode = TrackerMode::Play;
-            app.status = "PLAY mode · encoder selects columns".into();
+            app.status = "PLAY paused · encoder moves rows".into();
         }
         ScreenshotScenario::TrackerEdit => {
             fill_demo_song(app);
@@ -17183,15 +17186,15 @@ mod tests {
             .unwrap();
         drain(&rx, &mut four, Path::new("/none"), &tx);
         assert!(!four.page_select_mode);
+        assert_eq!(four.tracker_track, 0);
         assert_eq!(
-            four.tracker_track, 1,
-            "normal encoder operation remains available"
+            four.tracker_row, 1,
+            "a stopped FT2 transport leaves normal row navigation available"
         );
-        assert_eq!(four.tracker_row, 0);
     }
 
     #[test]
-    fn ft2_rotary_selects_columns_across_pages_but_keyboard_and_edit_keep_rows() {
+    fn ft2_rotary_selects_columns_only_during_transport_but_keyboard_and_edit_keep_rows() {
         let p = presets();
         let (tx, _rx) = mpsc::channel();
         let mut a = app(&p);
@@ -17202,8 +17205,19 @@ mod tests {
         a.tracker_row = 9;
         a.tracker_page = 0;
         a.tracker_track = LANES_PER_PAGE - 1;
-        let transport = a.sequencer.status();
 
+        // Remembered Play mode is still paused, so the rotary moves rows.
+        dispatch_encoder(
+            crate::pads::EncoderAction::Down,
+            &mut a,
+            Path::new("/none"),
+            &tx,
+        );
+        assert_eq!((a.tracker_page, a.tracker_track), (0, LANES_PER_PAGE - 1));
+        assert_eq!((a.tracker_order, a.tracker_row), (2, 10));
+
+        a.sequencer.play(&a.song, a.tracker_order, a.tracker_row);
+        let transport = a.sequencer.status();
         dispatch_encoder(
             crate::pads::EncoderAction::Down,
             &mut a,
@@ -17211,15 +17225,16 @@ mod tests {
             &tx,
         );
         assert_eq!((a.tracker_page, a.tracker_track), (1, 0));
-        assert_eq!((a.tracker_order, a.tracker_row), (2, 9));
+        assert_eq!((a.tracker_order, a.tracker_row), (2, 10));
         assert_eq!(a.sequencer.status().playing, transport.playing);
         assert_eq!(a.sequencer.status().order, transport.order);
         assert_eq!(a.sequencer.status().row, transport.row);
 
         key(KeyCode::Down, &mut a, Path::new("/none"), &tx);
         assert_eq!((a.tracker_page, a.tracker_track), (1, 0));
-        assert_eq!(a.tracker_row, 10);
+        assert_eq!(a.tracker_row, 11);
 
+        a.sequencer.stop();
         a.tracker_mode = TrackerMode::Edit;
         dispatch_encoder(
             crate::pads::EncoderAction::Down,
@@ -17228,7 +17243,7 @@ mod tests {
             &tx,
         );
         assert_eq!((a.tracker_page, a.tracker_track), (1, 0));
-        assert_eq!(a.tracker_row, 11);
+        assert_eq!(a.tracker_row, 12);
     }
 
     #[test]
@@ -17284,7 +17299,7 @@ mod tests {
     }
 
     #[test]
-    fn all_item_buttons_use_the_selected_screen_menu_and_pages_are_remembered() {
+    fn all_item_buttons_use_the_selected_screen_menu_and_screen_entry_starts_on_page_one() {
         let p = presets();
         let mut a = app(&p);
         let (tx, rx) = mpsc::channel();
@@ -17295,10 +17310,12 @@ mod tests {
         drain(&rx, &mut a, Path::new("/none"), &tx);
         assert_eq!(a.tracker_mode, TrackerMode::Edit);
         assert_eq!(a.menu_page(), 0, "entering STEP starts on its OPS page");
+        a.select_menu_page(1);
         perform(Action::OpenIdeas, &mut a, Path::new("/none"), None);
         assert_eq!(a.menu_page(), 0);
+        a.select_menu_page(1);
         perform(Action::OpenTracker, &mut a, Path::new("/none"), None);
-        assert_eq!(a.menu_page(), 0, "each screen remembers its page");
+        assert_eq!(a.menu_page(), 0, "FT2 entry starts on PLAY");
     }
     #[test]
     fn help_opens_links_and_returns_to_previous_screen() {
@@ -20096,6 +20113,7 @@ mod tests {
         let mut a = app(&p);
         let (tx, _rx) = mpsc::channel();
         a.screen = Screen::Playback;
+        a.playing = Some(p[0].clone());
         let playing = a.playing.clone();
         let values = a.values.clone();
         a.toggle_playback_noob();

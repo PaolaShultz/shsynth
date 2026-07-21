@@ -12,6 +12,8 @@ all three. It keeps the selected melodic page as the instrument and filters
 input through a chosen chromatic root plus major or natural-minor scale. An
 in-scale key keeps its original pitch; an out-of-scale key is consumed and
 stays silent. N00B never quantizes a rejected key to a different note.
+Each entry to the main FT2 screen opens controller-menu page 1, **PLAY**, where
+the **PLAY** and **RECORD** buttons are immediately available.
 
 In Play, N00B changes only what is heard. In REC and EDIT, allowed notes can be
 written normally while rejected notes remain silent and unwritten. Turning the
@@ -24,11 +26,12 @@ Player-selected scale directly without opening another screen or changing
 existing cells. Command pads and their releases remain consumed.
 
 On the main tracker grid, the physical main rotary selects the previous or next
-column in Play and REC, continuing through page boundaries from Software Synth
-to MIDI, Drums, and later pages. The selected column has a subtle dark full-
-column shade; the yellow cell cursor and row/warning emphasis remain stronger.
-The rotary still moves rows in EDIT, and keyboard arrows retain their existing
-row navigation in every mode. Rotary selection does not move the row, playhead,
+column while Play or REC transport is active, continuing through page
+boundaries from Software Synth to MIDI, Drums, and later pages. The selected
+column has a subtle dark full-column shade; the yellow cell cursor and
+row/warning emphasis remain stronger. While transport is paused the rotary
+moves rows, as it does in EDIT, and keyboard arrows retain row navigation in
+every mode. Active-transport rotary selection does not move the row, playhead,
 Arrangement Step, or transport.
 
 ## Projects, patterns, and arrangement
@@ -150,6 +153,10 @@ entry.
 The editor can add a note, note-off, or blank step. It can also change the page
 program and pattern master tempo, mute a lane, and move through rows, lanes,
 pages, and arrangement steps.
+
+Pressing **PLAY** on the main FT2 screen starts the first pass at the selected
+row. When playback reaches the end, subsequent passes restart at row 1 of that
+Pattern rather than at the original play cursor.
 
 Tempo commands inside cells still work inside the current pattern. When
 playback enters the next arrangement step, tempo starts again from that

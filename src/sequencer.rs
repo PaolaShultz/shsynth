@@ -1766,6 +1766,21 @@ pub fn schedule(
     Ok(result)
 }
 
+fn playback_schedules(
+    song: &Song,
+    config: &ExternalMidiConfig,
+    order: usize,
+    row: usize,
+) -> Result<(Vec<ScheduledMessage>, Vec<ScheduledMessage>)> {
+    let first = schedule(song, config, order, row)?;
+    let repeat = if row == 0 {
+        Vec::new()
+    } else {
+        schedule(song, config, order, 0)?
+    };
+    Ok((first, repeat))
+}
+
 /// MIDI clock is always 24 pulses per quarter note. When the tracker uses a
 /// row count that does not divide 24, distribute pulses across rows without
 /// changing the average clock rate.
@@ -2077,6 +2092,7 @@ fn run_transport(
 ) {
     let mut outputs = DestinationPool::new(config.clone(), instrument);
     let mut messages = Vec::new();
+    let mut repeat_messages = Vec::new();
     let mut index = 0;
     let mut started = Instant::now();
     let mut muted = BTreeSet::new();
@@ -2097,10 +2113,14 @@ fn run_transport(
                 cleanup_lanes(&mut outputs, &mut active_notes);
                 note_owners.clear();
                 cleanup_thru(&mut outputs, &mut thru_notes);
-                match schedule(&song, &config, order, row) {
-                    Ok(planned) => messages = planned,
+                match playback_schedules(&song, &config, order, row) {
+                    Ok((first, repeat)) => {
+                        messages = first;
+                        repeat_messages = repeat;
+                    }
                     Err(error) => {
                         messages.clear();
+                        repeat_messages.clear();
                         transport_targets.clear();
                         if let Ok(mut s) = status.lock() {
                             s.playing = false;
@@ -2113,6 +2133,7 @@ fn run_transport(
                 }
                 transport_targets = messages
                     .iter()
+                    .chain(repeat_messages.iter())
                     .filter_map(|message| message.target.clone())
                     .collect();
                 for target in &transport_targets {
@@ -2126,8 +2147,9 @@ fn run_transport(
                     .get(order)
                     .and_then(|number| song.patterns.get(number))
                     .map_or(config.default_tempo, |pattern| pattern.tempo);
-                loop_origin_beat = crate::loop_player::song_position_beats(&song, order, row);
-                clock.play(loop_origin_beat, transport_tempo);
+                let first_origin_beat = crate::loop_player::song_position_beats(&song, order, row);
+                loop_origin_beat = crate::loop_player::song_position_beats(&song, order, 0);
+                clock.play(first_origin_beat, transport_tempo);
                 muted.clear();
                 active_notes.clear();
                 note_owners.clear();
@@ -2145,6 +2167,7 @@ fn run_transport(
             Ok(Transport::Stop) => {
                 clock.stop();
                 messages.clear();
+                repeat_messages.clear();
                 index = 0;
                 cleanup_lanes(&mut outputs, &mut active_notes);
                 note_owners.clear();
@@ -2206,6 +2229,15 @@ fn run_transport(
             Ok(Transport::Tempo(bpm)) => {
                 let elapsed = started.elapsed();
                 rescale_schedule(&mut messages, index, elapsed, transport_tempo, bpm);
+                if !repeat_messages.is_empty() {
+                    rescale_schedule(
+                        &mut repeat_messages,
+                        0,
+                        Duration::ZERO,
+                        transport_tempo,
+                        bpm,
+                    );
+                }
                 transport_tempo = bpm;
                 clock.tempo(f64::from(bpm));
             }
@@ -2291,6 +2323,9 @@ fn run_transport(
         if !messages.is_empty() && index == messages.len() {
             cleanup_lanes(&mut outputs, &mut active_notes);
             note_owners.clear();
+            if !repeat_messages.is_empty() {
+                messages = std::mem::take(&mut repeat_messages);
+            }
             index = 0;
             started = Instant::now();
             clock.restart_cycle(loop_origin_beat);
@@ -3520,6 +3555,24 @@ mod tests {
             ]
         );
         assert_eq!(m.last().unwrap().at, Duration::from_millis(500));
+    }
+    #[test]
+    fn partial_playback_repeats_from_the_selected_pattern_start() {
+        let c = config();
+        let mut s = Song::new(&c);
+        s.patterns.insert(0, Pattern::empty(4, s.total_lanes()));
+
+        let (first, repeat) = playback_schedules(&s, &c, 0, 2).unwrap();
+        let marker_rows = |messages: &[ScheduledMessage]| {
+            messages
+                .iter()
+                .filter(|message| message.bytes.is_empty())
+                .map(|message| message.row)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(marker_rows(&first), vec![2, 3, 3]);
+        assert_eq!(marker_rows(&repeat), vec![0, 1, 2, 3, 3]);
     }
     #[test]
     fn system_realtime_messages_do_not_have_a_mute_channel() {

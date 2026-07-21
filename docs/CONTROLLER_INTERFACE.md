@@ -29,7 +29,7 @@ from the splash.
 | MTR | With the final bus enabled: choose Synth/Loop/Input, adjust its bounded smoothed level, toggle mute, inspect readiness/final peaks/clips/limiter reduction, and start/stop the callback-boundary final stereo recording. With it disabled: retain the passive CPU and legacy graph meter. Its FX launcher uses the same master-overlay framework as FT2, then opens the existing selected source/AUX/master rack. |
 | Playback | Inspect held notes/chords, aligned decimal MIDI strike velocities, and keyboard state; toggle the N00B filter in place and, while enabled, turn the master rotary through all root plus major/natural-minor choices shown by a compact `SCALE` control; reset the 12 mapped parameters in place; open and return from the FX rack without stopping the sound; record/play/save MIDI Ideas; stop/panic; contextual help; return to Presets. N00B never replaces the Player body. The 12 configured synthv1 CC controls continuously adjust parameters with pickup. |
 | Ideas | Previous/next/first/last idea; inspect, load, play, delete, record, and save; panic; contextual help; Exit to Home. |
-| FT2 normal | Main rotary selects the previous/next column across page boundaries in Play and Rec; keyboard Up/Down still moves rows, and Edit keeps rotary row movement. The redundant Page−/Page+/Track−/Track+ buttons are gone: PLAY holds cell edit and transport, SELECT opens PAGE/PATTERN/SONG/ROUTE rotary overlays, and SYS holds panic/N00B/help/Exit. |
+| FT2 normal | While Play or Rec transport is active, the main rotary selects the previous/next column across page boundaries. While transport is paused it moves rows, as it does in Edit; keyboard Up/Down always moves rows. The redundant Page−/Page+/Track−/Track+ buttons are gone: PLAY holds cell edit and transport, SELECT opens PAGE/PATTERN/SONG/ROUTE rotary overlays, and SYS holds panic/N00B/help/Exit. |
 | FT2 record | Record quantized notes into the selected page/current pattern and route live notes only to that page's hardware MIDI target. Rotary turns are ignored while any recorded notes are held and work again after every Note Off; stop record, stop, exit, and panic remain available. |
 | FT2 edit | Musical keyboard or incoming MIDI note/chord gesture entry; independent 1/1–1/128 note length; blank/skip; erase; note off; a 0–32-row ADD value; PAGE, LENGTH, and ADD rotary overlays; and leave edit. N00B may remain on so only allowed scale notes are entered. Command notes are consumed for editing and never doubled through the synth. |
 | FT2 N00B | Independent on/off scale filter layered over Play, Record, and Step Edit on a melodic page, using the scale selected on Player. Accepted notes keep their pitch; rejected notes stay silent. Play remains non-writing, while Record/Edit write only accepted notes. Toggling N00B is immediate, opens no screen, preserves the current mode, and moving to Drums turns only the filter off. |
@@ -95,14 +95,15 @@ input, toggle, and return layer.
 - Four buttons: four item buttons; encoder press enters/leaves page-selection
   mode and encoder turn changes pages while that mode is visible.
 - Outside four-button page-selection mode, encoder turns retain list, row, and
-  field adjustment except on the normal FT2 grid: Play and Rec use turns for
-  cross-page column selection, while Edit keeps row movement. Encoder press
+  field adjustment except on the normal FT2 grid: active Play or Rec transport
+  uses turns for cross-page column selection, while paused transport and Edit
+  keep row movement. Encoder press
   retains the existing select/confirm action on eight- and five-button layouts.
   Menu slots do not duplicate those master rotary selection actions.
 - An open overlay always gives the encoder to overlay browsing/editing, so a
   four-button controller cannot become stranded in page-selection mode.
-- Each screen remembers its last selected page. Entering/leaving a contextual
-  mode resets that context to page 1, preventing stale hidden meanings.
+- Entering any screen or contextual mode selects its page 1, preventing a page
+  choice from a previous visit from becoming the new screen's hidden meaning.
 - Page 1 holds the primary screen workflow; for FT2 normal mode it is PLAY.
   On every workspace, child screen,
   and contextual editor, `EXIT` is page 4/item 4 and returns exactly one level.
