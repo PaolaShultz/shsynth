@@ -45,7 +45,7 @@ use ratatui::{
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Stdout};
+use std::io::{self, IsTerminal, Stdout};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{
@@ -726,9 +726,10 @@ impl FxPickup {
     }
 }
 
-struct AudioPorts {
+struct AvailablePorts {
     playback: Vec<String>,
     capture_sources: Vec<String>,
+    midi_outputs: Vec<String>,
 }
 
 fn is_tracker_screen(screen: Screen) -> bool {
@@ -758,15 +759,16 @@ fn take_engine_when_owned<T>(
     }
 }
 
-fn arrangement_software_route(song: &Song, start_order: usize) -> Result<Option<SoftwareRoute>> {
-    let routes = song
-        .order
+fn scheduled_software_route(
+    messages: &[sequencer::ScheduledMessage],
+) -> Result<Option<SoftwareRoute>> {
+    let routes = messages
         .iter()
-        .skip(start_order)
-        .filter_map(|number| song.patterns.get(number))
-        .flat_map(|pattern| pattern.pages.iter())
-        .filter(|page| page.enabled)
-        .filter_map(|page| match &page.target {
+        .filter(|message| {
+            matches!(message.bytes.as_slice(), [status, _, velocity, ..]
+                if status & 0xf0 == 0x90 && *velocity > 0)
+        })
+        .filter_map(|message| match message.target.as_ref()? {
             PageTarget::Software(route) => Some(route.clone()),
             PageTarget::Synthv1(name) => Some(SoftwareRoute::synthv1(name)),
             _ => None,
@@ -1065,7 +1067,7 @@ impl App {
         midi_backend: engine::SharedBackend,
         tracker_io: TrackerIo,
         config: RuntimeConfig,
-        audio_ports: AudioPorts,
+        available_ports: AvailablePorts,
         engine_state: PathBuf,
         routing_defaults_path: PathBuf,
     ) -> Self {
@@ -1106,14 +1108,40 @@ impl App {
         if let Ok(mut input) = tracker_io.input.lock() {
             *input = Some(tracker_live_input.clone());
         }
-        let audio_recorder =
-            AudioRecorder::new(config.capture.clone(), audio_ports.capture_sources.clone());
-        let resolved_audio = config.resolve_audio_route(&audio_ports.playback);
+        let audio_recorder = AudioRecorder::new(
+            config.capture.clone(),
+            available_ports.capture_sources.clone(),
+        );
+        let resolved_audio = config.resolve_audio_route(&available_ports.playback);
         let mut loop_config = config.loop_player.clone();
         if resolved_audio.outputs.len() == 2 {
             loop_config.outputs = resolved_audio.outputs.clone();
         }
         let loop_player = crate::loop_player::LoopPlayer::new(&loop_config, transport_clock);
+        let managed_outputs = [
+            config.midi_output_match.to_ascii_lowercase(),
+            config
+                .yoshimi
+                .backend
+                .midi_output_match
+                .to_ascii_lowercase(),
+            config
+                .fluidsynth
+                .backend
+                .midi_output_match
+                .to_ascii_lowercase(),
+        ];
+        let available_page_outputs = available_ports
+            .midi_outputs
+            .into_iter()
+            .filter(|name| {
+                let name = name.to_ascii_lowercase();
+                !managed_outputs
+                    .iter()
+                    .any(|needle| !needle.is_empty() && name.contains(needle))
+            })
+            .collect();
+        let loop_imports = crate::loop_player::list_wavs(&config.loop_player.import_directory);
         Self {
             catalogs: catalogs.to_vec(),
             backend_index,
@@ -1205,14 +1233,14 @@ impl App {
             page_manager_original: None,
             page_manager_mode: PageManagerMode::Pages,
             page_target_candidates: Vec::new(),
-            available_page_outputs: Vec::new(),
+            available_page_outputs,
             page_target_selected: 0,
             page_channel_draft: 0,
             audio_recorder,
-            capture_sources: audio_ports.capture_sources,
+            capture_sources: available_ports.capture_sources,
             audio_track_selected: 0,
             loop_player,
-            loop_imports: Vec::new(),
+            loop_imports,
             loop_selected: 0,
             loop_edit_bars: false,
             pattern_clipboard: None,
@@ -1261,7 +1289,7 @@ impl App {
             routing: RoutingEditor::default(),
             routing_inputs: Vec::new(),
             routing_outputs: Vec::new(),
-            routing_audio_ports: audio_ports.playback,
+            routing_audio_ports: available_ports.playback,
         }
     }
 
@@ -1463,6 +1491,30 @@ impl App {
             names.sort_by_key(|name| name.to_ascii_lowercase());
             names.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
         }
+        let managed = [
+            self.config.midi_output_match.to_ascii_lowercase(),
+            self.config
+                .yoshimi
+                .backend
+                .midi_output_match
+                .to_ascii_lowercase(),
+            self.config
+                .fluidsynth
+                .backend
+                .midi_output_match
+                .to_ascii_lowercase(),
+        ];
+        self.available_page_outputs = self
+            .routing_outputs
+            .iter()
+            .filter(|name| {
+                let name = name.to_ascii_lowercase();
+                !managed
+                    .iter()
+                    .any(|needle| !needle.is_empty() && name.contains(needle))
+            })
+            .cloned()
+            .collect();
         self.routing_audio_ports = engine::jack_ports();
         self.refresh_live_midi_connections();
         self.refresh_page_targets();
@@ -2341,7 +2393,6 @@ impl App {
             }
             if !previous_tracker && next_tracker {
                 self.unload_owned_engine(|owner| *owner == EngineOwner::SoftwareSynth);
-                self.ensure_tracker_engine();
             }
         }
     }
@@ -3677,9 +3728,6 @@ impl App {
         };
     }
     fn sync_tracker_route(&mut self) {
-        if self.tracker_workspace_active() {
-            self.ensure_tracker_engine();
-        }
         let Some(page) = self.current_page() else {
             return;
         };
@@ -3841,9 +3889,14 @@ impl App {
         messages
     }
 
-    fn audition_keyboard_note(&self, note: u8, velocity: u8) {
+    fn audition_keyboard_note(&mut self, note: u8, velocity: u8) {
         if !self.tracker_noob_allows(note) {
             return;
+        }
+        if let Some(route) = self.tracker_software_route() {
+            if !self.ensure_tracker_engine_for(&route) {
+                return;
+            }
         }
         let Some(page) = self.current_page() else {
             return;
@@ -3908,32 +3961,12 @@ impl App {
         if !self.config.external_midi.output_match.is_empty() {
             targets.push(PageTarget::ConfiguredExternal);
         }
-        if let Ok(outputs) =
-            sequencer::available_midi_outputs(&self.config.external_midi.client_name)
-        {
-            let managed = [
-                self.config.midi_output_match.as_str(),
-                self.config.yoshimi.backend.midi_output_match.as_str(),
-                self.config.fluidsynth.backend.midi_output_match.as_str(),
-            ];
-            self.available_page_outputs = outputs
-                .into_iter()
-                .filter(|name| {
-                    let name = name.to_lowercase();
-                    !managed
-                        .iter()
-                        .any(|needle| !needle.is_empty() && name.contains(&needle.to_lowercase()))
-                })
-                .collect();
-            targets.extend(
-                self.available_page_outputs
-                    .iter()
-                    .map(|name| crate::midi_endpoint::stable_identity(name))
-                    .map(PageTarget::Midi),
-            );
-        } else {
-            self.available_page_outputs.clear();
-        }
+        targets.extend(
+            self.available_page_outputs
+                .iter()
+                .map(|name| crate::midi_endpoint::stable_identity(name))
+                .map(PageTarget::Midi),
+        );
         if let Some(target) = self.current_page().map(|page| page.target.clone()) {
             targets.push(target);
         }
@@ -4420,27 +4453,39 @@ impl App {
         self.set_tracker_mode(TrackerMode::Play);
         self.cancel_tracker_gesture();
         let (order, row) = (self.tracker_order, self.tracker_row);
-        let notes = match sequencer::schedule(&self.song, &self.config.external_midi, order, row) {
-            Ok(messages) => messages
-                .iter()
-                .filter(|message| {
-                    message
-                        .bytes
-                        .first()
-                        .is_some_and(|status| status & 0xf0 == 0x90)
-                })
-                .count(),
+        let messages = match sequencer::schedule(&self.song, &self.config.external_midi, order, row)
+        {
+            Ok(messages) => messages,
             Err(error) => {
                 self.status = format!("tracker cannot play: {error}");
                 return;
             }
         };
+        let notes = messages
+            .iter()
+            .filter(|message| {
+                matches!(message.bytes.as_slice(), [status, _, velocity, ..]
+                    if status & 0xf0 == 0x90 && *velocity > 0)
+            })
+            .count();
         if notes == 0 && self.song.audio_loop.is_none() && !self.config.controller_clock.enabled {
             self.status =
                 "tracker has no notes from this position · enable EDIT and enter notes".into();
             return;
         }
-        match arrangement_software_route(&self.song, order) {
+        let loop_status = self.loop_player.status();
+        let loop_error = if self.song.audio_loop.is_some()
+            && (!loop_status.loaded || loop_status.error.is_some())
+            && !self.load_current_loop()
+        {
+            if notes == 0 {
+                return;
+            }
+            Some(self.status.clone())
+        } else {
+            None
+        };
+        match scheduled_software_route(&messages) {
             Ok(Some(route)) if !self.ensure_tracker_engine_for(&route) => return,
             Ok(Some(_)) => {}
             Ok(None) => self.unload_owned_engine(|owner| matches!(owner, EngineOwner::Tracker(_))),
@@ -4450,14 +4495,20 @@ impl App {
             }
         }
         self.sequencer.play(&self.song, order, row);
-        let offline = self
-            .song
-            .patterns
-            .values()
-            .flat_map(|pattern| pattern.pages.iter())
-            .filter(|page| page.enabled && !self.target_online(&page.target))
+        let offline = messages
+            .iter()
+            .filter(|message| {
+                matches!(message.bytes.as_slice(), [status, _, velocity, ..]
+                    if status & 0xf0 == 0x90 && *velocity > 0)
+            })
+            .filter_map(|message| message.target.as_ref())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .filter(|target| !self.target_online(target))
             .count();
-        self.status = if offline == 0 {
+        self.status = if let Some(error) = loop_error {
+            format!("tracker playing · {notes} MIDI · {error}")
+        } else if offline == 0 {
             format!(
                 "tracker playing · {notes} MIDI · loop {}{}",
                 if self.song.audio_loop.is_some() {
@@ -4508,7 +4559,7 @@ impl App {
         };
         if !self.target_has_hardware_route(&page.target) {
             self.status =
-                "REC needs an available MIDI hardware output · synth/keyboard fallback stays isolated"
+                "REC needs an available MIDI hardware output · synth/keyboard input stays isolated"
                     .into();
             return;
         }
@@ -4653,18 +4704,9 @@ impl App {
         );
     }
 
-    fn refresh_loop_imports(&mut self) {
-        self.loop_imports =
-            crate::loop_player::list_wavs(&self.config.loop_player.import_directory);
-        self.loop_selected = self
-            .loop_selected
-            .min(self.loop_imports.len().saturating_sub(1));
-    }
-
     fn open_tracker_loop(&mut self) {
         self.loop_library_mode = false;
         self.set_screen(Screen::TrackerLoop);
-        self.refresh_loop_imports();
         self.reset_context_page();
         self.status = if self.song.audio_loop.is_some() {
             "loop page ready".into()
@@ -5284,20 +5326,10 @@ impl App {
                 if let Some(first) = self.first_synthv1_name() {
                     sequencer::upgrade_legacy_synth_routes(&mut song, &first);
                 }
-                match arrangement_software_route(&song, 0) {
-                    Ok(Some(route)) if !self.ensure_tracker_engine_for(&route) => return,
-                    Ok(Some(_)) => {}
-                    Ok(None) => {
-                        self.unload_owned_engine(|owner| matches!(owner, EngineOwner::Tracker(_)))
-                    }
-                    Err(error) => {
-                        self.status = format!("song preview: {error}");
-                        return;
-                    }
-                }
-                let notes =
-                    sequencer::schedule(&song, &self.config.external_midi, 0, 0).map(|messages| {
-                        messages
+                let messages = sequencer::schedule(&song, &self.config.external_midi, 0, 0);
+                match messages {
+                    Ok(messages) => {
+                        let notes = messages
                             .iter()
                             .filter(|message| {
                                 message
@@ -5305,13 +5337,22 @@ impl App {
                                     .first()
                                     .is_some_and(|status| status & 0xf0 == 0x90)
                             })
-                            .count()
-                    });
-                match notes {
-                    Ok(0) if song.audio_loop.is_none() => {
-                        self.status = format!("{name} has no notes or loop to preview")
-                    }
-                    Ok(notes) => {
+                            .count();
+                        if notes == 0 && song.audio_loop.is_none() {
+                            self.status = format!("{name} has no notes or loop to preview");
+                            return;
+                        }
+                        match scheduled_software_route(&messages) {
+                            Ok(Some(route)) if !self.ensure_tracker_engine_for(&route) => return,
+                            Ok(Some(_)) => {}
+                            Ok(None) => self.unload_owned_engine(|owner| {
+                                matches!(owner, EngineOwner::Tracker(_))
+                            }),
+                            Err(error) => {
+                                self.status = format!("song preview: {error}");
+                                return;
+                            }
+                        }
                         self.sequencer.stop();
                         if song.audio_loop.is_some()
                             && !self.load_loop_settings(song.audio_loop.clone())
@@ -7843,7 +7884,39 @@ pub fn run(catalogs: &[Catalog], state: &Path, config: &RuntimeConfig) -> Result
     execute!(io::stdout(), EnterAlternateScreen, crossterm::cursor::Hide)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
-    app_loop(&mut terminal, catalogs, state, config)
+    app_loop(
+        &mut terminal,
+        catalogs,
+        state,
+        config,
+        io::stdin().is_terminal(),
+    )
+}
+
+fn midi_input_available(router: Option<&engine::MidiRouter>) -> bool {
+    router.is_some_and(|router| {
+        router.availability().controller_available()
+            || router
+                .availability()
+                .performance
+                .iter()
+                .any(crate::engine::MidiInputState::available)
+    })
+}
+
+fn expected_startup_midi(router: Option<&engine::MidiRouter>) -> Option<String> {
+    let availability = router?.availability();
+    availability
+        .controller
+        .as_ref()
+        .filter(|input| !input.available())
+        .or_else(|| {
+            availability
+                .performance
+                .iter()
+                .find(|input| !input.available())
+        })
+        .map(|input| input.wanted.clone())
 }
 
 fn app_loop(
@@ -7851,6 +7924,7 @@ fn app_loop(
     catalogs: &[Catalog],
     state: &Path,
     config: &RuntimeConfig,
+    mut terminal_keyboard: bool,
 ) -> Result<()> {
     let stopping = Arc::new(AtomicBool::new(false));
     for sig in [
@@ -7860,11 +7934,60 @@ fn app_loop(
     ] {
         signal_hook::flag::register(sig, Arc::clone(&stopping))?;
     }
+    let splash_started = Instant::now();
+    terminal.draw(|frame| {
+        crate::startup_splash::draw(
+            frame,
+            splash_started.elapsed(),
+            terminal_keyboard,
+            None,
+            BUILD_BADGE,
+        )
+    })?;
     let (tx, rx) = mpsc::channel();
     let controller_notice = auto_wire_controller(state, config)
         .err()
         .map(|error| error.to_string());
-    let router = engine::MidiRouter::start(state, config, tx.clone());
+    let mut router = engine::MidiRouter::start(state, config, tx.clone());
+    let mut next_input_scan = Instant::now();
+    loop {
+        let elapsed = splash_started.elapsed();
+        let midi_available = midi_input_available(router.as_ref().ok());
+        let input_available =
+            crate::startup_splash::qualified_input_available(terminal_keyboard, midi_available);
+        if !crate::startup_splash::waiting_for_input(elapsed, terminal_keyboard, midi_available)
+            || stopping.load(Ordering::Relaxed)
+        {
+            break;
+        }
+        let expected = expected_startup_midi(router.as_ref().ok());
+        terminal.draw(|frame| {
+            crate::startup_splash::draw(
+                frame,
+                elapsed,
+                input_available,
+                expected.as_deref(),
+                BUILD_BADGE,
+            )
+        })?;
+        if !input_available && Instant::now() >= next_input_scan {
+            router = match router {
+                Ok(mut active) => active.reconfigure_inputs(config).map(|_| active),
+                Err(_) => engine::MidiRouter::start(state, config, tx.clone()),
+            };
+            next_input_scan = Instant::now() + crate::startup_splash::INPUT_RESCAN_INTERVAL;
+        }
+        if event::poll(Duration::from_millis(30))? {
+            match event::read()? {
+                Event::Key(key) if key.kind != KeyEventKind::Release => match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => return Ok(()),
+                    _ => terminal_keyboard = true,
+                },
+                _ => {}
+            }
+        }
+    }
+    while rx.try_recv().is_ok() {}
     let output = router
         .as_ref()
         .map(engine::MidiRouter::output)
@@ -7911,6 +8034,8 @@ fn app_loop(
         .unwrap_or_else(|_| Arc::new(AtomicBool::new(false)));
     let available_audio_ports = engine::jack_ports();
     let capture_sources = engine::jack_capture_sources();
+    let available_midi_outputs =
+        sequencer::available_midi_outputs(&config.external_midi.client_name).unwrap_or_default();
     let mut app = App::new(
         catalogs,
         output,
@@ -7923,9 +8048,10 @@ fn app_loop(
             lifecycle: midi_lifecycle,
         },
         config.clone(),
-        AudioPorts {
+        AvailablePorts {
             playback: available_audio_ports,
             capture_sources,
+            midi_outputs: available_midi_outputs,
         },
         state.to_path_buf(),
         sequencer::routing_defaults_path(),
@@ -7946,7 +8072,7 @@ fn app_loop(
     }
     if let Err(e) = &router {
         let notice = if config.midi_autoconnect {
-            format!("keyboard fallback · preferred MIDI input missing: {e:#}")
+            format!("keyboard input · preferred MIDI input missing: {e:#}")
         } else {
             "keyboard input · MIDI controller routing disabled".into()
         };
@@ -7974,7 +8100,7 @@ fn app_loop(
             ));
         }
         if !notices.is_empty() {
-            let notice = format!("keyboard fallback · {}", notices.join(" · "));
+            let notice = format!("keyboard input · {}", notices.join(" · "));
             app.status = notice.clone();
             app.controller_fallback = Some(notice);
         }
@@ -13417,9 +13543,10 @@ fn screenshot_app(mut config: RuntimeConfig) -> App {
             lifecycle: engine::MidiLifecycle::default(),
         },
         config,
-        AudioPorts {
+        AvailablePorts {
             playback: available_audio_ports,
             capture_sources,
+            midi_outputs: Vec::new(),
         },
         PathBuf::from("/none"),
         PathBuf::from("/none"),
@@ -13942,6 +14069,10 @@ mod tests {
             unavailable: None,
         }];
         let config = RuntimeConfig::default();
+        let available_midi_outputs = (!config.external_midi.output_match.is_empty())
+            .then(|| config.external_midi.output_match.clone())
+            .into_iter()
+            .collect();
         let available_audio_ports = config.audio_outputs.clone();
         let capture_sources = config
             .capture
@@ -13962,17 +14093,15 @@ mod tests {
                 lifecycle: engine::MidiLifecycle::default(),
             },
             config,
-            AudioPorts {
+            AvailablePorts {
                 playback: available_audio_ports,
                 capture_sources,
+                midi_outputs: available_midi_outputs,
             },
             PathBuf::from("/none"),
             defaults,
         );
         app.web_help_enabled = false;
-        if !app.config.external_midi.output_match.is_empty() {
-            app.available_page_outputs = vec![app.config.external_midi.output_match.clone()];
-        }
         app
     }
     fn learn_send(
@@ -17048,9 +17177,10 @@ mod tests {
                 lifecycle: engine::MidiLifecycle::default(),
             },
             config,
-            AudioPorts {
+            AvailablePorts {
                 playback: available_audio_ports,
                 capture_sources,
+                midi_outputs: Vec::new(),
             },
             PathBuf::from("/none"),
             PathBuf::from("/none"),
@@ -18826,18 +18956,79 @@ mod tests {
     fn arrangement_refuses_to_misroute_two_pattern_owned_synth_presets() {
         let p = presets();
         let mut a = app(&p);
+        let empty = sequencer::schedule(&a.song, &a.config.external_midi, 0, 0).unwrap();
+        assert_eq!(scheduled_software_route(&empty).unwrap(), None);
+
+        a.song.patterns.get_mut(&0).unwrap().rows[0][0].note = Note::On(60);
+        let one_route = sequencer::schedule(&a.song, &a.config.external_midi, 0, 0).unwrap();
         assert_eq!(
-            arrangement_software_route(&a.song, 0).unwrap(),
+            scheduled_software_route(&one_route).unwrap(),
             Some(SoftwareRoute::synthv1("Preset 00"))
         );
         let mut second = a.song.patterns[&0].pages[0].clone();
         second.name = "SECOND SYNTH".into();
         second.target = PageTarget::Software(SoftwareRoute::synthv1("Preset 01"));
-        a.song.patterns.get_mut(&0).unwrap().pages.push(second);
-        assert!(arrangement_software_route(&a.song, 0)
+        let pattern = a.song.patterns.get_mut(&0).unwrap();
+        let second_page_lane = pattern.pages.len() * LANES_PER_PAGE;
+        pattern.pages.push(second);
+        for row in &mut pattern.rows {
+            row.extend([Cell::default(); LANES_PER_PAGE]);
+        }
+        pattern.rows[0][second_page_lane].note = Note::On(64);
+        let two_routes = sequencer::schedule(&a.song, &a.config.external_midi, 0, 0).unwrap();
+        assert!(scheduled_software_route(&two_routes)
             .unwrap_err()
             .to_string()
             .contains("multiple software instruments"));
+    }
+
+    #[test]
+    fn opening_empty_ft2_does_not_start_the_default_software_engine() {
+        let p = presets();
+        let mut a = app(&p);
+
+        a.set_screen(Screen::Tracker);
+
+        assert!(a.engine.is_none());
+        assert!(a.engine_owner.is_none());
+        assert_eq!(a.song.patterns[&0].rows[0][0].note, Note::Empty);
+    }
+
+    #[test]
+    fn loop_only_transport_does_not_wait_for_an_empty_software_page() {
+        let p = presets();
+        let mut a = app(&p);
+        a.screen = Screen::TrackerLoop;
+        a.song.audio_loop = Some(sequencer::LoopSettings {
+            file: "ready.wav".into(),
+            source_bpm_x100: 12_000,
+            interpretation: sequencer::BpmInterpretation::Normal,
+            start_beat: 0,
+            length_beats: 4,
+            offset_beats: 0,
+        });
+        a.loop_player
+            .set_preview_status(crate::loop_player::LoopStatus {
+                loaded: true,
+                file: Some("ready.wav".into()),
+                source_rate: 48_000,
+                source_channels: 2,
+                duration: Duration::from_secs(2),
+                ..crate::loop_player::LoopStatus::default()
+            });
+
+        a.toggle_tracker_playback();
+
+        let deadline = Instant::now() + Duration::from_millis(250);
+        while !a.sequencer.status().available && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let transport = a.sequencer.status();
+        assert!(transport.playing);
+        assert!(transport.available);
+        assert!(transport.targets.is_empty());
+        assert!(a.engine.is_none());
+        assert!(a.engine_owner.is_none());
     }
 
     #[test]

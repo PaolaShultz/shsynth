@@ -2089,28 +2089,28 @@ fn run_transport(
                 cleanup_lanes(&mut outputs, &mut active_notes);
                 note_owners.clear();
                 cleanup_thru(&mut outputs, &mut thru_notes);
-                transport_targets = song
-                    .patterns
-                    .values()
-                    .flat_map(|pattern| pattern.pages.iter())
-                    .filter(|page| page.enabled)
-                    .map(|page| page.target.clone())
-                    .collect();
-                for target in &transport_targets {
-                    outputs.refresh(target);
-                }
-                update_target_status(&status, &outputs, &transport_targets);
                 match schedule(&song, &config, order, row) {
                     Ok(planned) => messages = planned,
                     Err(error) => {
                         messages.clear();
+                        transport_targets.clear();
                         if let Ok(mut s) = status.lock() {
                             s.playing = false;
+                            s.targets.clear();
+                            s.fallbacks.clear();
                             s.error = Some(error.to_string());
                         }
                         continue;
                     }
                 }
+                transport_targets = messages
+                    .iter()
+                    .filter_map(|message| message.target.clone())
+                    .collect();
+                for target in &transport_targets {
+                    outputs.refresh(target);
+                }
+                update_target_status(&status, &outputs, &transport_targets);
                 index = 0;
                 started = Instant::now();
                 transport_tempo = song
@@ -2426,7 +2426,8 @@ fn update_target_status(
                     .map(|notice| (target.clone(), notice))
             })
             .collect();
-        status.available = status.targets.values().any(Option::is_none);
+        status.available =
+            status.targets.is_empty() || status.targets.values().any(Option::is_none);
         status.error = status.targets.iter().find_map(|(target, error)| {
             error
                 .as_ref()

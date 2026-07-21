@@ -33,6 +33,7 @@ mod preset;
 mod recording;
 mod scale;
 mod sequencer;
+mod startup_splash;
 mod ui;
 mod ui_text;
 

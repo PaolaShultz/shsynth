@@ -52,7 +52,7 @@ remains separate. Read
 - Add one or more performance MIDI keyboards to play velocity, chords, and live
   recordings. They bypass controller mappings even when note or CC numbers
   overlap.
-- If the controller is not ready yet, use the computer keyboard fallback to
+- If the controller is not ready yet, use the computer keyboard input to
   navigate setup and enter tracker notes with `Z S X D C V G B H N J M`.
 - Open **FILES** in FT2 to load one of the seeded demo Projects; its `AUTO`
   pages use whatever MIDI destination and channels this machine currently has.

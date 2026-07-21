@@ -45,6 +45,9 @@ whose FT2 workspace exposes four musician-facing pages:
 The Loop Player is a page in the musician-facing FT2 workflow, not four empty
 MIDI lanes. Page next/previous and **NAV** → **PAGE** open it directly, so a new
 Project does not require adding or naming a page before importing a WAV.
+The blank Pattern, unloaded loop state, loop inbox, and startup MIDI-output
+snapshot are initialized when SHR-DAW starts, so opening an empty FT2 workspace
+does not start a synth or perform device discovery.
 
 The Loop Player's white position bar uses a green playhead to show the
 approximate position within the selected WAV region while the shared FT2
@@ -209,7 +212,9 @@ without changing the cut region.
 The loop follows FT2 play-here, play-from-start, stop, restart, order/pattern
 transitions, and looping. It plays at native speed and pitch; beat detection
 adjusts the Pattern tempo to the WAV, not the WAV to the previous Pattern
-tempo. The loop player requires the JACK server sample rate to match the WAV
+tempo. A loop-only Project does not start the default software synth merely
+because its blank Software Synth page exists. The loop player requires the JACK
+server sample rate to match the WAV
 sample rate. For a 44.1 kHz loop, configure/restart JACK at 44100 Hz before
 loading it. A bounded 5 ms fade is applied at cut/loop edges. The 40×20 screen
 shows text for filename, BPMs, region, state, elapsed/total time, rate, and

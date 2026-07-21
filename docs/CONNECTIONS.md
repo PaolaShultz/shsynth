@@ -76,7 +76,9 @@ programs. Only one SHR-DAW-managed software synth runs at a time. The
 standalone Software Synth workspace keeps its sound while moving between its
 Presets and Playback screens, then sends All Notes Off and unloads it on the
 top-level return to Home. FT2 separately loads the engine/instrument pair saved
-by its current Pattern. Replacement and exit stop only a process SHR-DAW owns.
+by its current Pattern when a software note is auditioned or scheduled; opening
+an empty FT2 Pattern does not start it. Replacement and exit stop only a process
+SHR-DAW owns.
 
 Each engine has a configured MIDI input and JACK audio output. See
 [Configuration and routing](CONFIGURATION.md) for the settings.

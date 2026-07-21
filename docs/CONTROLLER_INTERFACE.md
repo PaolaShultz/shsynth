@@ -5,6 +5,21 @@ interface. The authoritative inventory was taken from `ui.rs` keyboard, mouse,
 encoder, command-pad, screen, and contextual dispatch paths before paging was
 implemented.
 
+## Startup splash
+
+Startup first shows a 40×20 old-school stereo VU animation with independent
+three-row `L` and `R` bars. It uses the same dBFS colour thresholds as the live
+meter: green below −12 dBFS, yellow from −12 through −3 dBFS, and red above
+−3 dBFS. The animation is decorative and does not start audio, playback, or
+MIDI transmission.
+
+The splash remains visible for at least 900 ms. A terminal computer keyboard
+is a fully qualified input device, equal to an available configured controller
+or performance MIDI input; it is not described as a fallback. Only when none
+of those inputs is available does the splash remain on `CONNECT KEYBOARD OR
+MIDI INPUT` and rescan the configured MIDI inputs. `Esc` or `q` can still exit
+from the splash.
+
 ## Action inventory
 
 | Screen or mode | Existing user-facing operations and input paths |
