@@ -142,9 +142,12 @@ A managed host becomes ready only after SHR resolves one unambiguous stereo
 JACK output pair for it; a MIDI JACK/ALSA port alone is not readiness. Exact
 configured client names are preferred. A single uniquely prefixed client is
 also accepted, which covers Yoshimi's generated names, but zero or multiple
-matches and anything other than exactly two audio outputs are refused. Every
-`jack_connect` failure is surfaced and aborts or rolls back the owning route
-change instead of being silently ignored.
+matches and anything other than exactly two audio outputs are refused. An
+exact direct connection already made by the managed synth is accepted;
+otherwise a `jack_connect` failure aborts or rolls back the owning route change.
+Managed synth MIDI selectors retain unique short-name matching for generated
+ALSA destinations, while physical MIDI devices continue to require their
+stable exact identities.
 
 SHR's FluidSynth process uses JACK audio, ALSA sequencer MIDI, and its piped
 command input; it does not open FluidSynth's TCP server. Interactive setup also

@@ -1192,12 +1192,13 @@ fn backend_command(preset: &Preset, state: &Path, config: &RuntimeConfig) -> Res
                 &format!("audio.jack.id={}", backend.client_name),
                 "-o",
                 "synth.midi-bank-select=mma",
-                "--load-config",
             ]);
             command
                 .arg("--gain")
                 .arg(config.fluidsynth.gain.to_string());
-            command.arg(state.join("fluidsynth.conf"));
+            command
+                .arg("--load-config")
+                .arg(state.join("fluidsynth.conf"));
         }
     }
     Ok(command)
@@ -2077,12 +2078,13 @@ fn attach_midi_output(
         .iter()
         .map(|port| output.port_name(port).map_err(anyhow::Error::from))
         .collect::<Result<Vec<_>>>()?;
-    let index = unique_name_match(&names, output_match, "MIDI output")?.ok_or_else(|| {
-        anyhow!(
-            "{} MIDI output matching {output_match:?} not found",
-            backend.label()
-        )
-    })?;
+    let index =
+        unique_backend_name_match(&names, output_match, "MIDI output")?.ok_or_else(|| {
+            anyhow!(
+                "{} MIDI output matching {output_match:?} not found",
+                backend.label()
+            )
+        })?;
     let connection = output
         .connect(&ports[index], "SHR-DAW forward")
         .map_err(|error| anyhow!("connect {} MIDI output: {error}", backend.label()))?;
@@ -2094,6 +2096,44 @@ fn attach_midi_output(
 
 fn unique_name_match(names: &[String], wanted: &str, description: &str) -> Result<Option<usize>> {
     crate::midi_endpoint::matching_optional_index(names, wanted, description)
+}
+
+/// Managed synth configuration historically uses short selectors such as
+/// `synthv1` and `yoshimi`, while the programs publish generated ALSA
+/// identities such as `shs-synthv1:in`. Preserve strict stable identities for
+/// physical devices, but accept one unique contained selector for an owned
+/// backend whose process and full destination list SHR controls.
+fn unique_backend_name_match(
+    names: &[String],
+    wanted: &str,
+    description: &str,
+) -> Result<Option<usize>> {
+    if let Some(index) = unique_name_match(names, wanted, description)? {
+        return Ok(Some(index));
+    }
+    let wanted = wanted.trim().to_ascii_lowercase();
+    let matches = names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| {
+            crate::midi_endpoint::stable_identity(name)
+                .to_ascii_lowercase()
+                .contains(&wanted)
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [index] => Ok(Some(*index)),
+        _ => bail!(
+            "{description} selector {wanted:?} is ambiguous: {}",
+            matches
+                .iter()
+                .map(|index| crate::midi_endpoint::stable_identity(&names[*index]))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 fn command_lines(program: &str, args: &[&str]) -> Vec<String> {
@@ -2171,11 +2211,37 @@ fn connect_audio(client_name: &str, config: &RuntimeConfig) -> Result<()> {
             .args([source.as_str(), destination.as_str()])
             .status()
             .with_context(|| format!("connect JACK audio {source} -> {destination}"))?;
-        if !status.success() {
+        if !status.success() && !jack_connection_exists(source, destination) {
             bail!("connect JACK audio {source} -> {destination} exited with {status}");
         }
     }
     Ok(())
+}
+
+fn jack_connection_exists(source: &str, destination: &str) -> bool {
+    parse_jack_connections(command_lines("jack_lsp", &["-c"]))
+        .iter()
+        .any(|(connected_source, connected_destination)| {
+            connected_source == source && connected_destination == destination
+        })
+}
+
+fn parse_jack_connections(lines: Vec<String>) -> Vec<(String, String)> {
+    let mut port: Option<String> = None;
+    let mut connections = Vec::new();
+    for line in lines {
+        if line.starts_with(char::is_whitespace) {
+            if let Some(source) = port.as_ref() {
+                let destination = line.trim();
+                if !destination.is_empty() {
+                    connections.push((source.clone(), destination.to_owned()));
+                }
+            }
+        } else {
+            port = Some(line);
+        }
+    }
+    connections
 }
 
 fn start_managed_audio_graph(
@@ -3320,8 +3386,67 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(args.iter().any(|arg| arg == "--audio-driver=jack"));
         assert!(args.iter().any(|arg| arg == "--midi-driver=alsa_seq"));
-        assert!(args.iter().any(|arg| arg == "--load-config"));
         assert!(!args.iter().any(|arg| arg == "--server"));
+        let gain = args.iter().position(|arg| arg == "--gain").unwrap();
+        assert_eq!(args.get(gain + 1).map(String::as_str), Some("0.4"));
+        let load = args.iter().position(|arg| arg == "--load-config").unwrap();
+        assert!(gain < load);
+        assert_eq!(
+            args.get(load + 1).map(String::as_str),
+            Some("/tmp/shr-state/fluidsynth.conf")
+        );
+    }
+
+    #[test]
+    fn managed_backend_midi_selectors_accept_one_unique_generated_identity() {
+        let synthv1 = vec!["shs-synthv1:in 133:0".into()];
+        assert_eq!(
+            unique_backend_name_match(&synthv1, "synthv1", "MIDI output").unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            unique_name_match(&synthv1, "synthv1", "MIDI output").unwrap(),
+            None,
+            "physical-device matching must remain exact"
+        );
+
+        let ambiguous = vec![
+            "first-synthv1:in 133:0".into(),
+            "second-synthv1:in 134:0".into(),
+        ];
+        assert!(unique_backend_name_match(&ambiguous, "synthv1", "MIDI output").is_err());
+    }
+
+    #[test]
+    fn jack_connection_listing_preserves_exact_existing_routes() {
+        let lines = [
+            "yoshimi-shs-yoshimi:left",
+            "   system:playback_1",
+            "yoshimi-shs-yoshimi:right",
+            "   system:playback_2",
+            "system:playback_1",
+            "   yoshimi-shs-yoshimi:left",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert_eq!(
+            parse_jack_connections(lines),
+            vec![
+                (
+                    "yoshimi-shs-yoshimi:left".into(),
+                    "system:playback_1".into()
+                ),
+                (
+                    "yoshimi-shs-yoshimi:right".into(),
+                    "system:playback_2".into()
+                ),
+                (
+                    "system:playback_1".into(),
+                    "yoshimi-shs-yoshimi:left".into()
+                ),
+            ]
+        );
     }
 
     #[test]

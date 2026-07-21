@@ -245,8 +245,15 @@ A managed engine is ready only after one client resolves to exactly two
 unambiguous JACK audio outputs; the presence of a MIDI port is insufficient.
 SHR first prefers the exact configured client, then accepts one unique
 prefixed client such as Yoshimi's generated `yoshimi-<configured-name>` form.
-Zero or multiple client matches, a non-stereo output set, and every failed
-`jack_connect` call are surfaced as errors rather than ignored.
+Zero or multiple client matches and a non-stereo output set are surfaced as
+errors. Direct playback accepts an exact connection that the managed synth has
+already established; otherwise a failed `jack_connect` remains an error.
+
+Physical MIDI configuration uses stable exact ALSA identities. The three
+managed-backend `.midi_output` values additionally retain their historical
+short-selector behavior: the selector must occur in exactly one live
+destination published by the owned synth. Zero or multiple matches fail
+instead of choosing a nearby endpoint.
 
 Software monitoring means the configured capture pair passes through the final
 bus and adds JACK-buffer plus 2.5 ms limiter lookahead latency. Interface direct
