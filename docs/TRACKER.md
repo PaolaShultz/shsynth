@@ -170,11 +170,14 @@ the previous value and selection.
 
 ## Real-time recording
 
-**REC** loops the selected pattern and records only the visible page. Played
-notes are placed on its four lanes and quantized to pattern rows. Each assigned
-lane auditions through that column's channel/instrument setup. During
-recording, those notes do not also pass to the loaded software synth. They are
-auditioned only through the page's hardware MIDI target and column channels.
+From a stopped transport, **REC** loops the selected pattern and records only
+the visible page; pressing **REC** again stops. During song playback, **REC**
+punches in without stopping, restarting, or moving the playhead, and the next
+press punches out to uninterrupted Play. Played notes are placed on the visible
+page's four lanes and quantized to pattern rows. Each assigned lane auditions
+through that column's channel/instrument setup. During recording, those notes
+do not also pass to the loaded software synth. They are auditioned only through
+the page's hardware MIDI target and column channels.
 The source port, not a special MIDI channel, separates a performance keyboard
 from a control-only surface. A combined device retains channel-qualified
 controller mappings.

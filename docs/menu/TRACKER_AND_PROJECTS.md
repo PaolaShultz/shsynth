@@ -30,9 +30,9 @@ high-value tracker movements occupy controller page 1.
 
 ![Populated FT2 Pattern in Play mode with the MODE page](../images/menu/ft2-play-mode.png)
 
-`CELL` opens the transactional editor. `PLAY` toggles tracker transport,
-`RECORD` begins or ends real-time recording on the current external-MIDI page,
-and `STEP` toggles step entry.
+`CELL` opens the transactional editor. `PLAY` toggles tracker transport. From
+Stop, `RECORD` starts the current Pattern record loop; from Play it punches in
+without moving the playhead. `STEP` toggles step entry.
 
 ### NAV — master overlays
 
@@ -64,8 +64,9 @@ returns Home.
 
 Record is allowed only on a page routed to external MIDI. Incoming notes are
 consumed before the loaded software synth, auditioned on that page's exact
-target/channel, quantized into the looping current Pattern, and written only to
-that page.
+target/channel, quantized into the current transport position, and written only
+to that page. Recording started from Stop loops the current Pattern; punch
+recording follows the already-playing Arrangement without restarting it.
 
 ### PLAY — transport, capture, and filter
 
@@ -73,7 +74,9 @@ that page.
 
 `N00B` opens scale setup or turns the active filter off without ending capture.
 `PLAY` controls transport. `RECORD` ends real-time capture while preserving the
-notes already entered. With N00B on, only allowed notes are heard and written.
+notes already entered: it returns to Play after a punch-in, or stops after
+recording was started from Stop. With N00B on, only allowed notes are heard and
+written.
 
 ### SYS — emergency and normal exits
 

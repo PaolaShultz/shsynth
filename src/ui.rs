@@ -281,6 +281,7 @@ struct TrackerRecording {
     pattern: u16,
     order: usize,
     page: usize,
+    return_to_play: bool,
     last_row: usize,
     next_lane: usize,
     active_lanes: HashMap<(u8, u8), Vec<usize>>,
@@ -4583,8 +4584,17 @@ impl App {
 
     fn toggle_tracker_recording(&mut self) {
         if self.tracker_recording.is_some() {
-            self.stop_tracker_recording();
+            let return_to_play = self
+                .tracker_recording
+                .as_ref()
+                .is_some_and(|recording| recording.return_to_play);
+            self.finish_tracker_recording(return_to_play);
             return;
+        }
+        let transport = self.sequencer.status();
+        let return_to_play = transport.playing;
+        if return_to_play {
+            self.follow_tracker_transport(&transport);
         }
         let Some(page) = self.current_page() else {
             self.status = "REC unavailable · current page is missing".into();
@@ -4592,22 +4602,25 @@ impl App {
         };
         if !self.target_has_hardware_route(&page.target) {
             self.status =
-                "REC needs an available MIDI hardware output · synth/keyboard input stays isolated"
+                "REC needs an available MIDI hardware output · synth fallback stays isolated"
                     .into();
             return;
         }
         self.cancel_note_editor();
         self.set_tracker_mode(TrackerMode::Play);
-        self.sequencer.stop();
         let pattern = self.tracker_pattern_number();
         let order = self.tracker_order;
         let page_index = self.tracker_page;
-        self.tracker_row = 0;
+        if !return_to_play {
+            self.sequencer.stop();
+            self.tracker_row = 0;
+        }
         self.tracker_recording = Some(TrackerRecording {
             pattern,
             order,
             page: page_index,
-            last_row: 0,
+            return_to_play,
+            last_row: self.tracker_row,
             next_lane: self.tracker_track,
             active_lanes: HashMap::new(),
             notes: 0,
@@ -4615,17 +4628,31 @@ impl App {
         self.tracker_mode = TrackerMode::Rec;
         self.sync_tracker_route();
         self.reset_context_page();
-        self.sequencer
-            .play(&self.tracker_record_song(pattern, page_index), 0, 0);
-        self.status = format!(
-            "REC pattern {pattern} · {} only · MIDI output",
-            self.current_pages()
-                .get(page_index)
-                .map_or("page", |page| page.name.as_str())
-        );
+        if return_to_play {
+            self.status = format!(
+                "REC punch-in · pattern {pattern} row {:02X} · {} only",
+                self.tracker_row,
+                self.current_pages()
+                    .get(page_index)
+                    .map_or("page", |page| page.name.as_str())
+            );
+        } else {
+            self.sequencer
+                .play(&self.tracker_record_song(pattern, page_index), 0, 0);
+            self.status = format!(
+                "REC pattern {pattern} · {} only · MIDI output",
+                self.current_pages()
+                    .get(page_index)
+                    .map_or("page", |page| page.name.as_str())
+            );
+        }
     }
 
     fn stop_tracker_recording(&mut self) -> bool {
+        self.finish_tracker_recording(false)
+    }
+
+    fn finish_tracker_recording(&mut self, return_to_play: bool) -> bool {
         let Some(recording) = self.tracker_recording.take() else {
             return false;
         };
@@ -4646,16 +4673,29 @@ impl App {
                 self.tracker_live_input.cancel(&page.target, channel);
             }
         }
-        self.sequencer.stop();
-        self.tracker_mode = TrackerMode::Rec;
+        if !return_to_play {
+            self.sequencer.stop();
+        }
+        self.tracker_mode = if return_to_play {
+            TrackerMode::Play
+        } else {
+            TrackerMode::Rec
+        };
         self.sync_tracker_route();
         self.reset_context_page();
-        self.status = format!(
-            "REC stopped · {} notes in pattern {} page {}",
-            recording.notes,
-            recording.pattern,
-            recording.page + 1
-        );
+        self.status = if return_to_play {
+            format!(
+                "REC punch-out · {} notes · tracker playing",
+                recording.notes
+            )
+        } else {
+            format!(
+                "REC stopped · {} notes in pattern {} page {}",
+                recording.notes,
+                recording.pattern,
+                recording.page + 1
+            )
+        };
         true
     }
 
@@ -7816,6 +7856,9 @@ impl App {
             let tracker = self.sequencer.status();
             self.follow_tracker_transport(&tracker);
             let restart = self.tracker_recording.as_mut().and_then(|recording| {
+                if recording.return_to_play {
+                    return None;
+                }
                 let wrapped = tracker.playing && tracker.row < recording.last_row;
                 recording.last_row = tracker.row;
                 wrapped.then_some((recording.pattern, recording.page))
@@ -7869,11 +7912,31 @@ impl App {
 
     fn follow_tracker_transport(&mut self, tracker: &sequencer::SequencerStatus) {
         if tracker.playing {
-            self.tracker_order = self.tracker_recording.as_ref().map_or_else(
-                || tracker.order.min(self.song.order.len().saturating_sub(1)),
-                |recording| recording.order,
-            );
+            let transport_order = tracker.order.min(self.song.order.len().saturating_sub(1));
+            let punch_order = self
+                .tracker_recording
+                .as_ref()
+                .and_then(|recording| recording.return_to_play.then_some(transport_order));
+            let order_changed = punch_order.is_some_and(|order| {
+                self.tracker_recording
+                    .as_ref()
+                    .is_some_and(|recording| recording.order != order)
+            });
+            if let Some(order) = punch_order {
+                if let Some(recording) = self.tracker_recording.as_mut() {
+                    recording.order = order;
+                    recording.pattern = self.song.order.get(order).copied().unwrap_or(0);
+                    recording.active_lanes.clear();
+                }
+            }
+            self.tracker_order = self
+                .tracker_recording
+                .as_ref()
+                .map_or(transport_order, |recording| recording.order);
             self.tracker_row = tracker.row.min(self.tracker_rows().saturating_sub(1));
+            if order_changed {
+                self.sync_tracker_route();
+            }
         }
     }
 
@@ -8530,7 +8593,7 @@ fn perform(
     if a.tracker_recording.is_some() {
         match action {
             Action::TrackerRecordToggle => {
-                a.stop_tracker_recording();
+                a.toggle_tracker_recording();
                 return false;
             }
             Action::TrackerPlayToggle => {
@@ -9430,6 +9493,7 @@ fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<Mi
     };
     if letter_jump_blocked
         && confirmation_action == Action::Noop
+        && !(a.screen == Screen::Tracker && a.tracker_recording.is_some())
         && matches!(code, KeyCode::Char(character) if character.is_ascii_alphabetic())
     {
         return false;
@@ -9552,7 +9616,7 @@ fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<Mi
         if a.tracker_recording.is_some() {
             match code {
                 KeyCode::Char('r') | KeyCode::Char('R') => {
-                    a.stop_tracker_recording();
+                    a.toggle_tracker_recording();
                 }
                 KeyCode::Char('p') | KeyCode::Char('P') => {
                     a.toggle_tracker_playback();
@@ -13794,6 +13858,7 @@ fn configure_screenshot_scenario(app: &mut App, scenario: ScreenshotScenario) {
                 pattern: 0,
                 order: 0,
                 page: 0,
+                return_to_play: false,
                 last_row: 7,
                 next_lane: 2,
                 active_lanes: HashMap::new(),
@@ -17599,13 +17664,14 @@ mod tests {
     }
 
     #[test]
-    fn tracker_play_record_transitions_are_single_button_toggles() {
+    fn tracker_record_punches_out_to_play_or_stops_from_rest() {
         let p = presets();
         let mut a = app(&p);
         connect_test_midi_hardware(&mut a);
         a.screen = Screen::Tracker;
         a.current_page_mut().unwrap().target = PageTarget::ConfiguredExternal;
         a.song.patterns.get_mut(&0).unwrap().rows[0][0].note = Note::On(60);
+        let (tx, _rx) = mpsc::channel();
 
         a.toggle_tracker_playback();
         assert!(a.sequencer.status().playing);
@@ -17614,22 +17680,49 @@ mod tests {
         assert!(!a.sequencer.status().playing);
 
         a.toggle_tracker_playback();
-        a.toggle_tracker_recording();
+        let play_generation = a.sequencer.status().generation;
+
+        perform(
+            Action::TrackerRecordToggle,
+            &mut a,
+            Path::new("/none"),
+            None,
+        );
         assert!(a.tracker_recording.is_some());
+        assert!(a
+            .tracker_recording
+            .as_ref()
+            .is_some_and(|recording| recording.return_to_play));
         assert_eq!(a.tracker_mode, TrackerMode::Rec);
-        a.toggle_tracker_playback();
+        assert!(a.sequencer.status().playing);
+        assert_eq!(a.sequencer.status().generation, play_generation);
+
+        perform(
+            Action::TrackerRecordToggle,
+            &mut a,
+            Path::new("/none"),
+            None,
+        );
         assert!(a.tracker_recording.is_none());
         assert_eq!(a.tracker_mode, TrackerMode::Play);
         assert!(a.sequencer.status().playing);
+        assert_eq!(a.sequencer.status().generation, play_generation);
+        assert!(a.status.contains("punch-out"));
 
-        a.toggle_tracker_recording();
+        a.toggle_tracker_playback();
+        assert!(!a.sequencer.status().playing);
+        key(KeyCode::Char('r'), &mut a, Path::new("/none"), &tx);
         assert!(a.tracker_recording.is_some());
-        a.toggle_tracker_recording();
+        assert!(a
+            .tracker_recording
+            .as_ref()
+            .is_some_and(|recording| !recording.return_to_play));
+        assert!(a.sequencer.status().playing);
+        key(KeyCode::Char('r'), &mut a, Path::new("/none"), &tx);
         assert!(a.tracker_recording.is_none());
         assert_eq!(a.tracker_mode, TrackerMode::Rec);
-        a.toggle_tracker_recording();
-        assert!(a.tracker_recording.is_some());
-        assert_eq!(a.tracker_mode, TrackerMode::Rec);
+        assert!(!a.sequencer.status().playing);
+        assert!(a.status.contains("REC stopped"));
     }
 
     #[test]
