@@ -18,9 +18,10 @@
       "85": 85,
       "17": 17
     },
-    "encoder_relative_cc": 28,
+    "encoder_relative_cc": 114,
     "encoder_relative_reverse": false,
-    "encoder_press_cc": 118,
+    "encoder_press_cc": 115,
+    "encoder_press_channel": 1,
     "note_buttons": {
       "36": "page-1",
       "37": "page-2",
@@ -41,6 +42,6 @@
       "42": 10,
       "43": 10
     },
-    "source": "SHR-DAW direct capture: Arturia/DAW factory pads, MIDI channel 10"
+    "source": "SHR-DAW direct MIDI learn: encoder CC 114/115 on channel 1; Arturia/DAW factory pads on channel 10"
   }
 ]

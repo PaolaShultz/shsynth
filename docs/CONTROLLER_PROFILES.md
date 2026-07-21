@@ -81,6 +81,13 @@ learned mappings remain in the private state directory as `controller.conf`.
 The setup helper uses `SHSYNTH_STATE_DIR` internally when an explicit
 `--state-dir` is supplied.
 
+When no private `controller.conf` exists, startup uses the explicitly
+configured controller input to select one unique reviewed profile before the
+MIDI router opens. The bundled MiniLab 3 default mirrors the verified learned
+mapping: encoder turn CC 114 and press CC 115 on channel 1, plus the eight
+Arturia/DAW factory pads on channel 10. Unknown or ambiguous controllers remain
+unmapped rather than inheriting this device-specific default.
+
 ## Upstream mapping sources
 
 There is no universal controller-description standard. These projects provide

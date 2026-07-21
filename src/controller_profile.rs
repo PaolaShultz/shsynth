@@ -390,6 +390,9 @@ mod tests {
         assert_eq!(config.pads.len(), 8);
         assert_eq!(config.pad_channels.len(), 8);
         assert!(config.pad_channels.values().all(|channel| *channel == 9));
+        assert_eq!(config.encoder_relative_cc, Some(114));
+        assert_eq!(config.encoder_press_cc, Some(115));
+        assert_eq!(config.encoder_press_channel, Some(0));
         assert_eq!(config.lock_cc, None);
         for (offset, action) in [
             PadAction::Page1,
@@ -533,6 +536,36 @@ mod tests {
         assert_eq!(expected.controls.len(), 12);
         assert_eq!(expected.pad_channels.len(), 8);
         assert_ne!(expected, stale);
+    }
+
+    #[test]
+    fn missing_user_config_resolves_configured_controller_default() {
+        let missing = std::env::temp_dir().join(format!(
+            "shsynth-missing-controller-profile-{}.conf",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&missing);
+        let current = PadConfig::load(&missing).unwrap();
+        let catalog = Catalog::discover();
+        let runtime = vec!["Minilab3:Minilab3 MIDI".into()];
+        let connected = vec!["Minilab3:Minilab3 MIDI 28:0".into()];
+
+        let (expected, name) = expected_for_connected(&current, &runtime, &connected, &catalog)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(name, "Arturia MiniLab 3");
+        assert_eq!(expected.profile.as_deref(), Some("arturia-minilab-3"));
+        assert_eq!(
+            expected.input_match.as_deref(),
+            Some("Minilab3:Minilab3 MIDI")
+        );
+        assert_eq!(expected.encoder_relative_cc, Some(114));
+        assert_eq!(expected.encoder_press_cc, Some(115));
+        assert_eq!(expected.encoder_press_channel, Some(0));
+        assert_eq!(expected.controls.len(), 12);
+        assert_eq!(expected.pads.len(), 8);
+        assert!(!missing.exists());
     }
 
     #[test]
