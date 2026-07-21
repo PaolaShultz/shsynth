@@ -257,9 +257,16 @@ and the auto-installed `fluid-soundfont-gm` and Qsynth packages were purged
 without running `autoremove`. `/usr/bin/fluidsynth` and the 5.7 MiB TimGM bank
 remain for SHR's managed on-demand engine. JACK was not restarted.
 
-The application opens on a minimal black Home list. Home is the navigation
-root for Software Synths, FT2, Recorder, Ideas, Mixer, Effects, MIDI setup,
-MIDI Learn, and Help. Top-level Exit returns Home; nested editors return to
+The application opens on a minimal black Home list. Its labels are centered in
+fixed 36-column bars spanning zero-based columns 2–37 on the 40×20 display,
+and the visible block is vertically centered. Home is the navigation root for
+Software Synths, FT2, Recorder, Performance, MIDI Learn, Routing, Effects,
+Ideas, and Help. Routing reuses the read-only current-connection owner; Effects
+opens the existing Project rack. A configured offline controller, controller
+without a matching reviewed profile, or incomplete learned encoder recommends
+and initially selects MIDI Learn with a plain reason. Learned encoder turn and
+click are sufficient even when optional commands are absent. Home never starts
+learning or sends MIDI. Top-level Exit returns Home; nested editors return to
 their parent first. The controller menu uses a four-page spatial contract on
 workspace and modal contexts: page 1 holds the primary workflow (FT2 uses
 Page−/Page+/Track−/Track+); `EXIT` is page 4/item 4 and returns one level. MIDI

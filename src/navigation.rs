@@ -22,7 +22,7 @@ pub enum Screen {
     FxRack,
     FxEditor,
     Meter,
-    MidiSetup,
+    Routing,
 }
 
 impl Screen {
@@ -46,7 +46,7 @@ impl Screen {
         Self::FxRack,
         Self::FxEditor,
         Self::Meter,
-        Self::MidiSetup,
+        Self::Routing,
     ];
 
     pub const fn index(self) -> usize {
@@ -68,7 +68,7 @@ impl Screen {
             Self::FxRack => 14,
             Self::FxEditor => 15,
             Self::Meter => 16,
-            Self::MidiSetup => 17,
+            Self::Routing => 17,
         }
     }
 
@@ -91,7 +91,7 @@ impl Screen {
             Self::FxRack => "FX RACK",
             Self::FxEditor => "FX EDIT",
             Self::Meter => "MIX",
-            Self::MidiSetup => "MIDI SETUP",
+            Self::Routing => "ROUTING",
         }
     }
 }
@@ -126,7 +126,7 @@ pub enum Action {
     OpenFxRack,
     OpenFxEditor,
     OpenMeter,
-    OpenMidiSetup,
+    OpenRouting,
     ResetMeter,
     BusSelectPrevious,
     BusSelectNext,
@@ -1209,7 +1209,7 @@ const HOME: [MenuPage; 4] = [
     page("", [off(""), off(""), off(""), off("")]),
 ];
 
-const MIDI_SETUP: [MenuPage; 4] = [
+const ROUTING: [MenuPage; 4] = [
     page("", [off(""), off(""), off(""), off("")]),
     page("", [off(""), off(""), off(""), off("")]),
     page("", [off(""), off(""), off(""), off("")]),
@@ -1257,7 +1257,7 @@ pub fn pages(screen: Screen, context: MenuContext) -> &'static [MenuPage; 4] {
         (Screen::FxRack, _) => &FX_RACK,
         (Screen::FxEditor, _) => &FX_EDITOR,
         (Screen::Meter, _) => &METER,
-        (Screen::MidiSetup, _) => &MIDI_SETUP,
+        (Screen::Routing, _) => &ROUTING,
     }
 }
 
@@ -1371,7 +1371,7 @@ mod tests {
     #[test]
     fn every_menu_keeps_system_safety_and_exit_anchors() {
         let contexts = [
-            (Screen::MidiSetup, MenuContext::Normal),
+            (Screen::Routing, MenuContext::Normal),
             (Screen::Presets, MenuContext::Normal),
             (Screen::Playback, MenuContext::Normal),
             (Screen::Ideas, MenuContext::Normal),
@@ -1528,7 +1528,7 @@ mod tests {
             Action::OpenTracker,
             Action::OpenAudioRecorder,
             Action::OpenMeter,
-            Action::OpenMidiSetup,
+            Action::OpenRouting,
         ];
         for screen in Screen::ALL {
             if screen == Screen::Home {

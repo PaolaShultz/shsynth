@@ -9,10 +9,20 @@ while the images were made.
 
 ## Presets
 
-Home is the navigation root; **Software Synths** opens Presets. Turn the main
-encoder, use the arrow keys, or use the mouse wheel to choose a sound. Loading replaces the one managed software
+Home is the navigation root. Its nine labels are centered inside equal 36-cell
+bars spanning zero-based columns 2–37 on the 40-column display. The block is
+centered vertically and scrolls safely on compact supported terminals.
+**Software Synths** opens Presets. Turn the main encoder, use the arrow keys,
+or use the mouse wheel to choose a sound. Loading replaces the one managed software
 instrument; it never layers engines. synthv1, Yoshimi, and FluidSynth remain
 separate catalogs selected with the Engine page.
+
+Home keeps **MIDI Learn**, **Routing**, and **Effects** separate. Routing is the
+read-only current connection view; Effects is the existing Project rack. If a
+configured controller is offline, unreviewed, or has an incomplete learned
+encoder, MIDI Learn is selected first and Home explains why. Keyboard arrows
+and Enter remain available. A learned turn-and-click encoder is sufficient;
+optional command buttons may remain unmapped.
 
 Presets and Playback form one Software Synth workspace, so moving between them
 does not reload the sound. Exiting top-level Presets to Home sends All Notes Off

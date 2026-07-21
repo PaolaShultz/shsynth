@@ -70,8 +70,10 @@ Raspberry Pi experimenters learning a new musical or technical vocabulary.
 ## Screens
 
 - **Home** is the startup and navigation root. Turn the master rotary or use
-  Up/Down, then press it or Enter to open a workspace. Esc quits only from
-  Home; controller MIDI never quits SHR.
+  Up/Down, then press it or Enter to open Software Synths, FT2, Recorder,
+  Performance, MIDI Learn, Routing, Effects, Ideas, or Help. Its centered
+  labels all use one fixed-width selection bar. Esc quits only from Home;
+  controller MIDI never quits SHR.
 - **Presets** chooses an engine and sound.
 - **Playback** shows played notes and keyboard state, changes synthv1 controls,
   and records ideas.
@@ -101,13 +103,20 @@ plus provenance live in the XDG demo directory.
   multistem take.
 - **FX Rack** shapes the managed instrument with source inserts, two parallel
   pre/post aux sends and wet returns, then a master rack and final meter.
-- **MIDI Devices / Global MIDI Setup** shows the configured controller,
-  tracker output/profile, and controller-clock state. It is deliberately
-  read-only: leave SHR and run `shr-setup` to change hardware routes safely.
+- **Routing** shows the current controller, tracker output/profile,
+  controller-clock, and audio-output state. It is deliberately read-only:
+  leave SHR and run `shr-setup` to change hardware routes safely.
 - **MIDI Learn** opens directly from Home and learns rotary left, right, then
   click before browsing optional mappings.
 
-Home is a plain inverted-selection list. Other screens show their current
+MIDI Learn is highlighted initially when a configured controller is offline,
+has no matching reviewed profile, or has an incomplete learned encoder. The
+reason appears directly on Home. A learned controller is considered navigable
+once encoder turn and click work; skipped optional command mappings do not make
+it a failure. Opening Home never starts learning or sends MIDI, and saving a
+new mapping still requires confirmation in the isolated Learn workflow.
+
+Home is a plain centered inverted-selection list. Other screens show their current
 controller page and available actions; empty actions and pages are hidden. The
 main encoder moves through lists, rows, pages, and values, and its press selects
 or confirms. Back from a top-level workspace returns Home. Nested tools and

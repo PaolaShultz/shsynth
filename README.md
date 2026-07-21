@@ -102,16 +102,27 @@ instrument, owned WAV loop, and configured stereo input. See the
 
 ## Screens
 
-SHR opens on a minimal Home menu. Turn the master rotary or use Up/Down, then
-press the rotary or Enter to open Software Synths, FT2, the recorder, Ideas,
-the mixer, effects, MIDI setup, MIDI Learn, or Help. Back from a top-level
-workspace returns Home; editors and child tools return one level at a time.
+SHR opens on a centered Home menu. Every row uses the same wide selection bar,
+with its label centered, so focus never changes width while browsing. Turn the
+master rotary or use Up/Down, then press the rotary or Enter to open Software
+Synths, FT2, Recorder, Performance, MIDI Learn, Routing, Effects, Ideas, or
+Help. Back from a top-level workspace returns Home; editors and child tools
+return one level at a time.
+
+MIDI Learn, Routing, and Effects are separate top-level destinations. Routing
+is a read-only view of the current controller, external MIDI, clock, and audio
+connections; `shr-setup` remains the single owner of hardware changes. If a
+configured controller is offline, has no matching reviewed profile, or has an
+incomplete learned master encoder, Home initially highlights MIDI Learn and
+states why. A learned encoder with working turn and click remains usable even
+when optional command buttons were skipped. Home never learns or transmits
+anything merely by being opened.
 
 The overview below shows the established performance workspaces. The
 [visual menu manual](docs/MENU_MANUAL.md) retains the established workspace
 renders; its current text and controller map describe this iteration because
 the full screenshot set was deliberately not regenerated. The intentionally
-plain Home and read-only MIDI overview do not use dashboard screenshots.
+plain Home and read-only Routing overview do not use dashboard screenshots.
 
 Large sound and file lists support case-insensitive first-letter jumps when a
 letter is not already a screen shortcut. Keyboard PageUp/PageDown remain

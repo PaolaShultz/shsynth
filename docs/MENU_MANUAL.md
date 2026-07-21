@@ -1,7 +1,7 @@
 # Screen and menu manual
 
 This is the visual guide to SHR-DAW's established 40×20 workspace and editor
-screens. The new intentionally plain Home list and read-only MIDI setup
+screens. The new intentionally plain centered Home list and read-only Routing
 overview are documented textually during competition fast iteration; the full
 screenshot set was not regenerated for that navigation-only change. The
 current controller map is authoritative in
@@ -51,12 +51,12 @@ text and colors above the strip belong to the active screen.
 flowchart TD
     H0[Home] --> P[Software Synths / Presets]
     H0 --> T[FT2 Pattern]
-    H0 --> A[Audio recorder]
-    H0 --> I[Ideas]
-    H0 --> M[Performance meter]
-    H0 --> FX[FX rack]
-    H0 --> MS[MIDI setup overview]
+    H0 --> A[Recorder]
+    H0 --> M[Performance]
     H0 --> ML[MIDI Learn]
+    H0 --> RTE[Routing overview]
+    H0 --> FX[Effects / FX rack]
+    H0 --> I[Ideas]
     H0 --> H[Help]
     P -->|Load| PB[Playback]
     M --> FX

@@ -381,42 +381,61 @@ struct HomeEntry {
 
 const HOME_ENTRIES: [HomeEntry; 9] = [
     HomeEntry {
-        label: "Software Synths",
+        label: "SOFTWARE SYNTHS",
         action: Action::OpenPresets,
     },
     HomeEntry {
-        label: "FT2 MIDI Tracker",
+        label: "FT2 TRACKER",
         action: Action::OpenTracker,
     },
     HomeEntry {
-        label: "Sound Recorder",
+        label: "RECORDER",
         action: Action::OpenAudioRecorder,
     },
     HomeEntry {
-        label: "Ideas",
-        action: Action::OpenIdeas,
-    },
-    HomeEntry {
-        label: "Performance Mixer",
+        label: "PERFORMANCE",
         action: Action::OpenMeter,
     },
     HomeEntry {
-        label: "Effects & Routing",
-        action: Action::OpenFxRack,
-    },
-    HomeEntry {
-        label: "MIDI Devices / Global MIDI Setup",
-        action: Action::OpenMidiSetup,
-    },
-    HomeEntry {
-        label: "MIDI Learn",
+        label: "MIDI LEARN",
         action: Action::OpenControllerLearn,
     },
     HomeEntry {
-        label: "Help",
+        label: "ROUTING",
+        action: Action::OpenRouting,
+    },
+    HomeEntry {
+        label: "EFFECTS",
+        action: Action::OpenFxRack,
+    },
+    HomeEntry {
+        label: "IDEAS",
+        action: Action::OpenIdeas,
+    },
+    HomeEntry {
+        label: "HELP",
         action: Action::OpenHelp,
     },
 ];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ControllerLearnReason {
+    Offline,
+    NoReviewedProfile,
+    IncompleteLearnedEncoder,
+    UnusableReviewedEncoder,
+}
+
+impl ControllerLearnReason {
+    const fn detail(self) -> &'static str {
+        match self {
+            Self::Offline => "Configured controller is offline",
+            Self::NoReviewedProfile => "No reviewed profile matches controller",
+            Self::IncompleteLearnedEncoder => "Learned master encoder is incomplete",
+            Self::UnusableReviewedEncoder => "Reviewed profile cannot use encoder",
+        }
+    }
+}
 
 struct App {
     catalogs: Vec<Catalog>,
@@ -459,6 +478,7 @@ struct App {
     pickup: engine::SharedPickup,
     midi_backend: engine::SharedBackend,
     tracker_route: engine::SharedTrackerRoute,
+    controller_profiles: crate::controller_profile::Catalog,
     device_profiles: DeviceProfiles,
     config: RuntimeConfig,
     cpu_temperature: Option<f32>,
@@ -793,6 +813,7 @@ impl App {
             .get(backend_index)
             .map(|catalog| catalog.presets.clone())
             .unwrap_or_default();
+        let controller_profiles = crate::controller_profile::Catalog::discover();
         let device_profiles = DeviceProfiles::discover();
         if let Some(profile) = device_profiles.by_id(&config.external_midi.profile) {
             profile.apply_midi_selection(&mut config.external_midi);
@@ -875,6 +896,7 @@ impl App {
             pickup,
             midi_backend,
             tracker_route: tracker_io.route,
+            controller_profiles,
             device_profiles,
             config,
             cpu_temperature: None,
@@ -990,10 +1012,47 @@ impl App {
     }
 
     fn ensure_home_visible(&mut self, rows: usize) {
+        self.home_offset = self
+            .home_offset
+            .min(HOME_ENTRIES.len().saturating_sub(rows.max(1)));
         if self.home_selected < self.home_offset {
             self.home_offset = self.home_selected;
         } else if self.home_selected >= self.home_offset.saturating_add(rows) {
             self.home_offset = self.home_selected + 1 - rows.max(1);
+        }
+    }
+
+    fn controller_learn_reason(&self) -> Option<ControllerLearnReason> {
+        let controller = self.controller_config.read().ok()?;
+        let input = controller
+            .input_match
+            .as_deref()
+            .filter(|input| !input.trim().is_empty())?;
+        if !self.controller_online {
+            return Some(ControllerLearnReason::Offline);
+        }
+        let usable_encoder = controller.encoder_relative_cc.is_some()
+            && (controller.encoder_press_cc.is_some() || controller.encoder_press_note.is_some());
+        if controller.profile.as_deref() == Some("learned") {
+            return (!usable_encoder).then_some(ControllerLearnReason::IncompleteLearnedEncoder);
+        }
+        let reviewed = self
+            .controller_profiles
+            .matching(input)
+            .is_some_and(|profile| controller.profile.as_deref() == Some(profile.id.as_str()));
+        if !reviewed {
+            return Some(ControllerLearnReason::NoReviewedProfile);
+        }
+        (!usable_encoder).then_some(ControllerLearnReason::UnusableReviewedEncoder)
+    }
+
+    fn recommend_controller_learn_on_home(&mut self) {
+        if self.controller_learn_reason().is_some() {
+            self.home_selected = HOME_ENTRIES
+                .iter()
+                .position(|entry| entry.action == Action::OpenControllerLearn)
+                .unwrap_or(0);
+            self.home_offset = 0;
         }
     }
 
@@ -6477,6 +6536,7 @@ fn app_loop(
         app.status = notice.clone();
         app.controller_fallback = Some(notice);
     }
+    app.recommend_controller_learn_on_home();
     let _router = router.ok();
     let mut quit = false;
     let mut drawn_screen = None;
@@ -7094,7 +7154,7 @@ fn perform(
                     a.begin_fx_value_edit();
                 }
             }
-            Screen::MidiSetup => {}
+            Screen::Routing => {}
         },
         Action::Quit => unreachable!("quit is handled before contextual dispatch"),
         Action::StopAll => unreachable!("panic is handled before contextual dispatch"),
@@ -7195,10 +7255,10 @@ fn perform(
             a.reset_context_page();
             a.status = "mix, final output, and meters".into();
         }
-        Action::OpenMidiSetup => {
+        Action::OpenRouting => {
             a.set_tracker_edit(false);
-            a.set_screen(Screen::MidiSetup);
-            a.status = "MIDI device overview · run shr-setup outside SHR to change routes".into();
+            a.set_screen(Screen::Routing);
+            a.status = "routing overview · run shr-setup outside SHR to change connections".into();
         }
         Action::ResetMeter => {
             a.performance_meter.clear_holds();
@@ -7279,7 +7339,7 @@ fn perform(
                 | Screen::Tracker
                 | Screen::AudioRecorder
                 | Screen::Meter
-                | Screen::MidiSetup => Screen::Home,
+                | Screen::Routing => Screen::Home,
                 Screen::Playback => Screen::Presets,
                 Screen::TrackerFiles
                 | Screen::TrackerArrange
@@ -8370,7 +8430,7 @@ fn draw<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         Screen::FxRack => draw_fx_rack(f, a),
         Screen::FxEditor => draw_fx_editor(f, a),
         Screen::Meter => draw_performance_meter(f, a),
-        Screen::MidiSetup => draw_midi_setup(f, a),
+        Screen::Routing => draw_routing(f, a),
     }
     draw_pad_lock(f, a);
     draw_fallback_badge(f, a);
@@ -8432,15 +8492,24 @@ fn draw_home<B: Backend>(f: &mut Frame<B>, a: &mut App) {
             ),
         rect(z.x, z.y + 1, z.width, 1),
     );
-    let list = rect(
+    let recommendation = a.controller_learn_reason();
+    let bottom_rows = if recommendation.is_some() { 4 } else { 2 };
+    let available = rect(
         z.x + 2,
         z.y + 3,
         z.width.saturating_sub(4),
-        z.height.saturating_sub(7),
+        z.height.saturating_sub(3 + bottom_rows),
+    );
+    let rows = usize::from(available.height).min(HOME_ENTRIES.len());
+    a.ensure_home_visible(rows);
+    let visible = HOME_ENTRIES.len().saturating_sub(a.home_offset).min(rows);
+    let list = rect(
+        available.x,
+        available.y + available.height.saturating_sub(visible as u16) / 2,
+        available.width,
+        visible as u16,
     );
     a.hits.list = list;
-    let rows = usize::from(list.height);
-    a.ensure_home_visible(rows);
     let lines = HOME_ENTRIES
         .iter()
         .enumerate()
@@ -8448,8 +8517,9 @@ fn draw_home<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         .take(rows)
         .map(|(index, entry)| {
             let selected = index == a.home_selected;
+            let label = centered_text(entry.label, usize::from(list.width));
             Spans::from(Span::styled(
-                format!(" {} ", entry.label),
+                label,
                 if selected {
                     Style::default()
                         .fg(Color::Black)
@@ -8471,6 +8541,25 @@ fn draw_home<B: Backend>(f: &mut Frame<B>, a: &mut App) {
             .style(Style::default().fg(Color::DarkGray).bg(Color::Black)),
         rect(z.x, z.y + z.height.saturating_sub(2), z.width, 1),
     );
+    if let Some(reason) = recommendation {
+        f.render_widget(
+            Paragraph::new(vec![
+                Spans::from(Span::styled(
+                    "CONTROLLER NEEDS SETUP · MIDI LEARN",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .bg(Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Spans::from(Span::styled(
+                    reason.detail(),
+                    Style::default().fg(Color::DarkGray).bg(Color::Black),
+                )),
+            ])
+            .alignment(Alignment::Center),
+            rect(z.x, z.y + z.height.saturating_sub(4), z.width, 2),
+        );
+    }
     if a.status != "Ready" {
         f.render_widget(
             Paragraph::new(truncate(&a.status, z.width as usize))
@@ -8481,15 +8570,33 @@ fn draw_home<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     }
 }
 
-fn draw_midi_setup<B: Backend>(f: &mut Frame<B>, a: &App) {
+fn centered_text(value: &str, width: usize) -> String {
+    let value = truncate(value, width);
+    let padding = width.saturating_sub(value.chars().count());
+    let left = padding / 2;
+    format!(
+        "{}{}{}",
+        " ".repeat(left),
+        value,
+        " ".repeat(padding - left)
+    )
+}
+
+fn draw_routing<B: Backend>(f: &mut Frame<B>, a: &App) {
     let z = f.size();
-    let controller = a
-        .controller_config
-        .read()
-        .ok()
-        .and_then(|config| config.input_match.clone())
-        .filter(|input| !input.is_empty())
-        .unwrap_or_else(|| "not configured".into());
+    let (controller, mapping) = a.controller_config.read().map_or_else(
+        |_| ("unavailable".into(), "unavailable".into()),
+        |config| {
+            (
+                config
+                    .input_match
+                    .clone()
+                    .filter(|input| !input.is_empty())
+                    .unwrap_or_else(|| "not configured".into()),
+                config.profile.clone().unwrap_or_else(|| "unmapped".into()),
+            )
+        },
+    );
     let controller_state = if a.controller_online {
         "connected"
     } else {
@@ -8514,26 +8621,42 @@ fn draw_midi_setup<B: Backend>(f: &mut Frame<B>, a: &App) {
     } else {
         "off"
     };
+    let audio = if !a.config.audio_autoconnect {
+        "off".into()
+    } else if let Some(notice) = &a.audio_fallback {
+        notice.clone()
+    } else if a.config.audio_outputs.len() == 2 {
+        format!("connected · {}", a.config.audio_outputs.join(" + "))
+    } else {
+        "configured route is incomplete".into()
+    };
     let lines = vec![
         Spans::from(Span::styled(
-            "MIDI DEVICES / GLOBAL SETUP",
+            "ROUTING · CURRENT CONNECTIONS",
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         )),
-        Spans::from(""),
-        Spans::from(format!("Controller  {controller_state}")),
+        Spans::from(truncate(
+            &format!("Controller {controller_state} · {mapping}"),
+            z.width.saturating_sub(4) as usize,
+        )),
         Spans::from(truncate(&controller, z.width.saturating_sub(4) as usize)),
-        Spans::from(""),
-        Spans::from("Tracker / external output"),
-        Spans::from(truncate(&external, z.width.saturating_sub(4) as usize)),
-        Spans::from(format!("Profile {profile} · clock {clock}")),
+        Spans::from(truncate(
+            &format!("MIDI out · {external}"),
+            z.width.saturating_sub(4) as usize,
+        )),
+        Spans::from(truncate(
+            &format!("Device {profile} · clock {clock}"),
+            z.width.saturating_sub(4) as usize,
+        )),
+        Spans::from("Audio out"),
+        Spans::from(truncate(&audio, z.width.saturating_sub(4) as usize)),
         Spans::from(""),
         Spans::from(Span::styled(
-            "To change devices, leave SHR and run shr-setup.",
+            "Read-only · change with shr-setup",
             Style::default().fg(Color::Yellow),
         )),
-        Spans::from("This screen never starts hardware setup."),
     ];
     f.render_widget(
         Paragraph::new(lines).block(
@@ -11806,6 +11929,7 @@ mod tests {
     use super::*;
     use crate::config::BankSelectMode;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::{Buffer, Cell as BufferCell};
     fn presets() -> Vec<Preset> {
         (0..39)
             .map(|i| Preset::synthv1(format!("Preset {i:02}"), format!("x{i}").into()))
@@ -11867,6 +11991,27 @@ mod tests {
         t.draw(|f| draw(f, &mut a)).unwrap();
         assert_eq!(t.backend().buffer().area, Rect::new(0, 0, w, h));
     }
+    fn render_app(app: &mut App, width: u16, height: u16) -> Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+    fn buffer_cell(buffer: &Buffer, x: u16, y: u16) -> &BufferCell {
+        &buffer.content[usize::from(y * buffer.area.width + x)]
+    }
+    fn buffer_text(buffer: &Buffer) -> String {
+        buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol.as_str())
+            .collect()
+    }
+    fn row_text(buffer: &Buffer, row: u16) -> String {
+        (0..buffer.area.width)
+            .map(|column| buffer_cell(buffer, column, row).symbol.as_str())
+            .collect()
+    }
     #[test]
     fn renders_40x20_all_screens() {
         render(40, 20, Screen::Home);
@@ -11886,7 +12031,7 @@ mod tests {
         render(40, 20, Screen::FxRack);
         render(40, 20, Screen::FxEditor);
         render(40, 20, Screen::Meter);
-        render(40, 20, Screen::MidiSetup);
+        render(40, 20, Screen::Routing);
     }
 
     #[test]
@@ -11904,17 +12049,188 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol.as_str())
             .collect::<String>();
-        assert!(text.contains("Software Synths"));
-        assert!(text.contains("FT2 MIDI Tracker"));
-        assert!(text.contains("Sound Recorder"));
-        assert!(text.contains("MIDI Devices / Global MIDI Setup"));
-        assert!(text.contains("MIDI Learn"));
+        assert!(text.contains("SOFTWARE SYNTHS"));
+        assert!(text.contains("FT2 TRACKER"));
+        assert!(text.contains("RECORDER"));
+        assert!(text.contains("ROUTING"));
+        assert!(text.contains("MIDI LEARN"));
         assert!(!text.contains("controller menu below"));
         assert!(buffer.content.iter().any(|cell| {
             cell.fg == Color::Black
                 && cell.bg == Color::White
                 && cell.modifier.contains(Modifier::BOLD)
         }));
+    }
+
+    #[test]
+    fn home_rows_are_equal_width_and_centered_at_40x20() {
+        let p = presets();
+        let mut app = app(&p);
+        let buffer = render_app(&mut app, 40, 20);
+
+        assert_eq!(app.hits.list, Rect::new(2, 6, 36, 9));
+        for (index, entry) in HOME_ENTRIES.iter().enumerate() {
+            let row = app.hits.list.y + index as u16;
+            let text = row_text(&buffer, row);
+            let label_x = 2 + (36usize - entry.label.len()) / 2;
+            assert_eq!(
+                &text[label_x..label_x + entry.label.len()],
+                entry.label,
+                "{} is not centered",
+                entry.label
+            );
+            for column in 2..38 {
+                let cell = buffer_cell(&buffer, column, row);
+                if index == app.home_selected {
+                    assert_eq!((cell.fg, cell.bg), (Color::Black, Color::White));
+                    assert!(cell.modifier.contains(Modifier::BOLD));
+                } else {
+                    assert_eq!((cell.fg, cell.bg), (Color::Gray, Color::Black));
+                    assert!(!cell.modifier.contains(Modifier::BOLD));
+                }
+            }
+            assert_ne!(buffer_cell(&buffer, 1, row).bg, Color::White);
+            assert_ne!(buffer_cell(&buffer, 38, row).bg, Color::White);
+        }
+    }
+
+    #[test]
+    fn home_selection_colors_are_stable_when_focus_moves() {
+        let p = presets();
+        let mut app = app(&p);
+        let first = render_app(&mut app, 40, 20);
+        let first_row = app.hits.list.y;
+        app.move_home(1);
+        let second = render_app(&mut app, 40, 20);
+        let second_row = app.hits.list.y + 1;
+
+        for column in 2..38 {
+            assert_eq!(buffer_cell(&first, column, first_row).bg, Color::White);
+            assert_eq!(buffer_cell(&second, column, first_row).fg, Color::Gray);
+            assert_eq!(buffer_cell(&second, column, first_row).bg, Color::Black);
+            assert_eq!(buffer_cell(&second, column, second_row).fg, Color::Black);
+            assert_eq!(buffer_cell(&second, column, second_row).bg, Color::White);
+        }
+    }
+
+    #[test]
+    fn home_scrolls_without_truncation_or_overflow_at_compact_size() {
+        let p = presets();
+        let mut app = app(&p);
+        for selected in 0..HOME_ENTRIES.len() {
+            app.home_selected = selected;
+            let buffer = render_app(&mut app, 38, 10);
+            assert_eq!((app.hits.list.x, app.hits.list.width), (2, 34));
+            let selected_row = (app.hits.list.y..app.hits.list.y + app.hits.list.height)
+                .find(|row| buffer_cell(&buffer, 2, *row).bg == Color::White)
+                .expect("selected Home row remains visible");
+            assert!(row_text(&buffer, selected_row).contains(HOME_ENTRIES[selected].label));
+            for column in 2..36 {
+                assert_eq!(buffer_cell(&buffer, column, selected_row).bg, Color::White);
+            }
+            assert_ne!(buffer_cell(&buffer, 1, selected_row).bg, Color::White);
+            assert_ne!(buffer_cell(&buffer, 36, selected_row).bg, Color::White);
+        }
+    }
+
+    #[test]
+    fn home_setup_destinations_are_distinct_direct_actions() {
+        let actions = HOME_ENTRIES
+            .iter()
+            .map(|entry| (entry.label, entry.action))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            actions.get("MIDI LEARN"),
+            Some(&Action::OpenControllerLearn)
+        );
+        assert_eq!(actions.get("ROUTING"), Some(&Action::OpenRouting));
+        assert_eq!(actions.get("EFFECTS"), Some(&Action::OpenFxRack));
+
+        let p = presets();
+        let mut app = app(&p);
+        perform(Action::OpenRouting, &mut app, Path::new("/none"), None);
+        assert_eq!(app.screen, Screen::Routing);
+        perform(Action::Back, &mut app, Path::new("/none"), None);
+        perform(Action::OpenFxRack, &mut app, Path::new("/none"), None);
+        assert_eq!(app.screen, Screen::FxRack);
+        assert_eq!(app.fx_rack_parent, Screen::Home);
+    }
+
+    #[test]
+    fn home_recommends_midi_learn_only_for_controller_failures() {
+        let p = presets();
+        let learn_index = HOME_ENTRIES
+            .iter()
+            .position(|entry| entry.action == Action::OpenControllerLearn)
+            .unwrap();
+        let mut app = app(&p);
+        *app.controller_config.write().unwrap() =
+            crate::pads::PadConfig::unmapped("Unknown Controller MIDI");
+
+        app.controller_online = false;
+        assert_eq!(
+            app.controller_learn_reason(),
+            Some(ControllerLearnReason::Offline)
+        );
+        app.recommend_controller_learn_on_home();
+        assert_eq!(app.home_selected, learn_index);
+        let offline = render_app(&mut app, 40, 20);
+        assert!(buffer_text(&offline).contains("Configured controller is offline"));
+
+        app.controller_online = true;
+        assert_eq!(
+            app.controller_learn_reason(),
+            Some(ControllerLearnReason::NoReviewedProfile)
+        );
+
+        let mut learned = crate::pads::PadConfig::unmapped("Unknown Controller MIDI");
+        learned.profile = Some("learned".into());
+        learned.encoder_relative_cc = Some(28);
+        *app.controller_config.write().unwrap() = learned.clone();
+        assert_eq!(
+            app.controller_learn_reason(),
+            Some(ControllerLearnReason::IncompleteLearnedEncoder)
+        );
+
+        learned.encoder_press_cc = Some(118);
+        *app.controller_config.write().unwrap() = learned;
+        assert_eq!(app.controller_learn_reason(), None);
+        assert!(app.controller_config.read().unwrap().pads.is_empty());
+        assert!(app.controller_config.read().unwrap().cc_buttons.is_empty());
+
+        let profile = app
+            .controller_profiles
+            .matching("Arturia MiniLab3 MIDI")
+            .unwrap();
+        let mut reviewed = crate::pads::PadConfig::unmapped("Arturia MiniLab3 MIDI");
+        profile
+            .apply(&mut reviewed, "Arturia MiniLab3 MIDI")
+            .unwrap();
+        *app.controller_config.write().unwrap() = reviewed;
+        assert_eq!(app.controller_learn_reason(), None);
+    }
+
+    #[test]
+    fn keyboard_navigation_remains_available_with_controller_offline() {
+        let p = presets();
+        let mut app = app(&p);
+        let (tx, _rx) = mpsc::channel();
+        *app.controller_config.write().unwrap() =
+            crate::pads::PadConfig::unmapped("Offline Controller");
+        app.controller_online = false;
+        app.recommend_controller_learn_on_home();
+        let start = app.home_selected;
+
+        key(KeyCode::Down, &mut app, Path::new("/none"), &tx);
+        assert_eq!(app.home_selected, start + 1);
+        key(KeyCode::Up, &mut app, Path::new("/none"), &tx);
+        assert_eq!(app.home_selected, start);
+        app.home_selected = HOME_ENTRIES
+            .iter()
+            .position(|entry| entry.action == Action::OpenRouting)
+            .unwrap();
+        key(KeyCode::Enter, &mut app, Path::new("/none"), &tx);
+        assert_eq!(app.screen, Screen::Routing);
     }
 
     #[test]
@@ -11984,7 +12300,7 @@ mod tests {
             Screen::Tracker,
             Screen::AudioRecorder,
             Screen::Meter,
-            Screen::MidiSetup,
+            Screen::Routing,
             Screen::FxRack,
         ] {
             let mut a = app(&p);
@@ -12007,6 +12323,41 @@ mod tests {
         a.screen = Screen::TrackerLoopAlign;
         perform(Action::Back, &mut a, Path::new("/none"), None);
         assert_eq!(a.screen, Screen::TrackerLoop);
+    }
+
+    #[test]
+    fn home_back_paths_release_workspace_owners_and_editor_drafts() {
+        let p = presets();
+
+        let mut synth = app(&p);
+        synth.screen = Screen::Presets;
+        synth.engine_owner = Some(EngineOwner::SoftwareSynth);
+        perform(Action::Back, &mut synth, Path::new("/none"), None);
+        assert_eq!(synth.screen, Screen::Home);
+        assert_eq!(synth.engine_owner, None);
+
+        let mut tracker = app(&p);
+        tracker.screen = Screen::Tracker;
+        tracker.engine_owner = Some(EngineOwner::Tracker("Pattern Sound".into()));
+        perform(Action::Back, &mut tracker, Path::new("/none"), None);
+        assert_eq!(tracker.screen, Screen::Home);
+        assert_eq!(tracker.engine_owner, None);
+        assert!(!tracker.tracker_route.lock().unwrap().preview_state().0);
+
+        let mut effects = app(&p);
+        perform(Action::OpenFxRack, &mut effects, Path::new("/none"), None);
+        effects.add_effect();
+        effects.confirm_effect_type_edit();
+        perform(Action::OpenFxEditor, &mut effects, Path::new("/none"), None);
+        effects.begin_fx_value_edit();
+        assert!(effects.fx_edit_original.is_some());
+        perform(Action::Back, &mut effects, Path::new("/none"), None);
+        assert_eq!(effects.screen, Screen::FxEditor);
+        assert!(effects.fx_edit_original.is_none());
+        perform(Action::Back, &mut effects, Path::new("/none"), None);
+        assert_eq!(effects.screen, Screen::FxRack);
+        perform(Action::Back, &mut effects, Path::new("/none"), None);
+        assert_eq!(effects.screen, Screen::Home);
     }
 
     #[test]
@@ -12464,9 +12815,24 @@ mod tests {
         render(38, 14, Screen::FxRack);
         render(38, 14, Screen::FxEditor);
         render(38, 14, Screen::Meter);
-        render(38, 14, Screen::MidiSetup);
+        render(38, 14, Screen::Routing);
         render(30, 8, Screen::Presets);
         render(30, 8, Screen::Tracker)
+    }
+
+    #[test]
+    fn routing_keeps_controller_midi_audio_and_setup_visible_at_38x14() {
+        let p = presets();
+        let mut app = app(&p);
+        app.screen = Screen::Routing;
+        let text = buffer_text(&render_app(&mut app, 38, 14));
+
+        for expected in ["Controller", "MIDI out", "Audio out", "shr-setup"] {
+            assert!(
+                text.contains(expected),
+                "missing compact Routing text {expected}"
+            );
+        }
     }
 
     #[test]

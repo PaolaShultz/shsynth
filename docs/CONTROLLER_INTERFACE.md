@@ -9,7 +9,7 @@ implemented.
 
 | Screen or mode | Existing user-facing operations and input paths |
 |---|---|
-| Home | Startup navigation root. Encoder/Up/Down selects a musician-facing workspace and encoder click/Enter opens it. Home has no MIDI quit command; Esc or `q` quits from the computer keyboard. |
+| Home | Centered startup navigation root with equal-width bars for Software Synths, FT2, Recorder, Performance, MIDI Learn, Routing, Effects, Ideas, and Help. Encoder/Up/Down selects a workspace and encoder click/Enter opens it. Home has no MIDI quit command; Esc or `q` quits from the computer keyboard. |
 | Presets | Select previous/next, keyboard page up/down, first/last, previous/next engine, and load the selected sound. Its physical pages contain only sound browsing, engine choice, panic, contextual help, and Exit to Home. |
 | MTR | With the final bus enabled: choose Synth/Loop/Input, adjust its bounded smoothed level, toggle mute, inspect readiness/final peaks/clips/limiter reduction, and start/stop the callback-boundary final stereo recording. With it disabled: retain the passive CPU and legacy graph meter. Master level is visible; back, help, and panic remain reachable. |
 | Playback | Inspect held notes/chords, aligned decimal MIDI strike velocities, and keyboard state; reset the 12 mapped parameters in place; record/play/save MIDI Ideas; stop/panic; contextual help; return to Presets. The 12 configured synthv1 CC controls continuously adjust parameters with pickup. |
@@ -29,7 +29,7 @@ implemented.
 | Target/channel field mode | Previous/next choice, confirm field, cancel field. Encoder turn/press and menu items share these operations. |
 | Audio recorder | Select and name a track; assign an exact discovered JACK source; arm/disarm one, every resolved track, or all; refresh source discovery without rewriting preferences; start/stop one synchronized take; inspect elapsed time, active count, selected-track activity, drop/xrun/high-water status, final path or failure; Exit to Home and panic. |
 | FX rack/editor | Choose source, AUX 1, AUX 2, or master; add/select/remove/bypass/reorder bounded effects; edit strict named physical-unit parameters; set independent send level, pre/post point, and return level; inspect peak/RMS/clip/non-finite/gain-reduction meters; and panic. Aux time effects are forced wet. An active graph publishes FX changes only with stopped transport and recording; a disabled graph accepts Project-only edits without touching audio. |
-| MIDI setup | Read-only overview of the selected controller, external tracker route/profile, and controller clock. Hardware changes remain an explicit external `shr-setup` action. |
+| Routing | Read-only overview of the selected controller, external tracker route/profile, controller clock, and audio output. Hardware changes remain an explicit external `shr-setup` action. |
 | Help | Compact Markdown user help, temporary LAN web help when port 80 is available, section links selected by the master encoder, keyboard page scrolling, top, and return to the previous screen. |
 | Global/safety | Stop MIDI playback, tracker transport, recorder, managed engine, and owned notes; All Notes Off; cancel or leave the current controller level. Application exit remains computer-keyboard-only. Help is also reachable from `?` or F1. Process termination remains limited to the engine owned by SHR-DAW. |
 
@@ -57,6 +57,10 @@ union of every normal and contextual menu and checks every action in this
   Page−/Page+/Track−/Track+ movement page. On every workspace, child screen,
   and contextual editor, `EXIT` is page 4/item 4 and returns exactly one level.
   Home is the root and has no MIDI Exit; quitting remains keyboard-only.
+- When a configured controller is offline, lacks a matching reviewed profile,
+  or has an incomplete learned encoder, Home initially selects MIDI Learn and
+  gives the reason. A learned master encoder with turn and click is usable even
+  without optional command buttons. Home itself neither learns nor transmits.
 - Help is a child screen. It tries to show the same help at
   `http://<LAN-IP>/help` while open. The master encoder moves one help row at a
   time. Encoder press follows a highlighted internal section link on eight-
@@ -167,7 +171,7 @@ Blank physical positions and wholly empty pages are omitted.
 | Audio recorder | Track | Previous track | Next track | Assign source | Name track |
 | Audio recorder | Setup | Arm all resolved | Disarm all | Refresh sources | — |
 | Audio recorder | Sys | Panic | — | Help | Exit |
-| MIDI setup | Sys | Panic | Help | — | Exit |
+| Routing | Sys | Panic | Help | — | Exit |
 
 ## FT2 cell editor inventory and mapping
 
