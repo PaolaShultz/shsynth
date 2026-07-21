@@ -11238,6 +11238,11 @@ fn draw_tracker_loop<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         )
     };
     let mut lines = details.lines().map(Spans::from).collect::<Vec<_>>();
+    if player.loaded && !player.duration.is_zero() {
+        // Keep the loop playhead sample-relative: playback and tracker REC
+        // share the transport clock which advances `player.elapsed`.
+        lines.insert(10.min(lines.len()), loop_position_bar(&player, z.width));
+    }
     let body = rect(z.x, z.y, z.width, z.height.saturating_sub(2));
     if body.height >= 15 {
         let availability = a.loop_meter.audio_availability();
@@ -11332,6 +11337,29 @@ fn short_time(duration: Duration) -> String {
         duration.as_secs() / 60,
         duration.as_secs() % 60
     )
+}
+
+fn loop_position_bar(
+    player: &crate::loop_player::LoopStatus,
+    available_width: u16,
+) -> Spans<'static> {
+    let width = usize::from(if available_width >= 40 {
+        40
+    } else {
+        available_width.min(38)
+    });
+    if width == 0 {
+        return Spans::default();
+    }
+    let phase = (player.elapsed.as_secs_f64() / player.duration.as_secs_f64()).clamp(0.0, 1.0);
+    let playhead = ((phase * width as f64).floor() as usize).min(width - 1);
+    let track = Style::default().fg(Color::Black).bg(Color::White);
+    let marker = Style::default().fg(Color::Black).bg(Color::Green);
+    Spans::from(vec![
+        Span::styled(" ".repeat(playhead), track),
+        Span::styled(" ", marker),
+        Span::styled(" ".repeat(width - playhead - 1), track),
+    ])
 }
 fn draw_pad_lock<B: Backend>(f: &mut Frame<B>, a: &App) {
     if !a.pad_locked {
@@ -17487,6 +17515,25 @@ mod tests {
             assert!(text.contains(expected), "missing {expected:?}");
         }
         assert!(!text.contains("FINAL OUT"));
+    }
+
+    #[test]
+    fn loop_screen_maps_sample_position_across_40_or_38_cell_bar() {
+        let p = presets();
+        let mut a = app(&p);
+        configure_screenshot(&mut a, Screen::TrackerLoop);
+
+        let wide = render_app(&mut a, 40, 20);
+        for x in 0..40 {
+            let expected = if x == 15 { Color::Green } else { Color::White };
+            assert_eq!(wide.get(x, 10).bg, expected, "40-cell bar at x={x}");
+        }
+
+        let compact = render_app(&mut a, 38, 14);
+        for x in 0..38 {
+            let expected = if x == 14 { Color::Green } else { Color::White };
+            assert_eq!(compact.get(x, 10).bg, expected, "38-cell bar at x={x}");
+        }
     }
 
     #[test]

@@ -40,6 +40,10 @@ containing three four-track pages:
 3. `Drums`, using the configured external output, MIDI channel 10, program 1,
    and the existing percussion-note mapping.
 
+The Loop Player's white position bar uses a green playhead to show the
+approximate position within the selected WAV region while the shared FT2
+transport plays or records.
+
 Channels and programs are zero-based in MIDI bytes and in the in-memory model.
 Every musician-facing screen shows channels 1–16 and programs 1–128.
 
