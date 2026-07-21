@@ -327,13 +327,31 @@ looping pattern. Pattern setup supports 4/4 sizes 8/16/32/64/128 and
 corresponding 3/4 sizes 6/12/24/48/96. Projects retain distinct Patterns plus
 their Arrangement.
 
-FT2 has one Play/Rec/Edit/N00B mode state. N00B is the beginner duration-entry
-surface for melodic pages: the selected page owns the sound, the one rotary
-selector offers 1/1–1/32 with 1/16 as default, and entry uses existing
-gate/explicit note-off cells before advancing. N00B is refused on percussion
-pages; page/lane movement onto one returns to Play without rewriting cells. Its
-context keeps page/track, delete, note-off, play/save/files, Normal, and Exit
-controls. Mode switches never rewrite cells.
+Playback and FT2 share the same runtime N00B scale choice: any chromatic root
+plus major or natural minor. Playback can enable it for the standalone Player.
+In FT2, N00B is an independent on/off input filter layered over Play, REC, and
+EDIT rather than a fourth mode. Accepted notes keep their exact pitch, while
+out-of-scale note-on and note-off messages are consumed and remain silent
+rather than being remapped. Play remains non-writing; REC and EDIT write only
+accepted notes. Toggling/changing/leaving the filter releases held notes and
+capture ownership first without changing the underlying FT2 mode. N00B is
+refused on percussion pages; moving onto one turns only the filter off.
+
+FT2 Step Edit separately owns the 1/1–1/32 note-length selector, with 1/16 as
+default. It writes the existing gate/explicit note-off representation. The
+length never changes the independent 1/2/4/8-row ADD cursor advance, and mode
+switches never rewrite existing cells.
+
+The 2026-07-21 N00B/Edit separation repair passed Rust 1.85 formatting,
+`cargo check --locked`, seven focused N00B tests, the focused filtered Record
+test, two focused note-length tests, all 14 navigation tests, the
+populated-context 40×20 render test, and `git diff --check`. Seven affected
+menu images were regenerated and inspected. The exhaustive screenshot helper
+currently reports 14 other manifest outputs
+missing from the clean checkout; they predate and are outside this repair, so
+no unrelated screenshot batch was added. No JACK client, synth process, MIDI
+transmission, playback, audible test, or physical-hardware test was used.
+
 The Tools child opens the private
 WAV loop player. Loop imports live below the XDG user-data `loops/` directory;
 Projects keep optional meter, filename, BPM interpretation, and beat-region
@@ -435,14 +453,19 @@ in order:
 3. Keyboard and ordinary musical MIDI audition the selected FT2 page. Change
    page, channel, program, destination, and synth preset while listening for
    stuck notes; command-pad presses/releases must remain silent and consumed.
-4. On Software Synth or MIDI, N00b Mode opens one rotary length selector,
-   defaults to 1/16, and enters 1/1, 1/2, 1/4, 1/8, 1/16, and 1/32 notes without
-   changing existing cells when modes are switched. On Drums it must refuse to
-   open; moving onto Drums from melodic N00b must return to Play unchanged.
-5. On a note-empty Pattern, change routing and Save: Cancel must retain the old
+4. In Playback, choose a N00B root and major/minor scale: in-scale keys must
+   retain their pitch, out-of-scale keys must stay silent, and NORMAL must
+   restore chromatic input without stuck notes. In FT2, enable the same filter
+   separately in Play, REC, and EDIT: Play must remain non-writing, while REC
+   and EDIT write allowed notes but not rejected ones. Toggling N00B must not
+   change the active mode. On Drums it must refuse to open, and moving onto
+   Drums must turn off only N00B.
+5. In FT2 Step Edit, verify every 1/1–1/32 length independently from each
+   1/2/4/8-row ADD value; changing length must not change the next-row spacing.
+6. On a note-empty Pattern, change routing and Save: Cancel must retain the old
    defaults, Confirm must seed the next new Pattern, unchanged routing must not
    prompt, and a Pattern containing notes must not alter defaults.
-6. On the Drums page in Step Edit, establish kick and Crash Cymbal 2 in
+7. On the Drums page in Step Edit, establish kick and Crash Cymbal 2 in
    different columns, then play both on a later row. Each must return to its
    earlier column. Confirm new bass drums and snares begin in columns 1 and 2,
    a simultaneous collision falls to a free column without replacing an
@@ -460,7 +483,8 @@ prefer exact-note history, then kick/snare family history and homes, then a free
 column. Existing Patterns are never rearranged. Unrelated notes, commands, and
 fallback note-offs are preserved; a note-off in the returning voice's own lane
 may be replaced by its new hit. Melodic entry is unchanged. N00B is deliberately
-unavailable on percussion pages, and real-time REC retains its active-note
+unavailable on percussion pages, while melodic real-time REC can use the N00B
+gate and retains its active-note
 allocator because overlapping note-on/off ownership is a different constraint.
 Rust 1.85 formatting, focused smart-placement/N00B-exclusion tests, the existing
 melodic chord/selected-column regressions, `cargo check --locked`, and the

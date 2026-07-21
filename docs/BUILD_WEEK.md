@@ -52,13 +52,15 @@ child or beginner learns in one preferred way. In the creator's words:
 > sound, a visible shape, and a name, so theory later answers a question the
 > child already owns.
 >
-> FT2 extends that freedom into making something. Its melodic N00B mode hides
-> tracker timing details behind familiar note lengths, and Step Edit can turn a
-> played handful of tones into music lanes. Someone can carefully enter a
+> N00B lets the player choose a root and major or natural-minor scale. Notes in
+> it sound and notes outside it stay silent, both in Playback and on a melodic
+> FT2 page. In FT2 it is an independent switch: the same filter can stay on
+> while playing, recording, or using Step Edit. Step Edit separately gives the
+> allowed recorded tones a familiar note length. Someone can carefully enter a
 > phrase or practically face-smash the keys, listen, keep an accident that
 > sounds good, and revise it. That is useful for a young explorer, a complete
 > music beginner, a Raspberry Pi enthusiast, or an older person returning to
-> learning—like me. N00B is the mode, not a label for the person.
+> learning—like me. N00B names the optional filter, not the person using it.
 
 The intended path is curiosity first: press, hear, see the sounding notes, read
 the chord name, change something, compare, and ask why. Playback supplies the

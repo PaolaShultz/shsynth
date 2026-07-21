@@ -56,6 +56,7 @@ pub type SharedPickup = Arc<Mutex<crate::midi::Pickup>>;
 pub type SharedBackend = Arc<Mutex<BackendKind>>;
 pub type SharedTrackerRoute = Arc<Mutex<TrackerRoute>>;
 pub type SharedTrackerInput = Arc<Mutex<Option<crate::sequencer::LiveInput>>>;
+pub type SharedPlaybackScale = Arc<Mutex<Option<crate::scale::Scale>>>;
 pub type SharedControllerConfig = Arc<RwLock<PadConfig>>;
 pub type SharedLearnMode = Arc<AtomicBool>;
 pub type SharedFxControlMode = Arc<AtomicBool>;
@@ -67,6 +68,7 @@ pub struct TrackerRouteConfig<'a> {
     pub start_column: usize,
     pub percussion: bool,
     pub audition_note: Option<u8>,
+    pub scale: Option<crate::scale::Scale>,
     pub external: &'a crate::config::ExternalMidiConfig,
 }
 
@@ -77,6 +79,7 @@ pub struct TrackerRoute {
     columns: [TrackerColumnRoute; crate::sequencer::LANES_PER_PAGE],
     start_column: usize,
     note_map: [u8; 128],
+    scale: Option<crate::scale::Scale>,
     bank_select: crate::config::BankSelectMode,
     revision: u64,
 }
@@ -95,6 +98,7 @@ struct CallbackRouting {
     backend: SharedBackend,
     tracker_route: SharedTrackerRoute,
     tracker_input: SharedTrackerInput,
+    playback_scale: SharedPlaybackScale,
     controller: SharedControllerConfig,
     learn_mode: SharedLearnMode,
     fx_control_mode: SharedFxControlMode,
@@ -108,6 +112,7 @@ impl Default for TrackerRoute {
             columns: [TrackerColumnRoute::default(); crate::sequencer::LANES_PER_PAGE],
             start_column: 0,
             note_map: std::array::from_fn(|note| note as u8),
+            scale: None,
             bank_select: crate::config::BankSelectMode::Off,
             revision: 0,
         }
@@ -137,6 +142,7 @@ impl TrackerRoute {
             .start_column
             .min(crate::sequencer::LANES_PER_PAGE - 1);
         self.note_map = std::array::from_fn(|note| note as u8);
+        self.scale = config.scale;
         self.bank_select = config.external.bank_select;
         if config.percussion {
             if let Some(note) = config.audition_note {
@@ -151,6 +157,9 @@ impl TrackerRoute {
     }
 
     fn mapped_note(&self, note: u8) -> Option<u8> {
+        if self.scale.is_some_and(|scale| !scale.contains(note)) {
+            return None;
+        }
         self.note_map.get(usize::from(note)).copied()
     }
 
@@ -179,8 +188,12 @@ impl TrackerRoute {
     }
 }
 
-fn tracker_edit_consumes_note(route: Option<&TrackerRoute>, message: &[u8]) -> bool {
+fn tracker_route_consumes_note(route: Option<&TrackerRoute>, message: &[u8]) -> bool {
     route.is_some_and(|route| route.enabled && valid_note_message(message))
+}
+
+fn playback_filter_allows(scale: Option<crate::scale::Scale>, message: &[u8]) -> bool {
+    !valid_note_message(message) || scale.is_none_or(|scale| scale.contains(message[1]))
 }
 
 fn valid_note_message(message: &[u8]) -> bool {
@@ -204,6 +217,7 @@ pub struct MidiRouter {
     backend: SharedBackend,
     tracker_route: SharedTrackerRoute,
     tracker_input: SharedTrackerInput,
+    playback_scale: SharedPlaybackScale,
     controller: SharedControllerConfig,
     learn_mode: SharedLearnMode,
     fx_control_mode: SharedFxControlMode,
@@ -223,6 +237,7 @@ impl MidiRouter {
         let backend = Arc::new(Mutex::new(BackendKind::Synthv1));
         let tracker_route = Arc::new(Mutex::new(TrackerRoute::default()));
         let tracker_input = Arc::new(Mutex::new(None));
+        let playback_scale = Arc::new(Mutex::new(None));
         let mut last_error = None;
         let mut input = None;
         for _ in 0..25 {
@@ -236,6 +251,7 @@ impl MidiRouter {
                     backend: Arc::clone(&backend),
                     tracker_route: Arc::clone(&tracker_route),
                     tracker_input: Arc::clone(&tracker_input),
+                    playback_scale: Arc::clone(&playback_scale),
                     controller: Arc::clone(&controller),
                     learn_mode: Arc::clone(&learn_mode),
                     fx_control_mode: Arc::clone(&fx_control_mode),
@@ -260,6 +276,7 @@ impl MidiRouter {
             backend,
             tracker_route,
             tracker_input,
+            playback_scale,
             controller,
             learn_mode,
             fx_control_mode,
@@ -284,6 +301,10 @@ impl MidiRouter {
 
     pub fn tracker_input(&self) -> SharedTrackerInput {
         Arc::clone(&self.tracker_input)
+    }
+
+    pub fn playback_scale(&self) -> SharedPlaybackScale {
+        Arc::clone(&self.playback_scale)
     }
 
     pub fn controller_config(&self) -> SharedControllerConfig {
@@ -967,6 +988,7 @@ fn connect_midi_input(
         backend,
         tracker_route,
         tracker_input,
+        playback_scale,
         controller: callback_controller,
         learn_mode,
         fx_control_mode,
@@ -1093,7 +1115,7 @@ fn connect_midi_input(
                         let note_message = valid_note_message(message);
                         let route = tracker_route.lock().ok().map(|route| route.clone());
                         let tracker_consumes_note =
-                            tracker_edit_consumes_note(route.as_ref(), message);
+                            tracker_route_consumes_note(route.as_ref(), message);
                         if route
                             .as_ref()
                             .is_some_and(|route| route.revision != route_revision)
@@ -1170,6 +1192,10 @@ fn connect_midi_input(
                                 }
                             }
                         } else if !tracker_consumes_note {
+                            let scale = playback_scale.lock().ok().and_then(|scale| *scale);
+                            if !playback_filter_allows(scale, message) {
+                                return;
+                            }
                             let _ = tx.send(MidiEvent::Raw {
                                 received,
                                 bytes: message.to_vec(),
@@ -1844,6 +1870,7 @@ mod tests {
             start_column: 0,
             percussion: true,
             audition_note: None,
+            scale: None,
             external: &config,
         });
         assert!(route.enabled);
@@ -1853,11 +1880,14 @@ mod tests {
         assert_eq!(route.mapped_note(61), Some(38));
         assert_eq!(route.mapped_note(72), Some(72));
         assert_eq!(route.mapped_note(128), None);
-        assert!(tracker_edit_consumes_note(Some(&route), &[0x90, 60, 100]));
-        assert!(tracker_edit_consumes_note(Some(&route), &[0x90, 60, 0]));
-        assert!(tracker_edit_consumes_note(Some(&route), &[0x80, 60, 0]));
-        assert!(!tracker_edit_consumes_note(Some(&route), &[0xb0, 1, 64]));
-        assert!(!tracker_edit_consumes_note(Some(&route), &[0x90, 128, 100]));
+        assert!(tracker_route_consumes_note(Some(&route), &[0x90, 60, 100]));
+        assert!(tracker_route_consumes_note(Some(&route), &[0x90, 60, 0]));
+        assert!(tracker_route_consumes_note(Some(&route), &[0x80, 60, 0]));
+        assert!(!tracker_route_consumes_note(Some(&route), &[0xb0, 1, 64]));
+        assert!(!tracker_route_consumes_note(
+            Some(&route),
+            &[0x90, 128, 100]
+        ));
         assert!(invalid_note_message(&[0x90, 128, 100]));
         assert!(invalid_note_message(&[0x80, 60]));
         assert!(invalid_note_message(&[0x90, 60, 100, 0]));
@@ -1868,9 +1898,10 @@ mod tests {
             start_column: 0,
             percussion: true,
             audition_note: None,
+            scale: None,
             external: &config,
         });
-        assert!(!tracker_edit_consumes_note(Some(&route), &[0x90, 60, 100]));
+        assert!(!tracker_route_consumes_note(Some(&route), &[0x90, 60, 100]));
     }
 
     #[test]
@@ -1884,11 +1915,41 @@ mod tests {
             start_column: 0,
             percussion: true,
             audition_note: Some(42),
+            scale: None,
             external: &config,
         });
         assert_eq!(route.mapped_note(36), Some(42));
         assert_eq!(route.mapped_note(60), Some(42));
         assert_eq!(route.mapped_note(96), Some(42));
+    }
+
+    #[test]
+    fn noob_routes_suppress_outside_notes_without_remapping_allowed_notes() {
+        let config = RuntimeConfig::default().external_midi;
+        let scale = crate::scale::Scale {
+            root: 1,
+            kind: crate::scale::ScaleKind::NaturalMinor,
+        };
+        let mut route = TrackerRoute::default();
+        route.configure(TrackerRouteConfig {
+            enabled: true,
+            target: crate::sequencer::PageTarget::ConfiguredExternal,
+            columns: [(0, (0, 0, 0)); crate::sequencer::LANES_PER_PAGE],
+            start_column: 0,
+            percussion: false,
+            audition_note: None,
+            scale: Some(scale),
+            external: &config,
+        });
+        assert_eq!(route.mapped_note(61), Some(61));
+        assert_eq!(route.mapped_note(62), None);
+        assert_eq!(route.mapped_note(63), Some(63));
+
+        assert!(playback_filter_allows(Some(scale), &[0x90, 61, 100]));
+        assert!(!playback_filter_allows(Some(scale), &[0x90, 62, 100]));
+        assert!(!playback_filter_allows(Some(scale), &[0x80, 62, 0]));
+        assert!(playback_filter_allows(Some(scale), &[0xb0, 1, 64]));
+        assert!(playback_filter_allows(None, &[0x90, 62, 100]));
     }
 
     #[test]
@@ -1902,6 +1963,7 @@ mod tests {
             start_column: 0,
             percussion: false,
             audition_note: None,
+            scale: None,
             external: &config,
         });
         assert_eq!(
@@ -1921,6 +1983,7 @@ mod tests {
             start_column: 0,
             percussion: false,
             audition_note: None,
+            scale: None,
             external: &config,
         });
         assert_eq!(old[0].1, 0);

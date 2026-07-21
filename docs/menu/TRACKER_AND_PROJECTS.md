@@ -46,8 +46,9 @@ Home instead of this controller page.
 
 ![Populated FT2 Pattern in Play mode with the SYS page](../images/menu/ft2-play-sys.png)
 
-`PANIC` stops all owned notes and transports. `HELP` opens contextual help.
-`EXIT` returns Home.
+`PANIC` stops all owned notes and transports. `N00B` opens scale setup or turns
+an active filter off without leaving Play. `HELP` opens contextual help. `EXIT`
+returns Home.
 
 ## FT2 Pattern — real-time Record context
 
@@ -56,18 +57,20 @@ consumed before the loaded software synth, auditioned on that page's exact
 target/channel, quantized into the looping current Pattern, and written only to
 that page.
 
-### OPS — finish recording
+### PLAY — transport, capture, and filter
 
-![Populated FT2 Pattern recording context with the OPS page](../images/menu/ft2-record-ops.png)
+![Populated FT2 Pattern recording context with the PLAY page](../images/menu/ft2-record-play.png)
 
-`REC END` ends real-time capture while preserving the notes already entered.
+`N00B` opens scale setup or turns the active filter off without ending capture.
+`PLAY` controls transport. `RECORD` ends real-time capture while preserving the
+notes already entered. With N00B on, only allowed notes are heard and written.
 
 ### SYS — emergency and normal exits
 
 ![Populated FT2 Pattern recording context with the SYS page](../images/menu/ft2-record-sys.png)
 
-`PANIC` performs the global owned stop. `STOP` stops transport and recording.
-`HELP` explains the current mode. `EXIT` leaves the recording context safely.
+`PANIC` performs the global owned stop. `HELP` explains the current mode.
+`EXIT` leaves the recording context safely.
 
 ## FT2 Pattern — Step Edit context
 
@@ -87,7 +90,8 @@ free one. Melodic pages still fill from the selected column.
 ![Populated FT2 Step Edit with the OPS page](../images/menu/ft2-step-edit-ops.png)
 
 `BLANK` advances without writing a note. `ERASE` clears the selected cell.
-`N-OFF` writes a note-off. `DONE` leaves Step Edit.
+`N-OFF` writes a note-off. `N00B` opens scale setup or turns the active filter
+off while Step Edit remains active.
 
 ### MOVE — order and lane cursor
 
@@ -182,20 +186,21 @@ private-WAV cleanup. `MUTE PG` toggles the current four-lane page.
 `PANIC`, `STOP`, and `HELP` retain their normal meanings. `EXIT` returns to the
 Pattern editor.
 
-## N00B mode and note length
+## N00B filter and Step Edit note length
 
-N00B mode is a simpler melodic entry surface over the same Pattern cells. The
-selected non-percussion page chooses the synth or MIDI instrument being played
-and edited. N00B is refused on Drums; moving onto Drums while it is active
-returns to Play without changing cells. Its pages provide page/track movement;
-`LENGTH`, `DELETE`, `N-OFF`, and `NORMAL`; play, save, and Files; plus panic,
-help, and one-level Exit.
+N00B is an independent scale-filter switch, not a fourth FT2 mode and not a
+duration control. Choose any chromatic root plus major or natural minor. On the
+selected melodic page, an in-scale key keeps its original pitch and an
+out-of-scale key stays silent; no rejected key is shifted to a nearby note.
+The filter can stay on while playing, recording, or using Step Edit. Play does
+not write cells; Record and Step Edit write only allowed notes. The N00B button
+is reachable in all three modes and turns the active filter off without
+changing mode. Moving onto Drums also turns only the filter off.
 
-`LENGTH` opens one rotary selector. Turn through `1/1`, `1/2`, `1/4`, `1/8`,
-`1/16`, and `1/32`, then click or choose `DONE`. `CANCEL`/`EXIT` keeps the old
-length. The default is `1/16`. A played note writes its required end using the
-existing row/gate/note-off representation and advances to the next insertion
-position. `NORMAL` leaves every existing cell untouched.
+Note duration belongs separately to Step Edit. `LENGTH` opens a rotary selector
+for `1/1`, `1/2`, `1/4`, `1/8`, `1/16`, and `1/32`; `1/16` is the default.
+The duration uses the existing gate/note-off representation. It does not alter
+the independent 1/2/4/8-row `ADD` value that chooses the next insertion row.
 
 ## Project Files
 

@@ -12,7 +12,7 @@ impl NoteNaming {
         }
     }
 
-    fn pitch_name(self, pc: u8) -> &'static str {
+    pub(crate) fn pitch_name(self, pc: u8) -> &'static str {
         match self {
             Self::German => [
                 "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "B", "H",

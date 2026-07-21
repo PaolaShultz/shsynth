@@ -12,12 +12,12 @@ implemented.
 | Home | Centered startup navigation root with equal-width bars for Software Synths, FT2, Recorder, Performance, MIDI Learn, Routing, Effects, Ideas, and Help. Encoder/Up/Down selects a workspace and encoder click/Enter opens it. Home has no MIDI quit command; Esc or `q` quits from the computer keyboard. |
 | Presets | Select previous/next, keyboard page up/down, first/last, previous/next engine, and load the selected sound. Its physical pages contain only sound browsing, engine choice, panic, contextual help, and Exit to Home. |
 | MTR | With the final bus enabled: choose Synth/Loop/Input, adjust its bounded smoothed level, toggle mute, inspect readiness/final peaks/clips/limiter reduction, and start/stop the callback-boundary final stereo recording. With it disabled: retain the passive CPU and legacy graph meter. Master level is visible; back, help, and panic remain reachable. |
-| Playback | Inspect held notes/chords, aligned decimal MIDI strike velocities, and keyboard state; reset the 12 mapped parameters in place; record/play/save MIDI Ideas; stop/panic; contextual help; return to Presets. The 12 configured synthv1 CC controls continuously adjust parameters with pickup. |
+| Playback | Inspect held notes/chords, aligned decimal MIDI strike velocities, and keyboard state; enable a root plus major/natural-minor N00B filter or return to chromatic Normal; reset the 12 mapped parameters in place; record/play/save MIDI Ideas; stop/panic; contextual help; return to Presets. The 12 configured synthv1 CC controls continuously adjust parameters with pickup. |
 | Ideas | Previous/next/first/last idea; inspect, load, play, delete, record, and save; panic; contextual help; Exit to Home. |
 | FT2 normal | Previous/next row (keyboard/encoder); Page−/Page+/Track−/Track+ on controller page 1; play, record, cell edit, and step edit on page 2; child Tracks, Files, and Tools on page 3; panic/help/Exit on page 4. |
 | FT2 record | Record quantized notes into only the current page/current pattern; route live notes only to that page's hardware MIDI target; stop record, stop, exit, and panic remain available. |
-| FT2 edit | All cursor and transport operations; musical keyboard or incoming MIDI note/chord gesture entry; blank/skip; erase; note off; 1/2/4/8-row entry advance; leave edit; lane mute. Command notes are consumed for editing and never doubled through the synth. |
-| FT2 N00B | Enter notes on a selected melodic page with a visible 1/1–1/32 length; open the one-item rotary length selector; delete, write note-off, change page/track, play, save, open Files, return to normal mode, or Exit. N00B is refused on Drums, and moving onto Drums returns to Play without changing cells. |
+| FT2 edit | All cursor and transport operations; musical keyboard or incoming MIDI note/chord gesture entry; independent 1/1–1/32 note length; blank/skip; erase; note off; 1/2/4/8-row entry advance; leave edit; lane mute. N00B may remain on so only allowed scale notes are entered. Command notes are consumed for editing and never doubled through the synth. |
+| FT2 N00B | Independent on/off scale filter layered over Play, Record, and Step Edit on a melodic page. Accepted notes keep their pitch; rejected notes stay silent. Play remains non-writing, while Record/Edit write only accepted notes. Toggling N00B preserves the current mode; moving to Drums turns only the filter off. |
 | FT2 loop | Select/import WAV; inspect its separate loop-only stereo RMS/peak/`MAX`/clip meter; confirmed Project detach without deleting the private WAV; play here/from start/stop; source BPM and half/normal/double interpretation; start/length cuts in beat or bar units; align child screen for auto bar alignment and one-bar placement shifts. |
 | FT2 cell edit | Transactional note, gate, velocity, per-note program, single command type/parameter, clear-field, confirm/cancel, step-entry handoff, stop, and panic actions. Four-button encoder page selection remains available. |
 | Tracker files | Select saved Project; load; preview/stop; save with overwrite confirmation; create a confirmed blank Project; save a numbered non-overwriting copy; delete with repeat confirmation; rename; open the Pattern child; back/cancel and panic. |
@@ -97,7 +97,7 @@ Blank physical positions and wholly empty pages are omitted.
 | MTR | Nav | FX | — | — | — |
 | MTR | Sys | Panic | — | Help | Exit |
 | Playback | Play | — | Play take | Record MIDI | — |
-| Playback | Sound | Reset controls | Save | — | — |
+| Playback | Sound | Reset controls | Save | N00B | Normal |
 | Playback | Sys | Panic | Help | — | Exit |
 | FX rack | Ops | Add | Delete | Edit type | Parameters |
 | FX rack | Order | Up | Down | Bypass | — |
@@ -115,17 +115,18 @@ Blank physical positions and wholly empty pages are omitted.
 | FT2 | Move | Page− | Page+ | Track− | Track+ |
 | FT2 | Play | Cell edit | Play | Record | Step edit |
 | FT2 | Open | Tracks | Files | Tools | Tap tempo |
-| FT2 | Sys | Panic | — | Help | Exit |
+| FT2 | Sys | Panic | N00B | Help | Exit |
 | FT2 tools | Ops | Arrange | Loop | N00B | Mute lane |
 | FT2 tools | Clip | Copy lane (`COPY L`) | Paste lane (`PASTE L`) | Copy page (`COPY PG`) | Paste page (`PSTE PG`) |
 | FT2 tools | Page | Mute page (`MUTE PG`) | — | — | — |
 | FT2 tools | Sys | Panic | Help | — | Exit |
-| FT2 N00B | Move | Page− | Page+ | Track− | Track+ |
-| FT2 N00B | Edit | Length | Delete | N-Off | Normal |
-| FT2 N00B | Play | Play | Save | Files | — |
-| FT2 N00B | Sys | Panic | — | Help | Exit |
-| N00B length | Ops | Done | Cancel | — | — |
-| N00B length | Sys | Panic | Help | — | Exit |
+| FT2 Record | Play | N00B | Play | Record | — |
+| FT2 Step Edit | Ops | Blank | Erase | Note off | N00B |
+| N00B setup | Ops | Root− | Root+ | Major/Minor | Done |
+| N00B setup | Sys | Panic | Help | — | Exit |
+| FT2 Step Edit | Sys | Panic | Length | Page | Exit |
+| Note length | Ops | Done | Cancel | — | — |
+| Note length | Sys | Panic | Help | — | Exit |
 | FT2 loop | Play | Rewind | Play | Import | Remove |
 | FT2 loop | BPM | BPM− | BPM+ | BPM x | Unit |
 | FT2 loop | Cut | Start− | Start+ | Length− | Length+ |

@@ -60,6 +60,11 @@ means its natural note is held; a red upper `└` means the following sharp is
 held. Major triads show `maj` explicitly, such as `C maj`.
 `display.note_names=german` uses B/H spelling; `english` uses A#/B.
 
+Playback N00B chooses a root plus MAJOR or natural MINOR. Notes in the chosen
+scale keep their pitch and sound normally; notes outside it stay silent.
+NORMAL restores all chromatic notes. Changing or leaving the filter releases
+held notes first.
+
 ## Effects graph
 
 Playback SOUND FX opens the current Project's FX rack. TARGET cycles SOURCE,
@@ -150,12 +155,15 @@ columns 3–4. Existing cells are not replaced to force that layout.
 CELL edit is transactional. Confirm commits the draft cell; EXIT cancels and
 restores the original value. STOP stops transport without discarding the draft.
 
-N00B mode keeps the selected page as the instrument and enters notes with one
-visible length. LENGTH opens a rotary selector for 1/1, 1/2, 1/4, 1/8, 1/16,
-or 1/32; 1/16 is the default. Entry writes the note and its end, then advances.
-N00B is unavailable on Drums; selecting Drums while N00B is active returns to
-Play without changing cells. NORMAL restores detailed tracker editing without
-changing existing notes.
+FT2 N00B is an independent on/off filter over Play, Record, and Step Edit on
+the selected melodic page. Out-of-scale keys stay silent and are never moved
+to another pitch. Play can use it without writing; Record and Step Edit write
+only the allowed notes. Turning N00B off leaves the current FT2 mode unchanged.
+It turns off automatically on Drums, where the current mode remains active.
+
+Step Edit **LENGTH** independently chooses 1/1, 1/2, 1/4, 1/8, 1/16, or 1/32
+for melodic notes. The 1/2/4/8-row **ADD** value still controls where the next
+entry goes.
 
 ## Pages and hardware MIDI
 

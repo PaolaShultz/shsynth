@@ -24,23 +24,24 @@ small-computer music without beginning inside a full desktop studio.
 
 That direction comes from the creator's personal belief, not a claim that
 everyone learns in the same way: some people become interested in theory only
-after play gives them a question worth answering. In Playback, pressing keys
-immediately produces sound while the 40×20 display names the held notes and
-recognized chord, shows each strike velocity, and highlights exactly which
-notes are sounding on the continuous keyboard while the others remain dark. A
-learner exploring around C-sharp minor might discover `C#m`, add or move a
-note, see the chord name change, and begin asking why `E maj` or `A maj` can
-feel related. SHR does not mark a chord correct or forbidden; it gives an
-audible and visible result that can make the learner curious about the
-explanation.
+after play gives them a question worth answering. In Playback, the learner can
+choose a root plus major or natural-minor N00B scale; keys outside it stay
+silent, while allowed keys immediately produce sound. The 40×20 display names
+the held notes and recognized chord, shows each strike velocity, and highlights
+exactly which notes are sounding on the continuous keyboard. A learner
+exploring C-sharp minor might build `C#m`, change an allowed note, see the chord
+name change, and begin asking why `E maj` or `A maj` can feel related. Normal
+mode restores every chromatic note. SHR gives the discovery an audible and
+visible result that can make the learner curious about the explanation.
 
-FT2 continues the same invitation from a different direction. Its melodic
-N00B mode uses plain note lengths, while normal Step Edit accepts up to four
-played notes at once. A beginner can deliberately build a phrase or simply
-"face-smash" a handful of tones, hear what the resulting lanes do, keep the
-parts they like, and change the rest. Drums retain their dedicated Step Edit
-workflow. The aim is not to remove music theory: it is to let sound, movement,
-names, repetition, and personal conclusions create a doorway into it.
+FT2 keeps the same N00B scale gate available as an independent switch while
+the learner plays along, records in real time, or uses Step Edit. In Record and
+Edit, allowed notes can be written into the Pattern while rejected notes remain
+silent and unwritten. Step Edit separately accepts up to four played notes at
+once and offers familiar 1/1–1/32 note lengths independently of the cursor
+advance. Drums retain their dedicated unfiltered Step Edit workflow. The aim is
+not to remove music theory: it is to let sound, movement, names, repetition,
+and personal conclusions create a doorway into it.
 
 ## Quick start
 
@@ -159,8 +160,9 @@ reduction, and final recording status.
 
 Edit notes, velocity, programs, gates, commands, and multiple routed pages.
 On a drum page, Step Edit keeps recurring drum voices in their earlier columns
-instead of repacking every played combination from left to right. N00b is for
-melodic pages and is unavailable on Drums.
+instead of repacking every played combination from left to right. N00B is an
+independent major/natural-minor input gate that remains active across FT2 Play,
+Record, and Step Edit on melodic pages; note length belongs only to Step Edit.
 
 ### Pattern Pages
 

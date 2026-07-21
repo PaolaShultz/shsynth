@@ -1598,8 +1598,8 @@ pub fn schedule(
                         let gate = pulse_span
                             .mul_f64(f64::from(cell.gate.unwrap_or(song.gate_percent)) / 100.0)
                             .min(remaining);
-                        // N00b Mode uses an explicit OFF cell for lengths of
-                        // one row or more. A 100% gate is its format-compatible
+                        // Step Edit note length uses an explicit OFF cell for
+                        // lengths of one row or more. A 100% gate is its format-compatible
                         // marker that the later OFF, next note, or Pattern end
                         // owns the release. Ordinary inherited gates and all
                         // shorter explicit gates retain their existing timing.
@@ -3065,7 +3065,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_note_off_extends_a_noob_note_across_rows() {
+    fn explicit_note_off_extends_a_step_edit_note_across_rows() {
         let c = config();
         let mut song = Song::new(&c);
         song.patterns.get_mut(&0).unwrap().rows[0][0] = Cell {

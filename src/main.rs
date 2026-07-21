@@ -29,6 +29,7 @@ mod pads;
 mod performance_meter;
 mod preset;
 mod recording;
+mod scale;
 mod sequencer;
 mod ui;
 

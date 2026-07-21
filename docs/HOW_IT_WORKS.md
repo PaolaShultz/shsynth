@@ -213,20 +213,24 @@ the column and cell program browsers. They remain JSON data, can be privately
 overridden for writable user memories, and never remove the musician-facing
 1–128 numeric fallback. See [MIDI device profiles](MIDI_DEVICE_PROFILES.md).
 
-## FT2 Play, Record, Edit, and N00B modes
+## FT2 Play, Record, and Edit modes with N00B
 
-The FT2 screen has four explicit modes:
+The FT2 screen has three explicit modes:
 
 - **Play** navigates rows, pages, lanes, and Arrangement steps and starts
   transport from the cursor or Project beginning.
 - **Record** performs the hardware-only quantized capture described above.
 - **Edit** writes notes or chords from MIDI/computer-keyboard input. Blank,
   erase, and note-off are explicit operations, and the persistent 1/2/4/8-row
-  advance determines the next cursor position.
-- **N00B** enters notes on the selected page with one chosen musical length.
-  The rotary selector offers 1/1 through 1/32 and defaults to 1/16. Entry uses
-  the existing row/gate/note-off model, advances to the note end, and does not
-  rewrite cells when the mode changes.
+  advance determines the next cursor position. Its independent 1/1–1/32
+  length selector writes the existing gate/note-off representation.
+
+**N00B is an independent filter switch, not a fourth mode.** It can remain on
+through Play, Record, and Edit. The chosen root plus major or natural-minor
+scale gates input on the selected melodic page: accepted notes retain their
+exact pitch, rejected notes stay silent, and Record/Edit write only accepted
+notes. Switching N00B never changes the underlying mode. It turns off on
+percussion pages.
 
 The selected Pattern page owns live audition. A synth page loads its named
 synthv1 preset; MIDI pages keep independent destination/channel/program routes;

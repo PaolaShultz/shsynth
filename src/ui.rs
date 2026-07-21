@@ -20,6 +20,7 @@ use crate::performance_meter::{
 };
 use crate::preset::{BackendKind, Catalog, Preset};
 use crate::recording::{self, Recorder, TimedEvent};
+use crate::scale::{Scale, ScaleKind};
 use crate::sequencer::{
     self, Cell, Command, GestureCapture, Note, PageTarget, Song, LANES_PER_PAGE,
 };
@@ -287,11 +288,10 @@ enum TrackerMode {
     Play,
     Rec,
     Edit,
-    Noob,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum NoobLength {
+enum NoteLength {
     Whole,
     Half,
     Quarter,
@@ -300,13 +300,13 @@ enum NoobLength {
     ThirtySecond,
 }
 
-impl Default for NoobLength {
+impl Default for NoteLength {
     fn default() -> Self {
         Self::Sixteenth
     }
 }
 
-impl NoobLength {
+impl NoteLength {
     const ALL: [Self; 6] = [
         Self::Whole,
         Self::Half,
@@ -350,6 +350,12 @@ impl NoobLength {
         };
         Self::ALL[next]
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NoobTarget {
+    Playback,
+    Tracker,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -496,12 +502,18 @@ struct App {
     tracker_track: usize,
     tracker_advance: usize,
     tracker_mode: TrackerMode,
+    tracker_noob: bool,
     tracker_recording: Option<TrackerRecording>,
     note_editor: Option<NoteEditor>,
     audition_release_revision: u64,
     tracker_octave: u8,
-    noob_length: NoobLength,
-    noob_length_draft: NoobLength,
+    note_length: NoteLength,
+    note_length_draft: NoteLength,
+    noob_scale: Scale,
+    noob_draft: Scale,
+    noob_target: Option<NoobTarget>,
+    playback_noob: bool,
+    playback_scale: engine::SharedPlaybackScale,
     tracker_gesture: GestureCapture,
     tracker_gesture_anchor: Option<(usize, usize, usize, usize)>,
     confirm_song_save: Option<String>,
@@ -576,6 +588,7 @@ struct App {
 struct TrackerIo {
     route: engine::SharedTrackerRoute,
     input: engine::SharedTrackerInput,
+    playback_scale: engine::SharedPlaybackScale,
 }
 
 #[derive(Clone)]
@@ -645,7 +658,7 @@ fn is_tracker_screen(screen: Screen) -> bool {
             | Screen::TrackerArrange
             | Screen::TrackerPages
             | Screen::TrackerTools
-            | Screen::TrackerNoob
+            | Screen::TrackerNoteLength
             | Screen::TrackerLoop
             | Screen::TrackerLoopAlign
     )
@@ -896,6 +909,7 @@ impl App {
             pickup,
             midi_backend,
             tracker_route: tracker_io.route,
+            playback_scale: tracker_io.playback_scale,
             controller_profiles,
             device_profiles,
             config,
@@ -914,12 +928,17 @@ impl App {
             tracker_track: 0,
             tracker_advance: 1,
             tracker_mode: TrackerMode::Play,
+            tracker_noob: false,
             tracker_recording: None,
             note_editor: None,
             audition_release_revision: 0,
             tracker_octave: 4,
-            noob_length: NoobLength::default(),
-            noob_length_draft: NoobLength::default(),
+            note_length: NoteLength::default(),
+            note_length_draft: NoteLength::default(),
+            noob_scale: Scale::default(),
+            noob_draft: Scale::default(),
+            noob_target: None,
+            playback_noob: false,
             tracker_gesture: GestureCapture::default(),
             tracker_gesture_anchor: None,
             confirm_song_save: None,
@@ -1192,7 +1211,9 @@ impl App {
     }
 
     fn menu_context(&self) -> MenuContext {
-        if self.confirm_routing_defaults {
+        if self.noob_target.is_some() {
+            MenuContext::NoobSetup
+        } else if self.confirm_routing_defaults {
             MenuContext::RoutingDefaults
         } else if self.screen == Screen::FxRack && self.fx_type_edit.is_some() {
             MenuContext::FxType
@@ -1204,8 +1225,6 @@ impl App {
             MenuContext::TrackerRecord
         } else if self.screen == Screen::Tracker && self.tracker_mode == TrackerMode::Edit {
             MenuContext::TrackerEdit
-        } else if self.screen == Screen::Tracker && self.tracker_mode == TrackerMode::Noob {
-            MenuContext::TrackerNoob
         } else if self.screen == Screen::TrackerFiles && self.confirm_pattern_clear {
             MenuContext::PatternClear
         } else if self.screen == Screen::TrackerFiles {
@@ -1229,6 +1248,18 @@ impl App {
 
     fn set_screen(&mut self, screen: Screen) {
         let previous = self.screen;
+        let playback_filter_was_active = self.playback_noob
+            && (previous == Screen::Playback
+                || (previous == Screen::Help && self.help_previous == Screen::Playback));
+        let playback_filter_will_be_active = self.playback_noob
+            && (screen == Screen::Playback
+                || (screen == Screen::Help && self.help_previous == Screen::Playback));
+        if playback_filter_was_active && !playback_filter_will_be_active {
+            if let Some(engine) = self.engine.as_ref() {
+                engine.panic();
+            }
+            self.held_notes = HeldNotes::default();
+        }
         let previous_tracker = is_tracker_screen(previous)
             || (previous == Screen::Help && is_tracker_screen(self.help_previous));
         let next_tracker =
@@ -1246,6 +1277,7 @@ impl App {
             self.prepare_confirmation_action(Action::Noop);
         }
         self.screen = screen;
+        self.sync_playback_noob();
         self.fx_control_mode
             .store(screen == Screen::FxEditor, Ordering::Relaxed);
         if screen == Screen::FxEditor {
@@ -1297,6 +1329,7 @@ impl App {
                 start_column: 0,
                 percussion: false,
                 audition_note: None,
+                scale: None,
                 external: &external,
             });
         }
@@ -1510,6 +1543,7 @@ impl App {
         self.status = "recording playback stopped · all notes off".into();
     }
     fn stop_all(&mut self, state: &Path) {
+        self.noob_target = None;
         self.cancel_note_editor();
         self.cancel_tracker_gesture();
         self.stop_tracker_recording();
@@ -2140,14 +2174,14 @@ impl App {
         self.status = format!("ADD {rows} · note entry and delete advance {rows} row(s)");
     }
     fn tracker_skip(&mut self) {
-        if matches!(self.tracker_mode, TrackerMode::Edit | TrackerMode::Noob) {
+        if self.tracker_mode == TrackerMode::Edit {
             self.cancel_tracker_gesture();
             self.advance_tracker_row();
             self.status = format!("BLANK/SKIP · advanced {} row(s)", self.tracker_advance);
         }
     }
     fn tracker_erase(&mut self) {
-        if !matches!(self.tracker_mode, TrackerMode::Edit | TrackerMode::Noob) {
+        if self.tracker_mode != TrackerMode::Edit {
             return;
         }
         self.cancel_tracker_gesture();
@@ -2176,11 +2210,11 @@ impl App {
         }
     }
     fn tracker_single_note(&mut self, note: u8, velocity: u8) {
-        if !matches!(self.tracker_mode, TrackerMode::Edit | TrackerMode::Noob) {
+        if self.tracker_mode != TrackerMode::Edit {
             return;
         }
-        if self.tracker_mode == TrackerMode::Noob {
-            self.write_noob_notes(&[(note, velocity)]);
+        if !self.tracker_noob_allows(note) {
+            self.status = "N00B · note outside scale ignored".into();
             return;
         }
         if self.current_page().is_some_and(|page| page.percussion) {
@@ -2216,14 +2250,7 @@ impl App {
             }
             return;
         }
-        if let Some(cell) = self.tracker_cell_mut() {
-            *cell = Cell {
-                note: Note::On(note),
-                velocity: Some(velocity),
-                ..Cell::default()
-            };
-        }
-        self.advance_tracker_row();
+        self.write_edit_notes(&[(note, velocity)]);
     }
     fn commit_tracker_gesture(&mut self, now: Instant) {
         let Some(gesture) = self
@@ -2244,14 +2271,6 @@ impl App {
                 self.tracker_page,
                 self.tracker_track,
             ));
-        if self.tracker_mode == TrackerMode::Noob {
-            self.tracker_order = order;
-            self.tracker_row = row_index;
-            self.tracker_page = page_index;
-            self.tracker_track = first_lane;
-            self.write_noob_notes(&gesture.notes);
-            return;
-        }
         let pattern_number = self.song.order.get(order).copied().unwrap_or(0);
         let percussion = self
             .song
@@ -2307,26 +2326,11 @@ impl App {
             }
             return;
         }
-        if let Some(row) = self
-            .song
-            .patterns
-            .get_mut(&pattern_number)
-            .and_then(|pattern| pattern.rows.get_mut(row_index))
-        {
-            let start = page_index * LANES_PER_PAGE;
-            for (lane, (note, velocity)) in gesture.notes.into_iter().enumerate() {
-                let destination = start + (first_lane + lane) % LANES_PER_PAGE;
-                row[destination] = Cell {
-                    note: Note::On(note),
-                    velocity: Some(velocity),
-                    ..Cell::default()
-                };
-            }
-        }
         self.tracker_order = order;
         self.tracker_row = row_index;
-        self.advance_tracker_row();
-        self.status = format!("gesture entered · advanced {} row(s)", self.tracker_advance);
+        self.tracker_page = page_index;
+        self.tracker_track = first_lane;
+        self.write_edit_notes(&gesture.notes);
     }
     fn set_tracker_edit(&mut self, enabled: bool) {
         self.set_tracker_mode(if enabled {
@@ -2349,94 +2353,192 @@ impl App {
     }
 
     fn leave_noob_on_percussion(&mut self) -> bool {
-        if self.tracker_mode == TrackerMode::Noob
-            && self.current_page().is_some_and(|page| page.percussion)
-        {
-            self.set_tracker_mode(TrackerMode::Play);
-            self.status = "N00b unavailable on Drums · use Step Edit".into();
+        if self.tracker_noob && self.current_page().is_some_and(|page| page.percussion) {
+            self.silence_live_notes();
+            self.tracker_noob = false;
+            self.sync_tracker_route();
+            self.status = "N00B off on Drums · current FT2 mode unchanged".into();
             true
         } else {
             false
         }
     }
 
-    fn toggle_noob_mode(&mut self) {
-        if self.tracker_mode != TrackerMode::Noob
-            && self.current_page().is_some_and(|page| page.percussion)
-        {
-            self.status = "N00b unavailable on Drums · use Step Edit".into();
-            return;
-        }
-        self.tracker_stop();
-        self.set_screen(Screen::Tracker);
-        let enabled = self.tracker_mode != TrackerMode::Noob;
-        self.set_tracker_mode(if enabled {
-            TrackerMode::Noob
-        } else {
-            TrackerMode::Play
-        });
-        self.status = if enabled {
-            format!(
-                "N00b Mode on · length {} · selected page owns the sound",
-                self.noob_length.label()
-            )
-        } else {
-            "N00b Mode off · normal tracker controls restored".into()
-        };
+    fn tracker_noob_allows(&self, note: u8) -> bool {
+        !self.tracker_noob
+            || self.current_page().is_some_and(|page| page.percussion)
+            || self.noob_scale.contains(note)
     }
 
-    fn open_noob_length(&mut self) {
-        self.noob_length_draft = self.noob_length;
-        self.set_screen(Screen::TrackerNoob);
+    fn sync_playback_noob(&self) {
+        if let Ok(mut active) = self.playback_scale.lock() {
+            *active = (self.playback_noob
+                && (self.screen == Screen::Playback
+                    || (self.screen == Screen::Help && self.help_previous == Screen::Playback)))
+                .then_some(self.noob_scale);
+        }
+    }
+
+    fn silence_live_notes(&mut self) {
+        if let Some(engine) = self.engine.as_ref() {
+            engine.panic();
+        }
+        self.held_notes = HeldNotes::default();
+        self.cancel_tracker_gesture();
+        if let Some(recording) = self.tracker_recording.as_mut() {
+            recording.active_lanes.clear();
+        }
+        self.release_tracker_audition();
+    }
+
+    fn open_noob_setup(&mut self, target: NoobTarget) {
+        if target == NoobTarget::Tracker && self.current_page().is_some_and(|page| page.percussion)
+        {
+            self.status = "N00B scale filter is unavailable on Drums".into();
+            return;
+        }
+        self.silence_live_notes();
+        self.noob_draft = self.noob_scale;
+        self.noob_target = Some(target);
+        self.reset_context_page();
+        self.status = "choose root and MAJOR/MINOR · outside notes stay silent".into();
+    }
+
+    fn adjust_noob_root(&mut self, direction: i8) {
+        self.noob_draft.root = if direction < 0 {
+            (self.noob_draft.root + 11) % 12
+        } else {
+            (self.noob_draft.root + 1) % 12
+        };
+        self.status = self.noob_draft_label();
+    }
+
+    fn toggle_noob_scale(&mut self) {
+        self.noob_draft.kind = match self.noob_draft.kind {
+            ScaleKind::Major => ScaleKind::NaturalMinor,
+            ScaleKind::NaturalMinor => ScaleKind::Major,
+        };
+        self.status = self.noob_draft_label();
+    }
+
+    fn noob_draft_label(&self) -> String {
+        format!(
+            "N00B {} {} · outside notes stay silent",
+            self.config.note_naming.pitch_name(self.noob_draft.root),
+            self.noob_draft.kind.label()
+        )
+    }
+
+    fn confirm_noob(&mut self) {
+        let Some(target) = self.noob_target.take() else {
+            return;
+        };
+        self.silence_live_notes();
+        self.noob_scale = self.noob_draft;
+        match target {
+            NoobTarget::Playback => {
+                self.playback_noob = true;
+                self.sync_playback_noob();
+            }
+            NoobTarget::Tracker => {
+                self.tracker_noob = true;
+                self.sync_tracker_route();
+            }
+        }
+        self.reset_context_page();
+        self.status = format!(
+            "N00B {} {} · outside notes stay silent",
+            self.config.note_naming.pitch_name(self.noob_scale.root),
+            self.noob_scale.kind.label()
+        );
+    }
+
+    fn cancel_noob(&mut self) {
+        self.noob_target = None;
+        self.noob_draft = self.noob_scale;
+        self.reset_context_page();
+        self.status = "N00B setup cancelled".into();
+    }
+
+    fn disable_playback_noob(&mut self) {
+        self.silence_live_notes();
+        self.playback_noob = false;
+        self.sync_playback_noob();
+        self.status = "Player N00B off · all chromatic notes enabled".into();
+    }
+
+    fn disable_tracker_noob(&mut self) {
+        self.silence_live_notes();
+        self.tracker_noob = false;
+        self.sync_tracker_route();
+        self.status = "FT2 N00B off · current mode unchanged · all chromatic notes enabled".into();
+    }
+
+    fn toggle_tracker_noob(&mut self) {
+        if self.tracker_noob {
+            self.disable_tracker_noob();
+        } else {
+            self.open_noob_setup(NoobTarget::Tracker);
+        }
+    }
+
+    fn open_note_length(&mut self) {
+        if self.tracker_mode != TrackerMode::Edit {
+            self.status = "note length is available in Step Edit".into();
+            return;
+        }
+        self.note_length_draft = self.note_length;
+        self.set_screen(Screen::TrackerNoteLength);
         self.reset_context_page();
         self.status = "NOTE LENGTH · turn encoder · press to confirm".into();
     }
 
-    fn adjust_noob_length(&mut self, direction: i8) {
-        self.noob_length_draft = self.noob_length_draft.turn(direction);
+    fn adjust_note_length(&mut self, direction: i8) {
+        self.note_length_draft = self.note_length_draft.turn(direction);
         self.status = format!(
             "NOTE LENGTH {} · press to confirm",
-            self.noob_length_draft.label()
+            self.note_length_draft.label()
         );
     }
 
-    fn cancel_noob_length(&mut self) {
-        self.noob_length_draft = self.noob_length;
+    fn cancel_note_length(&mut self) {
+        self.note_length_draft = self.note_length;
         self.set_screen(Screen::Tracker);
-        self.status = format!("N00b length unchanged · {}", self.noob_length.label());
+        self.set_tracker_mode(TrackerMode::Edit);
+        self.status = format!("note length unchanged · {}", self.note_length.label());
     }
 
-    fn confirm_noob_length(&mut self) {
-        self.noob_length = self.noob_length_draft;
+    fn confirm_note_length(&mut self) {
+        self.note_length = self.note_length_draft;
         self.set_screen(Screen::Tracker);
-        if self.current_page().is_some_and(|page| page.percussion) {
-            self.set_tracker_mode(TrackerMode::Play);
-            self.status = "N00b unavailable on Drums · use Step Edit".into();
-            return;
-        }
-        self.set_tracker_mode(TrackerMode::Noob);
-        self.status = format!("N00b Mode · note length {}", self.noob_length.label());
+        self.set_tracker_mode(TrackerMode::Edit);
+        self.status = format!("Step Edit note length {}", self.note_length.label());
     }
 
-    fn noob_row_span_and_gate(&self) -> (usize, u8) {
+    fn note_row_span_and_gate(&self) -> (usize, u8) {
         let numerator = usize::from(self.song.steps_per_beat) * 4;
-        let denominator = self.noob_length.denominator();
+        let denominator = self.note_length.denominator();
         if numerator < denominator {
             return (1, ((numerator * 100) / denominator).clamp(1, 100) as u8);
         }
         (numerator.div_ceil(denominator).max(1), 100)
     }
 
-    fn write_noob_notes(&mut self, notes: &[(u8, u8)]) {
-        if self.current_page().is_some_and(|page| page.percussion) {
-            self.status = "N00b unavailable on Drums · note ignored · use Step Edit".into();
+    fn write_edit_notes(&mut self, notes: &[(u8, u8)]) {
+        let notes = notes
+            .iter()
+            .copied()
+            .filter(|(note, _)| self.tracker_noob_allows(*note))
+            .collect::<Vec<_>>();
+        if notes.is_empty() {
+            self.status = "N00B · notes outside scale ignored".into();
             return;
         }
         let pattern_number = self.tracker_pattern_number();
         let row_index = self.tracker_row;
         let page_index = self.tracker_page;
         let first_lane = self.tracker_track;
-        let (span, gate) = self.noob_row_span_and_gate();
+        let (span, gate) = self.note_row_span_and_gate();
         let Some(pattern) = self.song.patterns.get_mut(&pattern_number) else {
             return;
         };
@@ -2485,20 +2587,21 @@ impl App {
                 }
             }
         }
-        if entered > 0 && !pattern.rows.is_empty() {
-            self.tracker_row = (row_index + span).min(pattern.rows.len() - 1);
+        let rows = pattern.rows.len();
+        if entered > 0 && rows > 0 {
+            self.tracker_row = (row_index + self.tracker_advance) % rows;
         }
         self.status = if entered == 0 {
-            format!("row {row_index:02X} full · N00b note ignored")
+            format!("row {row_index:02X} full · note ignored")
         } else if entered == notes.len() {
             format!(
-                "N00b note entered · length {} · next row {:02X}",
-                self.noob_length.label(),
+                "Step Edit note entered · length {} · next row {:02X}",
+                self.note_length.label(),
                 self.tracker_row
             )
         } else {
             format!(
-                "N00b entered {entered}/{} · row full · next row {:02X}",
+                "Step Edit entered {entered}/{} · row full · next row {:02X}",
                 notes.len(),
                 self.tracker_row
             )
@@ -2545,6 +2648,7 @@ impl App {
                 start_column: self.tracker_track,
                 percussion: page.percussion || columns[self.tracker_track].0 == 9,
                 audition_note,
+                scale: (self.tracker_noob && !page.percussion).then_some(self.noob_scale),
                 external: &external,
             });
         }
@@ -2645,6 +2749,9 @@ impl App {
     }
 
     fn audition_keyboard_note(&self, note: u8, velocity: u8) {
+        if !self.tracker_noob_allows(note) {
+            return;
+        }
         let Some(page) = self.current_page() else {
             return;
         };
@@ -3230,6 +3337,9 @@ impl App {
         }
         let channel = bytes[0] & 0x0f;
         let note = bytes[1];
+        if !self.tracker_noob_allows(note) {
+            return;
+        }
         let note_on = bytes[0] & 0xf0 == 0x90 && bytes[2] > 0;
         if !note_on {
             if let Some(recording) = self.tracker_recording.as_mut() {
@@ -4723,7 +4833,7 @@ impl App {
         self.toggle_tracker_playback();
     }
     fn tracker_note_off(&mut self) {
-        if !matches!(self.tracker_mode, TrackerMode::Edit | TrackerMode::Noob) {
+        if self.tracker_mode != TrackerMode::Edit {
             return;
         }
         self.cancel_tracker_gesture();
@@ -6329,8 +6439,9 @@ impl App {
             }
         }
         if self.screen == Screen::Tracker
-            && matches!(self.tracker_mode, TrackerMode::Edit | TrackerMode::Noob)
+            && self.tracker_mode == TrackerMode::Edit
             && self.note_editor.is_none()
+            && self.noob_target.is_none()
         {
             self.commit_tracker_gesture(now);
         }
@@ -6481,6 +6592,10 @@ fn app_loop(
         .as_ref()
         .map(engine::MidiRouter::tracker_input)
         .unwrap_or_else(|_| Arc::new(std::sync::Mutex::new(None)));
+    let playback_scale = router
+        .as_ref()
+        .map(engine::MidiRouter::playback_scale)
+        .unwrap_or_else(|_| Arc::new(std::sync::Mutex::new(None)));
     let controller_config = router
         .as_ref()
         .map(engine::MidiRouter::controller_config)
@@ -6507,6 +6622,7 @@ fn app_loop(
         TrackerIo {
             route: tracker_route,
             input: tracker_input,
+            playback_scale,
         },
         config.clone(),
         AudioPorts {
@@ -6609,12 +6725,16 @@ fn drain(
                 if !tracker_preview {
                     app.sequencer.thru(&bytes);
                 }
-                if app.screen == Screen::Tracker && app.tracker_recording.is_some() {
+                if app.screen == Screen::Tracker
+                    && app.tracker_recording.is_some()
+                    && app.noob_target.is_none()
+                {
                     app.record_tracker_midi(&bytes);
                 }
                 if app.screen == Screen::Tracker
-                    && matches!(app.tracker_mode, TrackerMode::Edit | TrackerMode::Noob)
+                    && app.tracker_mode == TrackerMode::Edit
                     && app.note_editor.is_none()
+                    && app.noob_target.is_none()
                 {
                     if !app.tracker_gesture.is_active()
                         && bytes.len() >= 3
@@ -6726,7 +6846,8 @@ fn dispatch_encoder(
     let value_editor_owns_encoder = app.note_editor.is_some()
         || (app.screen == Screen::TrackerPages && app.page_manager_mode != PageManagerMode::Pages)
         || app.screen == Screen::FxEditor
-        || app.screen == Screen::TrackerNoob
+        || app.screen == Screen::TrackerNoteLength
+        || app.noob_target.is_some()
         || app.confirm_routing_defaults;
     if app.controller_layout == ControllerLayout::Four && !value_editor_owns_encoder {
         match action {
@@ -6788,6 +6909,21 @@ fn perform(
     // modal confirmation owns the rest of the input dispatch.
     if action == Action::StopAll {
         a.stop_all(state);
+        return false;
+    }
+    if a.noob_target.is_some() {
+        match action {
+            Action::Up | Action::NoobRootDown => a.adjust_noob_root(-1),
+            Action::Down | Action::NoobRootUp => a.adjust_noob_root(1),
+            Action::NoobScale => a.toggle_noob_scale(),
+            Action::Activate | Action::ConfirmNoob => a.confirm_noob(),
+            Action::Back | Action::CancelNoob => a.cancel_noob(),
+            Action::OpenHelp => {
+                a.cancel_noob();
+                a.open_help();
+            }
+            _ => {}
+        }
         return false;
     }
     if a.confirm_routing_defaults {
@@ -6935,8 +7071,8 @@ fn perform(
                 a.move_home(-1);
             } else if a.screen == Screen::Help {
                 a.move_help(-1);
-            } else if a.screen == Screen::TrackerNoob {
-                a.adjust_noob_length(-1);
+            } else if a.screen == Screen::TrackerNoteLength {
+                a.adjust_note_length(-1);
             } else if a.screen == Screen::TrackerLoopAlign {
                 a.adjust_loop_offset_bars(-1);
             } else if a.screen == Screen::Ideas {
@@ -6986,8 +7122,8 @@ fn perform(
                 a.move_home(1);
             } else if a.screen == Screen::Help {
                 a.move_help(1);
-            } else if a.screen == Screen::TrackerNoob {
-                a.adjust_noob_length(1);
+            } else if a.screen == Screen::TrackerNoteLength {
+                a.adjust_note_length(1);
             } else if a.screen == Screen::TrackerLoopAlign {
                 a.adjust_loop_offset_bars(1);
             } else if a.screen == Screen::Ideas {
@@ -7130,7 +7266,7 @@ fn perform(
             Screen::TrackerArrange => a.arrangement_jump_to_pattern(),
             Screen::TrackerPages => a.confirm_page_manager(),
             Screen::TrackerTools => {}
-            Screen::TrackerNoob => a.confirm_noob_length(),
+            Screen::TrackerNoteLength => a.confirm_note_length(),
             Screen::TrackerLoop => a.import_selected_loop(),
             Screen::TrackerLoopAlign => {
                 a.set_screen(Screen::TrackerLoop);
@@ -7276,8 +7412,8 @@ fn perform(
         Action::BusMute => a.toggle_bus_mute(),
         Action::FinalRecordToggle => a.toggle_final_recording(),
         Action::Back => {
-            if a.screen == Screen::TrackerNoob {
-                a.cancel_noob_length();
+            if a.screen == Screen::TrackerNoteLength {
+                a.cancel_note_length();
                 return false;
             }
             if a.screen == Screen::FxRack && a.fx_type_edit.is_some() {
@@ -7345,7 +7481,7 @@ fn perform(
                 | Screen::TrackerArrange
                 | Screen::TrackerPages
                 | Screen::TrackerTools
-                | Screen::TrackerNoob
+                | Screen::TrackerNoteLength
                 | Screen::TrackerLoop => Screen::Tracker,
                 Screen::TrackerLoopAlign => Screen::TrackerLoop,
                 Screen::FxRack => a.fx_rack_parent,
@@ -7377,10 +7513,17 @@ fn perform(
         Action::TrackerPlayToggle => a.toggle_tracker_playback(),
         Action::TrackerRewind => a.rewind_tracker(),
         Action::TrackerRecordToggle => a.toggle_tracker_recording(),
-        Action::TrackerModeNoob => a.toggle_noob_mode(),
-        Action::OpenNoobLength => a.open_noob_length(),
-        Action::ConfirmNoobLength => a.confirm_noob_length(),
-        Action::CancelNoobLength => a.cancel_noob_length(),
+        Action::TrackerNoobToggle => a.toggle_tracker_noob(),
+        Action::OpenPlaybackNoob => a.open_noob_setup(NoobTarget::Playback),
+        Action::DisablePlaybackNoob => a.disable_playback_noob(),
+        Action::NoobRootDown => a.adjust_noob_root(-1),
+        Action::NoobRootUp => a.adjust_noob_root(1),
+        Action::NoobScale => a.toggle_noob_scale(),
+        Action::ConfirmNoob => a.confirm_noob(),
+        Action::CancelNoob => a.cancel_noob(),
+        Action::OpenNoteLength => a.open_note_length(),
+        Action::ConfirmNoteLength => a.confirm_note_length(),
+        Action::CancelNoteLength => a.cancel_note_length(),
         Action::ConfirmRoutingDefaults => a.finish_routing_defaults_prompt(true),
         Action::CancelRoutingDefaults => a.finish_routing_defaults_prompt(false),
         Action::LoopImport => a.import_selected_loop(),
@@ -7665,6 +7808,20 @@ fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<Mi
         }
         return false;
     }
+    if a.noob_target.is_some() {
+        match code {
+            KeyCode::Left | KeyCode::Up | KeyCode::Char('-') => a.adjust_noob_root(-1),
+            KeyCode::Right | KeyCode::Down | KeyCode::Char('+') | KeyCode::Char('=') => {
+                a.adjust_noob_root(1)
+            }
+            KeyCode::Tab | KeyCode::Char('m') | KeyCode::Char('M') => a.toggle_noob_scale(),
+            KeyCode::Enter => a.confirm_noob(),
+            KeyCode::Esc | KeyCode::Char('b') | KeyCode::Char('B') => a.cancel_noob(),
+            KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Char(' ') => a.stop_all(state),
+            _ => {}
+        }
+        return false;
+    }
     if a.screen == Screen::FxEditor {
         match code {
             KeyCode::Char(character)
@@ -7836,18 +7993,18 @@ fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<Mi
         }
         return false;
     }
-    if a.screen == Screen::TrackerNoob {
+    if a.screen == Screen::TrackerNoteLength {
         let action = match code {
             KeyCode::Left | KeyCode::Up | KeyCode::Char('-') => {
-                a.adjust_noob_length(-1);
+                a.adjust_note_length(-1);
                 None
             }
             KeyCode::Right | KeyCode::Down | KeyCode::Char('+') | KeyCode::Char('=') => {
-                a.adjust_noob_length(1);
+                a.adjust_note_length(1);
                 None
             }
-            KeyCode::Enter => Some(Action::ConfirmNoobLength),
-            KeyCode::Esc | KeyCode::Char('b') => Some(Action::CancelNoobLength),
+            KeyCode::Enter => Some(Action::ConfirmNoteLength),
+            KeyCode::Esc | KeyCode::Char('b') => Some(Action::CancelNoteLength),
             KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Char(' ') => Some(Action::StopAll),
             _ => None,
         };
@@ -7932,7 +8089,7 @@ fn key(code: KeyCode, a: &mut App, state: &Path, tx: &std::sync::mpsc::Sender<Mi
         if let Some(semitone) = tracker_key_note(code) {
             let note = a.tracker_keyboard_note(semitone);
             a.audition_keyboard_note(note, 96);
-            if matches!(a.tracker_mode, TrackerMode::Edit | TrackerMode::Noob) {
+            if a.tracker_mode == TrackerMode::Edit {
                 a.tracker_single_note(note, 96);
             }
             return false;
@@ -8423,7 +8580,7 @@ fn draw<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         Screen::TrackerTools => {
             draw_tracker_child(f, "FT2 TOOLS", "Arrange · Loop · N00B · Clipboard · Mute")
         }
-        Screen::TrackerNoob => draw_noob_setup(f, a),
+        Screen::TrackerNoteLength => draw_note_length(f, a),
         Screen::TrackerLoop => draw_tracker_loop(f, a),
         Screen::TrackerLoopAlign => draw_tracker_loop_align(f, a),
         Screen::AudioRecorder => draw_audio_recorder(f, a),
@@ -8431,6 +8588,9 @@ fn draw<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         Screen::FxEditor => draw_fx_editor(f, a),
         Screen::Meter => draw_performance_meter(f, a),
         Screen::Routing => draw_routing(f, a),
+    }
+    if a.noob_target.is_some() {
+        draw_noob_setup(f, a);
     }
     draw_pad_lock(f, a);
     draw_fallback_badge(f, a);
@@ -9494,16 +9654,42 @@ fn draw_tracker_child<B: Backend>(f: &mut Frame<B>, title: &str, details: &str) 
     );
 }
 
-fn draw_noob_setup<B: Backend>(f: &mut Frame<B>, a: &App) {
+fn draw_note_length<B: Backend>(f: &mut Frame<B>, a: &App) {
     let z = f.size();
     f.render_widget(
         Paragraph::new(format!(
-            "N00b NOTE LENGTH\n\n        {}\n\n1/1  1/2  1/4\n1/8  1/16  1/32\n\nTurn encoder to choose\nPress encoder to confirm\nEXIT cancels",
-            a.noob_length_draft.label()
+            "STEP EDIT NOTE LENGTH\n\n        {}\n\n1/1  1/2  1/4\n1/8  1/16  1/32\n\nTurn encoder to choose\nPress encoder to confirm\nEXIT cancels",
+            a.note_length_draft.label()
         ))
         .alignment(Alignment::Center)
         .style(Style::default().fg(Color::Green)),
         rect(z.x, z.y, z.width, z.height.saturating_sub(4)),
+    );
+}
+
+fn draw_noob_setup<B: Backend>(f: &mut Frame<B>, a: &App) {
+    let z = f.size();
+    let scope = match a.noob_target {
+        Some(NoobTarget::Tracker) => "PLAY / REC / EDIT stay active",
+        Some(NoobTarget::Playback) | None => "Player input filter",
+    };
+    let area = rect(
+        z.x + 2,
+        z.y + 1,
+        z.width.saturating_sub(4),
+        z.height.saturating_sub(5).min(11),
+    );
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(format!(
+            "N00B SCALE FILTER\n\nRoot  {}\nScale {}\n\n{scope}\nOnly scale notes sound\nOutside keys stay silent\nDONE enables · EXIT cancels",
+            a.config.note_naming.pitch_name(a.noob_draft.root),
+            a.noob_draft.kind.label()
+        ))
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::Green))
+        .block(Block::default().borders(Borders::ALL)),
+        area,
     );
 }
 
@@ -9821,7 +10007,7 @@ fn draw_status_bar<B: Backend>(f: &mut Frame<B>, a: &mut App) {
             | Screen::TrackerArrange
             | Screen::TrackerPages
             | Screen::TrackerTools
-            | Screen::TrackerNoob
+            | Screen::TrackerNoteLength
             | Screen::TrackerLoop
             | Screen::TrackerLoopAlign
     ) {
@@ -9991,6 +10177,8 @@ fn draw_playing<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         ("REC", Color::Red)
     } else if a.idea_mode == IdeaMode::Record {
         ("R-M", Color::Yellow)
+    } else if a.playback_noob {
+        ("N0B", Color::Yellow)
     } else {
         ("PLY", Color::Green)
     };
@@ -10251,13 +10439,20 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     } else if transport.playing {
         "PLAY".into()
     } else if a.tracker_mode == TrackerMode::Edit {
-        format!("EDIT +{}", a.tracker_advance)
+        format!("EDIT +{} {}", a.tracker_advance, a.note_length.label())
     } else if a.tracker_mode == TrackerMode::Rec {
         "REC READY".into()
-    } else if a.tracker_mode == TrackerMode::Noob {
-        format!("N00B {}", a.noob_length.label())
     } else {
         "STOP".into()
+    };
+    let state = if a.tracker_noob && !page.percussion {
+        format!(
+            "{state} N0B {} {}",
+            a.config.note_naming.pitch_name(a.noob_scale.root),
+            a.noob_scale.kind.label()
+        )
+    } else {
+        state
     };
     f.render_widget(
         Paragraph::new(truncate(
@@ -11280,7 +11475,7 @@ enum ScreenshotScenario {
     PageTarget,
     PageChannel,
     TrackerTools,
-    TrackerNoob,
+    NoobSetup,
     TrackerLoop,
     LoopLibrary,
     TrackerLoopAlign,
@@ -11309,7 +11504,7 @@ impl ScreenshotScenario {
         Self::PageTarget,
         Self::PageChannel,
         Self::TrackerTools,
-        Self::TrackerNoob,
+        Self::NoobSetup,
         Self::TrackerLoop,
         Self::LoopLibrary,
         Self::TrackerLoopAlign,
@@ -11334,7 +11529,7 @@ impl ScreenshotScenario {
             Self::TrackerArrange => Screen::TrackerArrange,
             Self::TrackerPages | Self::PageTarget | Self::PageChannel => Screen::TrackerPages,
             Self::TrackerTools => Screen::TrackerTools,
-            Self::TrackerNoob => Screen::TrackerNoob,
+            Self::NoobSetup => Screen::Tracker,
             Self::TrackerLoop | Self::LoopLibrary => Screen::TrackerLoop,
             Self::TrackerLoopAlign => Screen::TrackerLoopAlign,
             Self::AudioRecorder => Screen::AudioRecorder,
@@ -11363,7 +11558,7 @@ impl ScreenshotScenario {
             Self::PageTarget => "target-editor",
             Self::PageChannel => "channel-editor",
             Self::TrackerTools => "ft2-tools",
-            Self::TrackerNoob => "noob-setup",
+            Self::NoobSetup => "noob-setup",
             Self::TrackerLoop => "ft2-loop",
             Self::LoopLibrary => "loop-library",
             Self::TrackerLoopAlign => "loop-align",
@@ -11436,6 +11631,7 @@ fn screenshot_app(mut config: RuntimeConfig) -> App {
         TrackerIo {
             route: Arc::new(std::sync::Mutex::new(engine::TrackerRoute::default())),
             input: Arc::new(std::sync::Mutex::new(None)),
+            playback_scale: Arc::new(std::sync::Mutex::new(None)),
         },
         config,
         AudioPorts {
@@ -11705,10 +11901,14 @@ fn configure_screenshot_scenario(app: &mut App, scenario: ScreenshotScenario) {
             fill_demo_song(app);
             app.status = "choose a focused FT2 tool".into();
         }
-        ScreenshotScenario::TrackerNoob => {
+        ScreenshotScenario::NoobSetup => {
             fill_demo_song(app);
-            app.noob_length_draft = NoobLength::Eighth;
-            app.status = "NOTE LENGTH 1/8 · press to confirm".into();
+            app.noob_target = Some(NoobTarget::Tracker);
+            app.noob_draft = Scale {
+                root: 4,
+                kind: ScaleKind::NaturalMinor,
+            };
+            app.status = "N00B E MINOR · outside notes stay silent".into();
         }
         ScreenshotScenario::LoopLibrary => {
             configure_demo_loop(app);
@@ -11961,6 +12161,7 @@ mod tests {
             TrackerIo {
                 route: Arc::new(std::sync::Mutex::new(engine::TrackerRoute::default())),
                 input: Arc::new(std::sync::Mutex::new(None)),
+                playback_scale: Arc::new(std::sync::Mutex::new(None)),
             },
             config,
             AudioPorts {
@@ -12024,7 +12225,7 @@ mod tests {
         render(40, 20, Screen::TrackerArrange);
         render(40, 20, Screen::TrackerPages);
         render(40, 20, Screen::TrackerTools);
-        render(40, 20, Screen::TrackerNoob);
+        render(40, 20, Screen::TrackerNoteLength);
         render(40, 20, Screen::TrackerLoop);
         render(40, 20, Screen::TrackerLoopAlign);
         render(40, 20, Screen::AudioRecorder);
@@ -12808,7 +13009,7 @@ mod tests {
         render(38, 14, Screen::TrackerArrange);
         render(38, 14, Screen::TrackerPages);
         render(38, 14, Screen::TrackerTools);
-        render(38, 14, Screen::TrackerNoob);
+        render(38, 14, Screen::TrackerNoteLength);
         render(38, 14, Screen::TrackerLoop);
         render(38, 14, Screen::TrackerLoopAlign);
         render(38, 14, Screen::AudioRecorder);
@@ -13807,6 +14008,7 @@ mod tests {
             TrackerIo {
                 route: Arc::new(std::sync::Mutex::new(engine::TrackerRoute::default())),
                 input: Arc::new(std::sync::Mutex::new(None)),
+                playback_scale: Arc::new(std::sync::Mutex::new(None)),
             },
             config,
             AudioPorts {
@@ -15226,6 +15428,12 @@ mod tests {
         a.toggle_tracker_recording();
         assert_eq!(a.menu_context(), MenuContext::TrackerRecord);
         assert!(a.tracker_route.lock().unwrap().preview_state().0);
+        a.tracker_noob = true;
+        a.sync_tracker_route();
+
+        a.record_tracker_midi(&[0x90, 61, 110]);
+        assert_eq!(a.song.patterns[&1].rows[0][0].note, Note::Empty);
+        assert_eq!(a.tracker_mode, TrackerMode::Rec);
 
         a.record_tracker_midi(&[0x90, 60, 111]);
         assert_eq!(a.song.patterns[&1].rows[0][0].note, Note::On(60));
@@ -15238,6 +15446,22 @@ mod tests {
         assert!(a.song.patterns[&1].rows[0][LANES_PER_PAGE..]
             .iter()
             .all(|cell| cell.note == Note::Empty));
+        assert!(!a
+            .tracker_recording
+            .as_ref()
+            .unwrap()
+            .active_lanes
+            .is_empty());
+
+        a.toggle_tracker_noob();
+        assert_eq!(a.tracker_mode, TrackerMode::Rec);
+        assert!(a.tracker_recording.is_some());
+        assert!(a
+            .tracker_recording
+            .as_ref()
+            .unwrap()
+            .active_lanes
+            .is_empty());
 
         a.stop_tracker_recording();
         assert!(a.tracker_route.lock().unwrap().preview_state().0);
@@ -15426,7 +15650,7 @@ mod tests {
     }
 
     #[test]
-    fn mode_page_enters_edit_noob_and_returns_to_play_without_duplicate_state() {
+    fn noob_toggle_and_edit_note_length_are_independent_controls() {
         let p = presets();
         let mut a = app(&p);
         let (tx, _rx) = mpsc::channel();
@@ -15434,11 +15658,28 @@ mod tests {
         perform(Action::TrackerEdit, &mut a, Path::new("/none"), None);
         assert_eq!(a.tracker_mode, TrackerMode::Edit);
         assert!(a.tracker_recording.is_none());
-        perform(Action::TrackerModeNoob, &mut a, Path::new("/none"), None);
+        perform(Action::TrackerNoobToggle, &mut a, Path::new("/none"), None);
         assert_eq!(a.screen, Screen::Tracker);
-        assert_eq!(a.tracker_mode, TrackerMode::Noob);
-        perform(Action::OpenNoobLength, &mut a, Path::new("/none"), None);
-        assert_eq!(a.screen, Screen::TrackerNoob);
+        assert_eq!(a.noob_target, Some(NoobTarget::Tracker));
+        assert_eq!(a.tracker_mode, TrackerMode::Edit);
+        a.noob_draft = Scale {
+            root: 1,
+            kind: ScaleKind::NaturalMinor,
+        };
+        perform(Action::ConfirmNoob, &mut a, Path::new("/none"), None);
+        assert!(a.tracker_noob);
+        assert_eq!(a.tracker_mode, TrackerMode::Edit);
+        assert_eq!(a.noob_scale, a.noob_draft);
+        a.set_tracker_mode(TrackerMode::Play);
+        assert!(a.tracker_noob);
+        assert_eq!(a.tracker_mode, TrackerMode::Play);
+        a.set_tracker_mode(TrackerMode::Edit);
+        assert!(a.tracker_noob);
+        perform(Action::TrackerNoobToggle, &mut a, Path::new("/none"), None);
+        assert!(!a.tracker_noob);
+        assert_eq!(a.tracker_mode, TrackerMode::Edit);
+        perform(Action::OpenNoteLength, &mut a, Path::new("/none"), None);
+        assert_eq!(a.screen, Screen::TrackerNoteLength);
         a.controller_layout = ControllerLayout::Four;
         dispatch_encoder(
             crate::pads::EncoderAction::Up,
@@ -15446,14 +15687,14 @@ mod tests {
             Path::new("/none"),
             &tx,
         );
-        assert_eq!(a.noob_length_draft, NoobLength::Eighth);
+        assert_eq!(a.note_length_draft, NoteLength::Eighth);
         dispatch_encoder(
             crate::pads::EncoderAction::Select,
             &mut a,
             Path::new("/none"),
             &tx,
         );
-        assert_eq!(a.noob_length, NoobLength::Eighth);
+        assert_eq!(a.note_length, NoteLength::Eighth);
         a.set_tracker_mode(TrackerMode::Play);
         assert_eq!(a.tracker_mode, TrackerMode::Play);
         assert!(a.tracker_recording.is_none());
@@ -15647,18 +15888,19 @@ mod tests {
     }
 
     #[test]
-    fn noob_mode_enters_every_supported_length_without_reinterpreting_data() {
+    fn step_edit_enters_every_supported_note_length_without_linking_row_advance() {
         let p = presets();
         let mut a = app(&p);
         a.screen = Screen::Tracker;
-        a.tracker_mode = TrackerMode::Noob;
+        a.tracker_mode = TrackerMode::Edit;
+        a.tracker_advance = 2;
         let cases = [
-            (NoobLength::Whole, 16, 100),
-            (NoobLength::Half, 8, 100),
-            (NoobLength::Quarter, 4, 100),
-            (NoobLength::Eighth, 2, 100),
-            (NoobLength::Sixteenth, 1, 100),
-            (NoobLength::ThirtySecond, 1, 50),
+            (NoteLength::Whole, 16, 100),
+            (NoteLength::Half, 8, 100),
+            (NoteLength::Quarter, 4, 100),
+            (NoteLength::Eighth, 2, 100),
+            (NoteLength::Sixteenth, 1, 100),
+            (NoteLength::ThirtySecond, 1, 50),
         ];
         for (length, span, gate) in cases {
             let pattern = a.song.patterns.get_mut(&0).unwrap();
@@ -15666,8 +15908,8 @@ mod tests {
                 row.fill(Cell::default());
             }
             a.tracker_row = 0;
-            a.noob_length = length;
-            a.write_noob_notes(&[(60, 99)]);
+            a.note_length = length;
+            a.write_edit_notes(&[(60, 99)]);
             let pattern = &a.song.patterns[&0];
             assert_eq!(pattern.rows[0][0].note, Note::On(60));
             assert_eq!(pattern.rows[0][0].velocity, Some(99));
@@ -15677,58 +15919,87 @@ mod tests {
             } else {
                 assert_eq!(pattern.rows[span][0].note, Note::Empty);
             }
+            assert_eq!(a.tracker_row, 2);
             let snapshot = pattern.rows.clone();
             a.set_tracker_mode(TrackerMode::Play);
-            a.set_tracker_mode(TrackerMode::Noob);
+            a.set_tracker_mode(TrackerMode::Edit);
             assert_eq!(a.song.patterns[&0].rows, snapshot);
         }
     }
 
     #[test]
-    fn noob_mode_is_unavailable_on_a_percussion_page() {
+    fn noob_filter_is_unavailable_on_a_percussion_page() {
         let p = presets();
         let mut a = app(&p);
         a.screen = Screen::Tracker;
         a.tracker_page = a.percussion_page_index().unwrap();
         let before = a.song.patterns[&0].rows.clone();
 
-        a.toggle_noob_mode();
+        a.open_noob_setup(NoobTarget::Tracker);
 
+        assert!(!a.tracker_noob);
         assert_eq!(a.tracker_mode, TrackerMode::Play);
-        assert!(a.status.contains("N00b unavailable on Drums"));
+        assert!(a.status.contains("unavailable on Drums"));
         assert_eq!(a.song.patterns[&0].rows, before);
     }
 
     #[test]
-    fn moving_from_noob_to_a_percussion_page_returns_to_play_mode() {
+    fn moving_from_noob_to_a_percussion_page_disables_filter_but_keeps_mode() {
         let p = presets();
         let mut a = app(&p);
         a.screen = Screen::Tracker;
         a.tracker_page = a.percussion_page_index().unwrap() - 1;
-        a.tracker_mode = TrackerMode::Noob;
+        a.tracker_mode = TrackerMode::Edit;
+        a.tracker_noob = true;
 
         a.move_tracker_page(1);
 
         assert!(a.current_page().unwrap().percussion);
-        assert_eq!(a.tracker_mode, TrackerMode::Play);
-        assert!(a.status.contains("N00b unavailable on Drums"));
+        assert!(!a.tracker_noob);
+        assert_eq!(a.tracker_mode, TrackerMode::Edit);
+        assert!(a.status.contains("current FT2 mode unchanged"));
     }
 
     #[test]
-    fn stale_noob_state_cannot_write_to_a_percussion_page() {
+    fn step_edit_with_noob_writes_allowed_notes_and_suppresses_outsiders() {
         let p = presets();
         let mut a = app(&p);
         a.screen = Screen::Tracker;
-        a.tracker_mode = TrackerMode::Noob;
-        a.tracker_page = a.percussion_page_index().unwrap();
+        a.tracker_mode = TrackerMode::Edit;
+        a.tracker_noob = true;
+        a.tracker_page = 0;
         a.tracker_row = 4;
         let before = a.song.patterns[&0].rows.clone();
 
-        a.write_noob_notes(&[(57, 91)]);
+        a.tracker_single_note(61, 91);
 
         assert_eq!(a.tracker_row, 4);
         assert_eq!(a.song.patterns[&0].rows, before);
-        assert!(a.status.contains("note ignored"));
+
+        a.tracker_single_note(60, 92);
+
+        assert_eq!(a.song.patterns[&0].rows[4][0].note, Note::On(60));
+        assert_eq!(a.song.patterns[&0].rows[4][0].velocity, Some(92));
+        assert_eq!(a.tracker_row, 5);
+    }
+
+    #[test]
+    fn playback_noob_activates_shared_scale_and_normal_clears_it() {
+        let p = presets();
+        let mut a = app(&p);
+        a.screen = Screen::Playback;
+        a.open_noob_setup(NoobTarget::Playback);
+        a.noob_draft = Scale {
+            root: 1,
+            kind: ScaleKind::NaturalMinor,
+        };
+        a.confirm_noob();
+        assert!(a.playback_noob);
+        assert_eq!(*a.playback_scale.lock().unwrap(), Some(a.noob_scale));
+
+        a.disable_playback_noob();
+        assert!(!a.playback_noob);
+        assert_eq!(*a.playback_scale.lock().unwrap(), None);
     }
 
     #[test]

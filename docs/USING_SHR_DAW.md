@@ -32,28 +32,28 @@ and never treats this last standalone selection as its instrument.
 ## Learning by exploration
 
 The beginner-friendly parts of SHR-DAW form one experience, but they do
-different jobs. Playback is the immediate feedback surface. It names the chord
-currently held, lists the notes and their MIDI strike velocities, and lights
-the exact sounding notes on the continuous keyboard while unplayed notes remain
-dark. It does not select a key, grade an answer, or claim that a chord is
-permitted or forbidden.
+different jobs. Playback is the immediate feedback surface. In N00B, the
+learner chooses a chromatic root plus major or natural minor. Notes in that
+scale sound; notes outside it are consumed and stay silent rather than being
+shifted to another pitch. The screen names the chord currently held, lists the
+allowed sounding notes and their MIDI strike velocities, and lights those
+notes on the continuous keyboard. NORMAL restores unrestricted chromatic play.
 
-For example, a learner may choose to explore C-sharp minor by ear or with a
-controller's own key/scale assistance. They can see and hear `C#m`, change one
-note, watch the displayed chord name change, and compare the result. Trying
-`E maj`, `A maj`, an added seventh, or an unfamiliar combination can lead to a
-personally meaningful question: why does this feel settled, related, tense, or
-surprising? The display supplies names and visible note shapes for discoveries
-the learner has already heard.
+For example, a learner can select C-sharp natural minor, find and hear `C#m`,
+change one allowed note, watch the displayed chord name change, and compare the
+result. Trying `E maj`, `A maj`, an added seventh, or an unfamiliar allowed
+combination can lead to a personally meaningful question: why does this feel
+settled, related, tense, or surprising? The display supplies names and visible
+note shapes for discoveries the learner has already heard.
 
-FT2 turns discoveries into repeatable material. On a melodic page, N00B mode
-asks for a familiar length from 1/1 through 1/32 and handles the underlying
-gate/note-off representation. Normal Step Edit can accept a played note or a
-gesture of up to four notes. A new player can plan a phrase carefully or
-"face-smash" several tones, listen to the resulting lanes, preserve an
-interesting accident, and revise it without first learning traditional
-notation or tracker command syntax. Percussion pages deliberately use normal
-Step Edit rather than N00B.
+FT2 applies the same N00B scale gate as a switch layered over Play, real-time
+Record, and Step Edit on the selected melodic page. In Play it filters what is
+heard; in Record and Edit it also filters what reaches Pattern cells. Step Edit
+still accepts one note or a gesture of up to four allowed notes and gives the
+entry a familiar 1/1–1/32 length. Length and the 1/2/4/8-row cursor advance are
+independent. A new player can plan a phrase, listen to it, preserve an
+interesting accident, and revise it without first learning tracker command
+syntax. N00B turns off when moving to a percussion page.
 
 This is a product philosophy, not a promise about educational outcomes or a
 claim that every child learns alike. The intended loop is simple:

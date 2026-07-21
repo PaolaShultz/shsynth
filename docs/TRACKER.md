@@ -6,24 +6,22 @@ It does not use FT2 code or read XM files.
 
 ## Modes
 
-The normal FT2 screen has **PLAY**, hardware-only **REC**, detailed **EDIT**,
-and beginner **N00B** modes. N00B keeps the selected page as the instrument and
-uses one visible musical length: `1/1`, `1/2`, `1/4`, `1/8`, `1/16`, or
-`1/32`. It starts at `1/16`. Choose **LENGTH**, turn the rotary, and click to
-confirm. Note entry writes both the note and its end, then moves to the next
-insertion row. `1/32` uses the existing half-row gate; the longer values use
-the existing row grid and explicit note-off cells. No second timing system or
-new Project format is involved.
+The normal FT2 screen has **PLAY**, hardware-only **REC**, and detailed
+**EDIT** modes. **N00B is a separate on/off filter** that can remain enabled in
+all three. It keeps the selected melodic page as the instrument and filters
+input through a chosen chromatic root plus major or natural-minor scale. An
+in-scale key keeps its original pitch; an out-of-scale key is consumed and
+stays silent. N00B never quantizes a rejected key to a different note.
 
-N00B is a melodic-entry aid and is unavailable while a percussion page is
-selected. Trying to enter it on Drums is refused; moving from a melodic N00B
-page onto Drums returns to Play mode without writing or changing cells. Use
-normal Step Edit for drum entry and chords.
+In Play, N00B changes only what is heard. In REC and EDIT, allowed notes can be
+written normally while rejected notes remain silent and unwritten. Turning the
+filter on or off never changes Play/REC/EDIT. N00B is refused on a percussion
+page; moving onto Drums turns only the filter off and preserves the current
+mode.
 
-N00B also keeps page/track selection, delete, note-off, play, save, files, and
-one-level Exit close at hand. **NORMAL** returns to the detailed tracker
-controls. Switching modes never changes existing cells. Command pads and their
-releases remain consumed; ordinary musical MIDI remains musical input.
+The N00B button is present in Play, REC, and EDIT. The first press opens scale
+setup; once enabled, pressing it again turns the filter off. Switching it never
+changes existing cells. Command pads and their releases remain consumed.
 
 ## Projects, patterns, and arrangement
 
@@ -83,6 +81,12 @@ persistent advance of 1, 2, 4, or 8 rows for note/chord entry, blank, erase,
 and note-off. This makes evenly spaced bass notes and drum hits quick to enter;
 the FT2 title shows `EDIT +n`. A computer keyboard can enter notes with
 `Z S X D C V G B H N J M` and choose advance with `1`, `2`, `4`, or `8`.
+
+**LENGTH** is a separate Step Edit control. It chooses `1/1`, `1/2`, `1/4`,
+`1/8`, `1/16`, or `1/32` for melodic entries and defaults to `1/16`. The
+selected duration writes the existing gate/explicit note-off representation;
+it does not change the independent **ADD** cursor advance or create a second
+timing system.
 
 Percussion pages keep drum voices visually stable during Step Edit. For each
 played note, SHR searches all four columns in earlier rows of
