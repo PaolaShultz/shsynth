@@ -102,10 +102,19 @@ Tracked loops and demos are likewise limited to their cleared manifests.
 
 ## Documentation and collaboration
 
-Update the README and focused documentation when behavior, commands, mappings,
-storage, or hardware assumptions change; link to canonical detail rather than
-copying it. Remove stale conflicting text. Use `docs/README.md` to find the
-focused architecture, musician, measurement, and future-plan documents.
+Keep `README.md` as a short landing page, never the complete manual. Keep it at
+or below 900 words and 160 lines, with only a short product description,
+compact feature summary, essential install/local-launch commands, concise
+screenshot tour, canonical documentation links, and licence/third-party links.
+Do not add detailed behavior, workflows, architecture, storage, failure models,
+controller tables, history, plans, personal narrative, or repeated safety
+contracts. Put current detail in the focused document that owns it and link
+there in one sentence; remove README duplication instead of expanding it.
+
+Update focused documentation when behavior, commands, mappings, storage, or
+hardware assumptions change. Remove stale conflicting text. Use
+`docs/README.md` to find the focused architecture, musician, measurement, and
+future-plan documents.
 
 Explain musical and hardware choices in plain language, recommend a safe
 default, and connect parameters to what the user will hear or do. For physical
