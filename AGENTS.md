@@ -33,12 +33,6 @@ restore a connector. Do not silently substitute a browser, shell workflow,
 manual instructions, or a different tool for the requested mechanism. A
 workaround requires the user's choice when it materially changes their work.
 
-When the user signals a deadline or urgency, enter minimum-path mode: verify
-critical capabilities first, suspend optional research, cleanup, documentation,
-branching, and broad validation, and keep the user informed of the single next
-action that matters. Never consume a deadline on polish while submission,
-authentication, upload, build, or another terminal requirement is unresolved.
-
 This checkout is shared by multiple workers who edit and commit independently.
 Inspect live Git state before editing and again before committing; preserve
 other workers' changes and stage/commit only your own scoped paths or hunks. Do
