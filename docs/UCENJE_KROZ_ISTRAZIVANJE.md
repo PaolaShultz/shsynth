@@ -6,7 +6,7 @@ računala u još jedno desktop računalo. Kad je to proradilo, pojavilo se pitan
 može li ista kutija pružiti pratnju? To pitanje vodilo je prema ritmovima,
 melodijama, vanjskim MIDI uređajima, aranžmanima, petljama, efektima i snimanju.
 
-Danas SHR-DAW kroz zaslon od 40×20 znakova i mali fizički kontroler svira
+Danas SHR-DAW kroz zaslon od 40×13 znakova i mali fizički kontroler svira
 softverske instrumente, upravlja s do 128 vanjskih MIDI uređaja, pamti MIDI
 ideje, gradi cijele skladbe te snima zasebne kanale i završni stereo miks.
 [Trenutačno stanje projekta opisano je u README dokumentu na engleskom

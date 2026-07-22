@@ -21,7 +21,8 @@ and editing but required for software-instrument audio, WAV-loop playback, and
 multitrack recording. synthv1, Yoshimi, and FluidSynth/TimGM are separate optional
 sound engines at runtime; the default installer includes all three so their
 catalogs are useful immediately. MIDI controllers, external instruments, audio
-interfaces, and a 480×320 display are optional hardware.
+interfaces, and a 480×320 display are optional hardware. On that display the
+current fixed TTY layout is 40×13 cells; installation does not change its font.
 
 ## Install
 

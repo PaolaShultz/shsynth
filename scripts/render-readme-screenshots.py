@@ -26,6 +26,12 @@ FONT_CANDIDATES = (
 
 CELL_W, CELL_H = 12, 16
 OUTPUT_SCALE = 2
+GLYPH_ALIASES = {
+    # Lat15-VGA16 has the required double-vertical shape at U+2551 but no
+    # U+2016 Unicode-table entry. Keep the TUI's one-cell pause symbol exact
+    # while rendering it with that existing console-font glyph.
+    0x2016: 0x2551,
+}
 
 BRIGHT = {
     (0, 0, 0): (85, 85, 85),
@@ -122,7 +128,8 @@ def render(
         y = index // cols
         symbol = cell.get("symbol") or " "
         character = symbol[0]
-        glyph = glyphs[unicode_map.get(ord(character), fallback)]
+        codepoint = GLYPH_ALIASES.get(ord(character), ord(character))
+        glyph = glyphs[unicode_map.get(codepoint, fallback)]
         fg = tuple(cell["fg"])
         bg = tuple(cell["bg"])
         if cell.get("bold"):

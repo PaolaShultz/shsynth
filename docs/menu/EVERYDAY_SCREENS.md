@@ -72,9 +72,10 @@ computer-keyboard-only from Home.
 
 ## Playback
 
-Playback appears after a sound is loaded. The body shows the held chord and
-notes, each note's decimal MIDI strike velocity directly beneath it, a
-continuous two-row keyboard state, and the 12 mapped synthv1 controls. The
+Playback appears after a sound is loaded. At native 40×13 the body shows the
+held chord and notes, each note's decimal MIDI strike velocity directly beneath
+it, and the 12 mapped synthv1 controls. Taller terminals use spare space for a
+continuous two-row keyboard state. The
 aligned velocity row helps with gentle/strong control, consistent chord
 attacks, and bass-plus-chord balance. It is MIDI input data, not an audio
 loudness meter; controller and instrument response determine the audible
@@ -187,9 +188,10 @@ that opened Help.
 
 The recorder captures any deliberately configured set of JACK source ports as
 one synchronized take with a 24-bit mono WAV per input and a shared manifest.
-The compact list shows named tracks as ready or missing, and the status rows
-show armed count, elapsed time, sample rate, writer high-water mark, drop/xrun
-counts, final path, or the failure reason. It never starts or restarts JACK.
+The compact list shows named tracks as ready or missing. Its body shows armed
+count, elapsed time, sample rate, writer high-water mark, drop/xrun counts,
+final path, or the failure reason; the one shared final status row remains
+separate below the two controller rows. It never starts or restarts JACK.
 
 ### RECORD — arm and record
 
@@ -228,6 +230,11 @@ final meter, and controls final stereo recording. With the graph disabled it
 keeps the CPU/legacy meter presentation without pretending that direct output
 is being measured. CPU is whole-core `/proc/stat` activity, not callback timing
 or xruns.
+
+Every horizontal meter cell is a circular `●` LED. Unlit cells are dark gray;
+safe active cells use one green; yellow and red appear only at their active
+thresholds; a held peak is a brighter circle in the applicable threshold
+colour. No square bar or line-marker glyph represents level or peak.
 
 ### OPS — source and level
 

@@ -7,13 +7,15 @@ implemented.
 
 ## Startup splash
 
-Startup first shows a 40×20 old-school stereo VU animation with independent
-three-row `L` and `R` bars. It uses the same dBFS colour thresholds as the live
-meter: green below −12 dBFS, yellow from −12 through −3 dBFS, and red above
-−3 dBFS. The animation is decorative and does not start audio, playback, or
-MIDI transmission.
+Startup first shows a 40×13 old-school stereo LED animation with three
+identical horizontal `●` rows for each of the `L` and `R` channels. Unlit LEDs
+are dark gray; lit LEDs use one green below −12 dBFS, yellow from −12 through
+−3 dBFS, and red above −3 dBFS. It does not use square bars, colour inactive
+cells by their scale position, or introduce shade gradients. The animation is
+decorative; L and R use the same simple loading movement, and it does not start
+audio, playback, or MIDI transmission.
 
-The splash remains visible for at least 900 ms. A terminal computer keyboard
+The splash remains visible for at least 2 seconds. A terminal computer keyboard
 is a fully qualified input device, equal to an available configured controller
 or performance MIDI input; it is not described as a fallback. Only when none
 of those inputs is available does the splash remain on `CONNECT KEYBOARD OR
@@ -27,7 +29,7 @@ from the splash.
 | Home | Centered startup navigation root with equal-width bars for Software Synths, FT2, Recorder, Performance, MIDI Learn, Routing, Effects, Ideas, and Help. Encoder/Up/Down selects a workspace and encoder click/Enter opens it. Home has no MIDI quit command; Esc or `q` quits from the computer keyboard. |
 | Presets | Select previous/next, keyboard page up/down, first/last, previous/next engine, and load the selected sound. Its physical pages contain only sound browsing, engine choice, panic, contextual help, and Exit to Home. |
 | MTR | With the final bus enabled: choose Synth/Loop/Input, adjust its bounded smoothed level, toggle mute, inspect readiness/final peaks/clips/limiter reduction, and start/stop the callback-boundary final stereo recording. With it disabled: retain the passive CPU and legacy graph meter. Its FX launcher uses the same master-overlay framework as FT2, then opens the existing selected source/AUX/master rack. |
-| Playback | Inspect held notes/chords, aligned decimal MIDI strike velocities, and keyboard state; toggle the N00B filter in place and, while enabled, turn the master rotary through all root plus major/natural-minor choices shown by a compact `SCALE` control; reset the 12 mapped parameters in place; open and return from the FX rack without stopping the sound; record/play/save MIDI Ideas; stop/panic; contextual help; return to Presets. N00B never replaces the Player body. The 12 configured synthv1 CC controls continuously adjust parameters with pickup. |
+| Playback | Inspect held notes/chords and aligned decimal MIDI strike velocities, with keyboard state added only when the terminal is taller than native 40×13; toggle the N00B filter in place and, while enabled, turn the master rotary through all root plus major/natural-minor choices shown by a compact `SCALE` control; reset the 12 mapped parameters in place; open and return from the FX rack without stopping the sound; record/play/save MIDI Ideas; stop/panic; contextual help; return to Presets. N00B never replaces the Player body. The 12 configured synthv1 CC controls continuously adjust parameters with pickup. |
 | Ideas | Previous/next/first/last idea; inspect, load, play, delete, record, and save; panic; contextual help; Exit to Home. |
 | FT2 normal | While Play or Rec transport is active, the main rotary selects the previous/next column across page boundaries. While transport is paused it moves rows, as it does in Edit; keyboard Up/Down always moves rows. The redundant Page−/Page+/Track−/Track+ buttons are gone: PLAY holds cell edit and transport, SELECT opens PAGE/PATTERN/SONG/ROUTE rotary overlays, and SYS holds panic/N00B/help/Exit. |
 | FT2 record | Stop Play/Edit and record quantized note-ons and release-based note-offs into the selected page/current pattern through its configured target. Captures join playback on the next loop; Edit note length does not affect REC. Rotary turns are ignored while any recorded notes are held and work again after every Note Off; PLAY, RECORD, and EDIT switch mutually exclusive modes. |
@@ -43,7 +45,7 @@ from the splash.
 | Tracks page manager | Select pages with the encoder; add a four-lane page; edit target, column, channel, bank, and program; confirm all changes; or exit and restore the original Project. |
 | Target/channel field mode | Previous/next choice, confirm field, cancel field. Encoder turn/press and menu items share these operations. |
 | Audio recorder | Select and name a track; assign an exact discovered JACK source; arm/disarm one, every resolved track, or all; refresh source discovery without rewriting preferences; start/stop one synchronized take; inspect elapsed time, active count, selected-track activity, drop/xrun/high-water status, final path or failure; Exit to Home and panic. |
-| FX rack/editor | Choose source, AUX 1, AUX 2, or master; select the typed `+ INSERT EFFECT` row; add/select/remove/bypass/reorder bounded effects; and edit every parameter together at 40×20 using explicit compact labels and type-aware values. Aux time effects are forced wet. An active graph publishes FX changes only with stopped transport and recording; a disabled graph accepts Project-only edits without touching audio. |
+| FX rack/editor | Choose source, AUX 1, AUX 2, or master; select the typed `+ INSERT EFFECT` row; add/select/remove/bypass/reorder bounded effects; and edit every parameter together at 40×13 using explicit compact labels and type-aware values. Aux time effects are forced wet. An active graph publishes FX changes only with stopped transport and recording; a disabled graph accepts Project-only edits without touching audio. |
 | Routing | Transactional rotary editor for controller input/role, performance input, external enable/output/profile, controller clock enable/output, and audio output. Browsing never writes or transmits. Field confirmation validates the whole candidate, backs up and atomically saves it, safely activates live MIDI input changes, refreshes discovery, and rolls back on failure. Interface availability and unverified downstream DIN profile are separate states. |
 | Help | Compact Markdown user help, temporary LAN web help when port 80 is available, section links selected by the master encoder, keyboard page scrolling, top, and return to the previous screen. |
 | Global/safety | Stop MIDI playback, tracker transport, recorder, managed engine, and owned notes; All Notes Off; cancel or leave the current controller level. Application exit remains computer-keyboard-only. Help is also reachable from `?` or F1. Process termination remains limited to the engine owned by SHR-DAW. |
@@ -56,19 +58,32 @@ union of every normal and contextual menu and checks every action in this
   screen-specific inventory for controller reachability. Top-level Home entries
   are reached by the master rotary rather than duplicated on child command pages.
 
-## Master overlays
+## Shared status row and master overlays
+
+Every working screen except Home reserves the final row. Its first cell is the
+transport state: steady green `>` for play, steady white `■` for stop, steady
+white `‖` for pause, or red `●` for record. Record alone pulses between normal
+and bright red; the circle never disappears. One space and the current useful
+status or fault may follow. Screen bodies do not add generic gray status lines,
+and the two controller rows sit immediately above the shared status row.
+
+Horizontal meters use the same circular LED language everywhere. Every cell is
+`●`: dark gray when unlit, one consistent green at a safe active level, then
+yellow and red only when their documented thresholds are active. A held peak
+uses a brighter version of its threshold colour rather than a line or square.
 
 An overlay is transient state above its caller, not another `Screen` and not a
 second Project/engine owner. Its central state records identity, caller, title,
 canonical launcher, selection/scroll, active field snapshot, typed draft, and
-the caller's controller-page state. At 40×20 its outer rectangle is exactly
-`x=1`, `y=1`, `width=38`, `height=18`; the bordered inner content is exactly
-`x=2`, `y=2`, `width=36`, `height=16`. Compact terminals clamp those values
-without drawing outside the terminal.
+the caller's controller-page state. At 40×13 its outer rectangle is exactly
+`x=1`, `y=1`, `width=38`, `height=11`; the bordered inner content is exactly
+`x=2`, `y=2`, `width=36`, `height=9`. This leaves one cell visible on every
+side, including the final status row below it.
 
-While open, only the launcher action remains on the bottom row, in its original
-physical item position and with an active highlight. All other page and item
-commands are hidden and silent. There is no controller-strip Back button.
+While open, only the launcher action remains on the overlay's bottom border,
+near its original physical item position and with an active highlight. All
+other page and item commands are hidden and silent. It never occupies or clears
+the shared status row. There is no controller-strip Back button.
 Pressing the highlighted launcher again closes the overlay. The rotary and
 Up/Down browse; rotary click and Enter select or confirm. Back/Esc cancels an
 active field first, then cancels the overlay draft and closes, before a later
@@ -255,7 +270,7 @@ The MIDI row describes the selected ALSA interface port as `ONLINE` or
 `D-50 · UNVERIFIED` is therefore the truthful expected presentation; SHR never
 claims that the D-50 itself was detected.
 
-## FX editor and 40×20 text contract
+## FX editor and 40×13 text contract
 
 The FX editor is a spatial 2×4 grid matching the eight physical rotary
 positions. Every control has its title above its value; the selected pair is
@@ -273,7 +288,7 @@ Static operational labels are written to fit; unpredictable device/file/user
 names pass through cell-aware fitting; fixed label/value rows reserve the
 selection marker and right-side state. Help remains the intentional wrapped,
 scrollable prose surface. The controller footer, `DEV`/`REL` badge, Help, and
-Exit areas retain their assigned cells at 40×20.
+Exit areas retain their assigned cells at 40×13.
 
 ## FT2 cell editor inventory and mapping
 

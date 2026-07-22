@@ -55,6 +55,9 @@ than treating it as an unmeasured promise.
   `EXIT` is page 4/item 4. The editor shows input/output peak and RMS, output
   clip/non-finite counts, and compressor gain reduction.
 
+That 40×20 statement is a dated checkpoint fact. Current screens and generated
+documentation use the later 40×13 physical layout.
+
 ## Raspberry Pi performance and latency checkpoint
 
 Measured on a Raspberry Pi 4 Model B Rev 1.4 with 3.7 GiB RAM, performance

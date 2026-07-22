@@ -152,7 +152,7 @@ comparison it is meant to inform.
 3. Inspect Ratatui/layout/Unicode, Serde/JSON, Quick XML, Hound, MIDI/ALSA, and
    error-handling contributions without assuming that a large source package
    produces an equally large linked result.
-4. Try a smaller library, fixed 40x20 implementation, or separate live/offline
+4. Try a smaller library, fixed 40×13 implementation, or separate live/offline
    binary only in an isolated branch or worktree and only when the measured
    contributor is large enough to justify the experiment.
 5. Compare capability, correctness, clean-build time, incremental-build time,
@@ -205,7 +205,7 @@ headroom; it is not a warning and says nothing about musical quality.
 
 The FX rack may show the one-cell mark beside a kind and explain it in the
 status/help path. Any color must remain secondary to the glyph and must not
-conflict with existing green/yellow/red parameter meaning. The complete 40x20
+conflict with existing green/yellow/red parameter meaning. The complete 40×13
 layout and deterministic screenshot set must pass before the mark ships.
 
 ## Release and documentation gates

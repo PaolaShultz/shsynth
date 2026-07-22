@@ -226,6 +226,11 @@ than turning the product documentation into a submission-planning archive.
 
 ## Pre-existing baseline and Build Week extensions
 
+The 40×20 geometry references in this historical section describe the Build
+Week checkpoint and its then-current screenshot set. The current product and
+renderer use 40×13; the historical facts below are intentionally not rewritten
+as though that later geometry had existed during the event.
+
 The pre-opening SHSynth baseline already included a 40×20 terminal, one-managed
 engine hosting for synthv1/Yoshimi/FluidSynth, sound browsing, pickup-safe
 synthv1 controls, MIDI Ideas, an initial external Casio tracker, stereo JACK

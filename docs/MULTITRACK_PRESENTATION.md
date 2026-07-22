@@ -59,7 +59,7 @@ partial, failed, or synthetic run.
 ## Required close-ups
 
 1. Old stereo limitation.
-2. 40×20 list with independently named tracks and one selected meter.
+2. 40×13 list with independently named tracks and one selected meter.
 3. Exact source shown `ready`; another exact preference shown `missing`.
 4. Several arm dots, elapsed time, active count, drop/xrun/high-water summary.
 5. Separate mono 24-bit WAV filenames.

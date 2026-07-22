@@ -20,7 +20,8 @@ use crate::overlay::{
 };
 use crate::pads::{ControllerLayout, MenuInput, TapTempo};
 use crate::performance_meter::{
-    self, AudioAvailability, AudioLevel, BarCell, MeterColor, PerformanceMeter, VISIBLE_CPU_CORES,
+    self, AudioAvailability, AudioLevel, BarCell, LedState, MeterColor, PerformanceMeter,
+    VISIBLE_CPU_CORES,
 };
 use crate::preset::{BackendKind, Catalog, Preset};
 use crate::recording::{self, Recorder, TimedEvent};
@@ -76,8 +77,34 @@ const BUILD_BADGE: &str = if cfg!(debug_assertions) { "DEV" } else { "REL" };
 const FIRST_AUX_EFFECT_INDEX: usize = 3;
 const COMPRESSOR_GAIN_REDUCTION_LEDS_DB: [f32; 11] =
     [0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0, 12.0, 18.0, 24.0];
-// U+25CF is one cell wide and maps to a round glyph in the target Lat15-VGA16 font.
+// U+25CF is one cell wide in the target TTY font and is the master LED glyph.
 const COMPRESSOR_LED_GLYPH: &str = "●";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransportIndicator {
+    Play,
+    Stop,
+    Pause,
+    Record,
+}
+
+const fn transport_glyph(state: TransportIndicator) -> (&'static str, Color) {
+    match state {
+        TransportIndicator::Play => (">", Color::Green),
+        TransportIndicator::Stop => ("■", Color::White),
+        TransportIndicator::Pause => ("‖", Color::White),
+        TransportIndicator::Record => ("●", Color::Red),
+    }
+}
+
+fn transport_color(state: TransportIndicator, elapsed: Duration) -> Color {
+    let (_, base) = transport_glyph(state);
+    if state == TransportIndicator::Record && elapsed.as_millis() / 400 % 2 == 0 {
+        Color::LightRed
+    } else {
+        base
+    }
+}
 
 fn effect_kind_label(kind: EffectKind) -> &'static str {
     match kind {
@@ -4667,7 +4694,6 @@ impl App {
         let transport = self.sequencer.status();
         if transport.playing {
             self.follow_tracker_transport(&transport);
-            self.sequencer.stop();
         }
         let Some(target) = self.current_page().map(|page| page.target.clone()) else {
             self.status = "REC unavailable · current page is missing".into();
@@ -4686,7 +4712,6 @@ impl App {
         let pattern = self.tracker_pattern_number();
         let order = self.tracker_order;
         let page_index = self.tracker_page;
-        self.sequencer.stop();
         self.tracker_row = 0;
         self.tracker_recording = Some(TrackerRecording {
             pattern,
@@ -4701,6 +4726,9 @@ impl App {
         self.tracker_mode = TrackerMode::Rec;
         self.sync_tracker_route();
         self.reset_context_page();
+        // Play replaces the current schedule and performs its own note cleanup.
+        // Avoid a queued Stop between the old and recording schedules: that
+        // transiently reports a stopped transport while REC is already active.
         self.sequencer
             .play(&self.tracker_record_song(pattern, page_index), 0, 0);
         self.status = format!(
@@ -6610,6 +6638,30 @@ impl App {
         }
         self.values.insert(cc, value);
     }
+
+    fn transport_indicator(&self) -> TransportIndicator {
+        if self.tracker_recording.is_some()
+            || self.audio_recorder.status().recording
+            || self.recorder.is_recording()
+            || self
+                .engine
+                .as_ref()
+                .is_some_and(Engine::final_recording_active)
+        {
+            TransportIndicator::Record
+        } else if self.playback.is_some()
+            || self.sequencer.status().playing
+            || self.loop_player.status().playing
+            || self.song_previewing
+        {
+            TransportIndicator::Play
+        } else if self.screen == Screen::Tracker && self.tracker_mode == TrackerMode::Play {
+            TransportIndicator::Pause
+        } else {
+            TransportIndicator::Stop
+        }
+    }
+
     fn audio_graph_edit_blocker(&self) -> Option<&'static str> {
         if !self.config.audio_graph.enabled {
             return None;
@@ -9094,7 +9146,7 @@ fn perform(
         }
         Action::ResetMeter => {
             a.performance_meter.clear_holds();
-            a.status = "meter MAX, short peak, and clip holds cleared".into();
+            a.status = "meter MAX, bright peak, and clip holds cleared".into();
             if a.config.audio_graph.enabled
                 && a.engine.as_ref().and_then(Engine::bus_controls).is_none()
             {
@@ -10230,6 +10282,7 @@ fn draw<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     }
     if a.controller_learn.is_some() {
         draw_controller_learn(f, a);
+        draw_master_status(f, a);
         return;
     }
     match a.screen {
@@ -10259,6 +10312,7 @@ fn draw<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     if a.overlay.is_some() {
         draw_overlay(f, a);
         draw_overlay_launcher(f, a);
+        draw_master_status(f, a);
         return;
     }
     draw_pad_lock(f, a);
@@ -10312,6 +10366,7 @@ fn draw<B: Backend>(f: &mut Frame<B>, a: &mut App) {
             area,
         );
     }
+    draw_master_status(f, a);
 }
 
 fn draw_home<B: Backend>(f: &mut Frame<B>, a: &mut App) {
@@ -10406,7 +10461,7 @@ fn centered_text(value: &str, width: usize) -> String {
 
 fn draw_routing<B: Backend>(f: &mut Frame<B>, a: &App) {
     let z = f.size();
-    let body = rect(z.x, z.y, z.width, z.height.saturating_sub(2));
+    let body = rect(z.x, z.y, z.width, z.height.saturating_sub(3));
     let width = usize::from(body.width.saturating_sub(2));
     let owned_controller = a.controller_config.read().ok();
     let (config, controller) = a.routing.draft.as_ref().map_or_else(
@@ -10511,17 +10566,6 @@ fn draw_routing<B: Backend>(f: &mut Frame<B>, a: &App) {
         };
         lines.push(Spans::from(Span::styled(text, style)));
     }
-    lines.push(Spans::from(Span::styled(
-        crate::ui_text::fit_line(
-            if editing {
-                "Turn draft · click OK · Back cancel"
-            } else {
-                "Turn row · click EDIT · Back Home"
-            },
-            width,
-        ),
-        Style::default().fg(Color::DarkGray),
-    )));
     f.render_widget(
         Paragraph::new(lines).block(
             Block::default()
@@ -10533,7 +10577,8 @@ fn draw_routing<B: Backend>(f: &mut Frame<B>, a: &App) {
 }
 
 fn draw_controller_learn<B: Backend>(f: &mut Frame<B>, a: &App) {
-    let area = f.size();
+    let full = f.size();
+    let area = rect(full.x, full.y, full.width, full.height.saturating_sub(1));
     let session = a.controller_learn.as_ref().expect("learn modal is active");
     let (step, total) = session.progress();
     let role = session.role();
@@ -10623,7 +10668,7 @@ fn draw_controller_learn<B: Backend>(f: &mut Frame<B>, a: &App) {
 
 fn draw_fx_rack<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     let z = f.size();
-    let body = rect(z.x, z.y, z.width, z.height.saturating_sub(2));
+    let body = rect(z.x, z.y, z.width, z.height.saturating_sub(3));
     a.hits.list = body;
     let rack = project_fx_rack(&a.song.insert_rack, &a.song.aux_routing, a.fx_target);
     let rack_length = rack.map(|rack| rack.order.len()).unwrap_or(0);
@@ -10801,15 +10846,21 @@ fn styled_meter_bar(cells: Vec<BarCell>) -> Vec<Span<'static>> {
     cells
         .into_iter()
         .map(|cell| {
-            let active = cell.symbol != '·';
+            let color = match (cell.state, cell.color) {
+                (LedState::Off, _) => Color::DarkGray,
+                (LedState::Level, color) => performance_color(color),
+                (LedState::Peak, MeterColor::Green) => Color::LightGreen,
+                (LedState::Peak, MeterColor::Yellow) => Color::LightYellow,
+                (LedState::Peak, MeterColor::Red) => Color::LightRed,
+            };
             Span::styled(
-                cell.symbol.to_string(),
+                "●",
                 Style::default()
-                    .fg(performance_color(cell.color))
-                    .add_modifier(if active {
-                        Modifier::BOLD
-                    } else {
+                    .fg(color)
+                    .add_modifier(if cell.state == LedState::Off {
                         Modifier::empty()
+                    } else {
+                        Modifier::BOLD
                     }),
             )
         })
@@ -10908,7 +10959,7 @@ fn draw_performance_meter<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         return;
     }
     let z = f.size();
-    let body = rect(z.x, z.y, z.width, z.height.saturating_sub(2));
+    let body = rect(z.x, z.y, z.width, z.height.saturating_sub(3));
     let inner = rect(
         body.x.saturating_add(1),
         body.y.saturating_add(1),
@@ -11009,9 +11060,9 @@ fn draw_performance_meter<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     )));
     if detailed {
         lines.push(Spans::from(vec![
-            Span::styled("█ RMS smoothed  ", Style::default().fg(Color::Green)),
-            Span::styled("│ short peak  ", Style::default().fg(Color::LightYellow)),
-            Span::styled("· scale", Style::default().fg(Color::Red)),
+            Span::styled("● RMS smoothed  ", Style::default().fg(Color::Green)),
+            Span::styled("● bright peak  ", Style::default().fg(Color::LightYellow)),
+            Span::styled("● unlit", Style::default().fg(Color::DarkGray)),
         ]));
         lines.push(Spans::from(Span::styled(
             "MAX = highest peak since reset",
@@ -11038,7 +11089,7 @@ fn draw_performance_meter<B: Backend>(f: &mut Frame<B>, a: &mut App) {
 
 fn draw_final_performance_bus<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     let z = f.size();
-    let body = rect(z.x, z.y, z.width, z.height.saturating_sub(2));
+    let body = rect(z.x, z.y, z.width, z.height.saturating_sub(3));
     let width = usize::from(body.width.saturating_sub(2));
     let controls = a.engine.as_ref().and_then(Engine::bus_controls);
     let meter = a.engine.as_ref().and_then(Engine::final_bus_meter);
@@ -11242,7 +11293,7 @@ fn format_bytes(bytes: u64) -> String {
 
 fn draw_fx_editor<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     let z = f.size();
-    let body = rect(z.x, z.y, z.width, z.height.saturating_sub(2));
+    let body = rect(z.x, z.y, z.width, z.height.saturating_sub(3));
     let Some(id) = a.selected_effect_id() else {
         f.render_widget(
             Paragraph::new("FX EDIT\nNo effect selected")
@@ -11386,7 +11437,7 @@ fn draw_help<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         z.x + z.width.saturating_sub(help_width) / 2,
         z.y + 1,
         help_width,
-        z.height.saturating_sub(3),
+        z.height.saturating_sub(4),
     );
     let rows = body.height as usize;
     let lines = help::lines(HELP_TEXT_WIDTH);
@@ -11452,14 +11503,14 @@ fn draw_tracker_child<B: Backend>(f: &mut Frame<B>, title: &str, details: &str) 
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ),
-        rect(z.x, z.y + 1, z.width, z.height.saturating_sub(3)),
+        rect(z.x, z.y + 1, z.width, z.height.saturating_sub(4)),
     );
 }
 
 fn draw_tracker_loop<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     let z = f.size();
     if a.loop_library_mode {
-        let body = rect(z.x, z.y, z.width, z.height.saturating_sub(2));
+        let body = rect(z.x, z.y, z.width, z.height.saturating_sub(3));
         a.hits.list = body;
         let rows = usize::from(body.height.saturating_sub(2));
         let start = a.loop_library_selected.saturating_sub(rows / 2);
@@ -11571,7 +11622,7 @@ fn draw_tracker_loop<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         // share the transport clock which advances `player.elapsed`.
         lines.insert(3.min(lines.len()), loop_position_bar(&player, z.width));
     }
-    let body = rect(z.x, z.y, z.width, z.height.saturating_sub(2));
+    let body = rect(z.x, z.y, z.width, z.height.saturating_sub(3));
     if body.height >= 15 {
         let availability = a.loop_meter.audio_availability();
         let clipping = a.loop_meter.clipping(Instant::now());
@@ -11655,7 +11706,7 @@ fn draw_tracker_loop_align<B: Backend>(f: &mut Frame<B>, a: &App) {
         Paragraph::new(details)
             .alignment(Alignment::Center)
             .style(Style::default().fg(Color::Green)),
-        rect(z.x, z.y, z.width, z.height.saturating_sub(2)),
+        rect(z.x, z.y, z.width, z.height.saturating_sub(3)),
     );
 }
 
@@ -12034,13 +12085,18 @@ fn draw_overlay_launcher<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         return;
     };
     let z = f.size();
-    if z.height == 0 {
+    let geometry = overlay::geometry(z);
+    if geometry.outer.height == 0 {
         return;
     }
-    let row = rect(z.x, z.y + z.height - 1, z.width, 1);
-    f.render_widget(Clear, row);
-    let menu_width = z.width.min(40);
-    let menu_x = z.x + z.width.saturating_sub(menu_width) / 2;
+    let row = rect(
+        geometry.outer.x,
+        geometry.outer.y + geometry.outer.height - 1,
+        geometry.outer.width,
+        1,
+    );
+    let menu_width = geometry.inner.width;
+    let menu_x = geometry.inner.x;
     let width = menu_width / 4;
     let button = rect(menu_x + launcher.item as u16 * width, row.y, width, 1);
     f.render_widget(
@@ -12058,18 +12114,42 @@ fn draw_overlay_launcher<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         button,
     );
     a.hits.actions.push((button, launcher.action));
+}
+
+fn draw_master_status<B: Backend>(f: &mut Frame<B>, a: &App) {
+    let z = f.size();
+    if z.height == 0 || z.width == 0 {
+        return;
+    }
+    let row = rect(z.x, z.y + z.height - 1, z.width, 1);
+    f.render_widget(Clear, row);
+    let state = a.transport_indicator();
+    let (glyph, _) = transport_glyph(state);
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let indicator_color = transport_color(state, elapsed);
+    let message = if a.status == "Ready" {
+        ""
+    } else {
+        a.status.as_str()
+    };
     f.render_widget(
-        Paragraph::new(BUILD_BADGE).style(
-            Style::default()
-                .fg(if cfg!(debug_assertions) {
-                    Color::Yellow
-                } else {
-                    Color::Green
-                })
-                .bg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        ),
-        rect(z.x, z.y, z.width.min(3), 1),
+        Paragraph::new(Spans::from(vec![
+            Span::styled(
+                glyph,
+                Style::default()
+                    .fg(indicator_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                truncate(message, usize::from(z.width.saturating_sub(2))),
+                Style::default().fg(Color::Gray),
+            ),
+        ]))
+        .style(Style::default().bg(Color::Black)),
+        row,
     );
 }
 
@@ -12085,14 +12165,14 @@ fn draw_pad_buttons<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     // label into a terminal-wide button on larger displays.
     let menu_width = z.width.min(40);
     let menu_x = z.x + z.width.saturating_sub(menu_width) / 2;
-    let footer_rows = 2;
+    let footer_rows = 3;
     f.render_widget(
         Clear,
         rect(
             menu_x,
             z.y + z.height - footer_rows,
             menu_width,
-            footer_rows,
+            footer_rows - 1,
         ),
     );
     if a.screen != Screen::Playback {
@@ -12175,7 +12255,7 @@ fn draw_pad_buttons<B: Backend>(f: &mut Frame<B>, a: &mut App) {
 fn draw_list<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     let z = f.size();
     let head = rect(z.x, z.y, z.width, 2);
-    let list = rect(z.x, z.y + 2, z.width, z.height.saturating_sub(4));
+    let list = rect(z.x, z.y + 2, z.width, z.height.saturating_sub(5));
     let rows = list.height.saturating_sub(2) as usize;
     a.ensure_visible(rows);
     let inner = rect(list.x + 1, list.y + 1, list.width - 2, list.height - 2);
@@ -12235,8 +12315,8 @@ fn draw_list<B: Backend>(f: &mut Frame<B>, a: &mut App) {
 fn draw_playing<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     let z = f.size();
     let header = rect(z.x, z.y, z.width, 1);
-    let actions = rect(z.x, z.y + z.height - 2, z.width, 2);
-    let params = rect(z.x, z.y + 1, z.width, z.height.saturating_sub(3));
+    let actions = rect(z.x, z.y + z.height - 3, z.width, 2);
+    let params = rect(z.x, z.y + 1, z.width, z.height.saturating_sub(4));
     let name = a
         .playing
         .as_ref()
@@ -12266,14 +12346,12 @@ fn draw_playing<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     );
     let (mode, color) = if a.pad_locked {
         ("LCK", Color::Red)
-    } else if a.recorder.is_recording() {
-        ("REC", Color::Red)
     } else if a.idea_mode == IdeaMode::Record {
         ("R-M", Color::Yellow)
     } else if a.playback_noob {
         ("N0B", Color::Yellow)
     } else {
-        ("PLY", Color::Green)
+        ("", Color::White)
     };
     f.render_widget(
         Paragraph::new(mode).style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
@@ -12466,7 +12544,7 @@ fn draw_playback_keyboard<B: Backend>(f: &mut Frame<B>, a: &App, area: Rect) {
 }
 fn draw_ideas<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     let z = f.size();
-    let list = rect(z.x, z.y + 2, z.width, z.height.saturating_sub(4));
+    let list = rect(z.x, z.y + 2, z.width, z.height.saturating_sub(5));
     let rows = list.height.saturating_sub(2) as usize;
     if a.idea_selected < a.idea_offset {
         a.idea_offset = a.idea_selected;
@@ -12544,7 +12622,7 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
     } else if a.tracker_mode == TrackerMode::Rec {
         "REC READY".into()
     } else {
-        "STOP".into()
+        "PAUSE".into()
     };
     let state = if a.tracker_noob && !page.percussion {
         format!(
@@ -12573,7 +12651,7 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         ),
         rect(z.x, z.y, z.width, 1),
     );
-    let grid = rect(z.x, z.y + 1, z.width, z.height.saturating_sub(4));
+    let grid = rect(z.x, z.y + 1, z.width, z.height.saturating_sub(5));
     let program_browser = a.note_editor.as_ref().is_some_and(|editor| {
         editor.active
             && matches!(
@@ -12780,7 +12858,7 @@ fn draw_tracker<B: Backend>(f: &mut Frame<B>, a: &mut App) {
                 Color::DarkGray
             },
         )),
-        rect(z.x, z.y + z.height.saturating_sub(3), z.width, 1),
+        rect(z.x, z.y + z.height.saturating_sub(4), z.width, 1),
     );
 }
 
@@ -12994,7 +13072,7 @@ fn draw_tracker_pages<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         ),
         rect(z.x, z.y, z.width, 1),
     );
-    let body_height = z.height.saturating_sub(3);
+    let body_height = z.height.saturating_sub(4);
     match a.page_manager_mode {
         PageManagerMode::Pages => {
             let rows = usize::from(body_height);
@@ -13177,7 +13255,7 @@ fn draw_tracker_arrange<B: Backend>(f: &mut Frame<B>, a: &mut App) {
         ),
         rect(z.x, z.y, z.width, 1),
     );
-    let list = rect(z.x, z.y + 1, z.width, z.height.saturating_sub(3));
+    let list = rect(z.x, z.y + 1, z.width, z.height.saturating_sub(4));
     let rows = list.height.saturating_sub(2) as usize;
     let offset = a.arrange_selected.saturating_sub(rows.saturating_sub(1));
     let lines = a
@@ -13261,7 +13339,7 @@ fn draw_tracker_files<B: Backend>(f: &mut Frame<B>, a: &mut App) {
             Paragraph::new(lines)
                 .alignment(Alignment::Center)
                 .block(Block::default().borders(Borders::ALL)),
-            rect(z.x, z.y + 1, z.width, z.height.saturating_sub(3)),
+            rect(z.x, z.y + 1, z.width, z.height.saturating_sub(4)),
         );
         return;
     }
@@ -13304,11 +13382,11 @@ fn draw_tracker_files<B: Backend>(f: &mut Frame<B>, a: &mut App) {
             Paragraph::new(lines)
                 .alignment(Alignment::Center)
                 .block(Block::default().borders(Borders::ALL)),
-            rect(z.x, z.y + 1, z.width, z.height.saturating_sub(3)),
+            rect(z.x, z.y + 1, z.width, z.height.saturating_sub(4)),
         );
         return;
     }
-    let list = rect(z.x, z.y + 1, z.width, z.height.saturating_sub(3));
+    let list = rect(z.x, z.y + 1, z.width, z.height.saturating_sub(4));
     let inner = rect(
         list.x + 1,
         list.y + 1,
@@ -13515,7 +13593,7 @@ fn draw_audio_recorder<B: Backend>(f: &mut Frame<B>, a: &mut App) {
                 Color::Gray
             },
         )),
-        rect(z.x, z.y + 1, z.width, z.height.saturating_sub(3)),
+        rect(z.x, z.y + 1, z.width, z.height.saturating_sub(4)),
     );
 }
 fn truncate(s: &str, n: usize) -> String {
@@ -13542,6 +13620,9 @@ struct ScreenshotCell {
     bg: [u8; 3],
     bold: bool,
 }
+
+const SCREENSHOT_COLS: u16 = 40;
+const SCREENSHOT_ROWS: u16 = 13;
 
 pub fn readme_screenshots_json(config: &RuntimeConfig) -> Result<String> {
     let readme_screens = [
@@ -13600,14 +13681,14 @@ pub fn readme_screenshots_json(config: &RuntimeConfig) -> Result<String> {
         )?);
     }
     Ok(serde_json::to_string_pretty(&ScreenshotSet {
-        cols: 40,
-        rows: 20,
+        cols: SCREENSHOT_COLS,
+        rows: SCREENSHOT_ROWS,
         screens: frames,
     })?)
 }
 
 fn render_screenshot_frame(app: &mut App, name: String) -> Result<ScreenshotFrame> {
-    let backend = TestBackend::new(40, 20);
+    let backend = TestBackend::new(SCREENSHOT_COLS, SCREENSHOT_ROWS);
     let mut terminal = Terminal::new(backend)?;
     terminal.draw(|frame| draw(frame, app))?;
     let cells = terminal
@@ -14674,20 +14755,78 @@ mod tests {
     }
 
     #[test]
-    fn overlay_strip_shows_only_the_active_launcher_in_its_original_position() {
+    fn overlay_launcher_stays_inside_border_and_leaves_last_row_for_status() {
         let p = presets();
         let mut a = app(&p);
         a.screen = Screen::Tracker;
         a.menu_page_by_screen[Screen::Tracker.index()] = 2;
         a.open_overlay(Action::OpenRouteOverlay);
         let buffer = render_app(&mut a, 40, 20);
-        let row = row_text(&buffer, 19);
+        let row = row_text(&buffer, 18);
         assert_eq!(row.matches('[').count(), 1);
-        assert!(row[30..40].contains("ROUTE"));
-        assert!(row[..30].trim().is_empty());
-        assert_eq!(buffer_cell(&buffer, 30, 19).bg, Color::LightYellow);
+        assert!(row.contains("ROUTE"));
+        assert_eq!(buffer_cell(&buffer, 29, 18).bg, Color::LightYellow);
+        assert!(row_text(&buffer, 19).starts_with('‖'));
         assert_eq!(a.hits.actions.len(), 1);
         assert_eq!(a.hits.actions[0].1, Action::OpenRouteOverlay);
+    }
+
+    #[test]
+    fn forty_by_thirteen_overlay_preserves_all_four_one_cell_reveals() {
+        let p = presets();
+        let mut a = app(&p);
+        a.screen = Screen::Tracker;
+        a.open_overlay(Action::OpenRouteOverlay);
+        let buffer = render_app(&mut a, 40, 13);
+        let geometry = overlay::geometry(Rect::new(0, 0, 40, 13));
+
+        assert_eq!(geometry.outer, Rect::new(1, 1, 38, 11));
+        assert_eq!(buffer_cell(&buffer, 1, 1).symbol, "╔");
+        assert_eq!(buffer_cell(&buffer, 38, 1).symbol, "╗");
+        assert_eq!(buffer_cell(&buffer, 1, 11).symbol, "╚");
+        assert_eq!(buffer_cell(&buffer, 38, 11).symbol, "╝");
+        assert!(row_text(&buffer, 11).contains("ROUTE"));
+        assert!(row_text(&buffer, 12).starts_with('‖'));
+    }
+
+    #[test]
+    fn master_transport_glyphs_and_colours_are_exact() {
+        assert_eq!(
+            transport_glyph(TransportIndicator::Play),
+            (">", Color::Green)
+        );
+        assert_eq!(
+            transport_glyph(TransportIndicator::Stop),
+            ("■", Color::White)
+        );
+        assert_eq!(
+            transport_glyph(TransportIndicator::Pause),
+            ("‖", Color::White)
+        );
+        assert_eq!(
+            transport_glyph(TransportIndicator::Record),
+            ("●", Color::Red)
+        );
+        for state in [
+            TransportIndicator::Play,
+            TransportIndicator::Stop,
+            TransportIndicator::Pause,
+            TransportIndicator::Record,
+        ] {
+            assert_eq!(crate::ui_text::width(transport_glyph(state).0), 1);
+        }
+        assert_eq!(
+            transport_color(TransportIndicator::Record, Duration::ZERO),
+            Color::LightRed
+        );
+        assert_eq!(
+            transport_color(TransportIndicator::Record, Duration::from_millis(400)),
+            Color::Red
+        );
+        assert_eq!(
+            transport_color(TransportIndicator::Record, Duration::from_millis(800)),
+            Color::LightRed
+        );
     }
 
     #[test]
@@ -15246,24 +15385,47 @@ mod tests {
         assert!(output.contains("MIDI OUTPUT"));
     }
     #[test]
-    fn renders_40x20_all_screens() {
-        render(40, 20, Screen::Home);
-        render(40, 20, Screen::Presets);
-        render(40, 20, Screen::Playback);
-        render(40, 20, Screen::Ideas);
-        render(40, 20, Screen::Help);
-        render(40, 20, Screen::Tracker);
-        render(40, 20, Screen::TrackerFiles);
-        render(40, 20, Screen::TrackerArrange);
-        render(40, 20, Screen::TrackerPages);
-        render(40, 20, Screen::TrackerTools);
-        render(40, 20, Screen::TrackerLoop);
-        render(40, 20, Screen::TrackerLoopAlign);
-        render(40, 20, Screen::AudioRecorder);
-        render(40, 20, Screen::FxRack);
-        render(40, 20, Screen::FxEditor);
-        render(40, 20, Screen::Meter);
-        render(40, 20, Screen::Routing);
+    fn renders_40x13_all_screens() {
+        render(40, 13, Screen::Home);
+        render(40, 13, Screen::Presets);
+        render(40, 13, Screen::Playback);
+        render(40, 13, Screen::Ideas);
+        render(40, 13, Screen::Help);
+        render(40, 13, Screen::Tracker);
+        render(40, 13, Screen::TrackerFiles);
+        render(40, 13, Screen::TrackerArrange);
+        render(40, 13, Screen::TrackerPages);
+        render(40, 13, Screen::TrackerTools);
+        render(40, 13, Screen::TrackerLoop);
+        render(40, 13, Screen::TrackerLoopAlign);
+        render(40, 13, Screen::AudioRecorder);
+        render(40, 13, Screen::FxRack);
+        render(40, 13, Screen::FxEditor);
+        render(40, 13, Screen::Meter);
+        render(40, 13, Screen::Routing);
+    }
+
+    #[test]
+    fn every_working_screen_owns_the_final_status_row() {
+        let p = presets();
+        for screen in Screen::ALL
+            .into_iter()
+            .filter(|screen| *screen != Screen::Home)
+        {
+            let mut a = app(&p);
+            a.screen = screen;
+            let buffer = render_app(&mut a, 40, 13);
+            let expected = if screen == Screen::Tracker {
+                '‖'
+            } else {
+                '■'
+            };
+            assert!(
+                row_text(&buffer, 12).starts_with(expected),
+                "{} did not preserve the shared status row",
+                screen.label()
+            );
+        }
     }
 
     #[test]
@@ -15728,7 +15890,7 @@ mod tests {
     }
 
     #[test]
-    fn every_populated_context_and_controller_page_renders_at_40x20() {
+    fn every_populated_context_and_controller_page_renders_at_40x13() {
         let config = RuntimeConfig::default();
         for scenario in ScreenshotScenario::ALL {
             let mut a = screenshot_app(config.clone());
@@ -15740,21 +15902,21 @@ mod tests {
                 }
                 a.select_menu_page(page);
                 let frame = render_screenshot_frame(&mut a, format!("{scenario:?}-{page}"))
-                    .expect("40x20 context must render");
-                assert_eq!(frame.cells.len(), 40 * 20);
+                    .expect("40x13 context must render");
+                assert_eq!(frame.cells.len(), 40 * 13);
             }
         }
     }
 
     #[test]
-    fn every_master_overlay_and_contextual_frame_renders_at_40x20() {
+    fn every_master_overlay_and_contextual_frame_renders_at_40x13() {
         let config = RuntimeConfig::default();
         for scenario in ScreenshotSpecialScenario::ALL {
             let mut app = screenshot_app(config.clone());
             configure_special_screenshot_scenario(&mut app, scenario);
             let frame = render_screenshot_frame(&mut app, format!("{scenario:?}"))
-                .expect("40x20 special scenario must render");
-            assert_eq!(frame.cells.len(), 40 * 20);
+                .expect("40x13 special scenario must render");
+            assert_eq!(frame.cells.len(), 40 * 13);
         }
     }
 
@@ -17127,12 +17289,12 @@ mod tests {
     }
 
     #[test]
-    fn forty_by_twenty_hides_empty_child_navigation_pages_and_items() {
+    fn forty_by_thirteen_hides_empty_child_navigation_pages_and_items() {
         let p = presets();
         let mut a = app(&p);
         a.screen = Screen::Playback;
         a.select_menu_page(1);
-        let backend = TestBackend::new(40, 20);
+        let backend = TestBackend::new(40, 13);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| draw(frame, &mut a)).unwrap();
         let text = terminal
@@ -17148,13 +17310,14 @@ mod tests {
         for removed in ["NAV", "IDEAS", "PRESETS", "FT2", "AUDIO"] {
             assert!(!text.contains(removed), "stale {removed}: {text}");
         }
-        assert!(text.contains("PLY"));
+        assert!(!text.contains("PLY"));
+        assert!(row_text(terminal.backend().buffer(), 12).starts_with('■'));
         assert_eq!(a.hits.menu_pages.len(), 3);
         assert_eq!(a.hits.actions.len(), 3);
     }
 
     #[test]
-    fn forty_by_twenty_tracker_uses_only_two_menu_rows_and_hides_healthy_status() {
+    fn forty_by_thirteen_tracker_places_menu_above_shared_status() {
         let p = presets();
         let mut a = app(&p);
         fill_demo_song(&mut a);
@@ -17162,18 +17325,14 @@ mod tests {
         a.current_page_mut().unwrap().target =
             PageTarget::Software(SoftwareRoute::synthv1(p[0].route_id()));
 
-        let buffer = render_app(&mut a, 40, 20);
+        let buffer = render_app(&mut a, 40, 13);
         let text = buffer_text(&buffer);
         for noise in ["AVAILABLE", "ONLINE", "CONNECTED", "IDLE"] {
             assert!(!text.contains(noise), "stale {noise}: {text}");
         }
-        let content_row = row_text(&buffer, 17);
-        assert!(
-            content_row.starts_with("P1/"),
-            "missing tracker footer: {content_row:?}"
-        );
-        assert!(row_text(&buffer, 18).contains("1:"));
-        assert!(row_text(&buffer, 19).contains('['));
+        assert!(row_text(&buffer, 10).contains("1:"));
+        assert!(row_text(&buffer, 11).contains('['));
+        assert!(row_text(&buffer, 12).starts_with('‖'));
     }
 
     #[test]
@@ -17524,7 +17683,7 @@ mod tests {
         assert!(!a.audio_recorder.status().recording);
     }
     #[test]
-    fn tracker_renders_the_three_factory_page_names_and_compact_stop_label() {
+    fn tracker_renders_the_three_factory_page_names_and_compact_pause_label() {
         let p = presets();
         let mut a = app(&p);
         a.screen = Screen::Tracker;
@@ -17532,7 +17691,7 @@ mod tests {
         let now = Instant::now();
         a.tap.tap(now);
         a.tap.tap(now + Duration::from_millis(500));
-        let b = TestBackend::new(40, 20);
+        let b = TestBackend::new(40, 13);
         let mut t = Terminal::new(b).unwrap();
         t.draw(|f| draw(f, &mut a)).unwrap();
         let text = t
@@ -17543,7 +17702,7 @@ mod tests {
             .map(|c| c.symbol.as_str())
             .collect::<String>();
         assert!(text.contains("Software Synth"));
-        assert!(text.contains("STOP"));
+        assert!(text.contains("PAUSE"));
         assert!(!text.contains("STOP/BACK"));
         assert!(!text.contains("120.0 BPM"));
         a.switch_tracker_page();
@@ -17698,12 +17857,12 @@ mod tests {
         assert_eq!(a.selected, 14);
     }
     #[test]
-    fn wheel_and_page_pad_button_clicks_work_at_40x20() {
+    fn wheel_and_page_pad_button_clicks_work_at_40x13() {
         let p = presets();
         let mut a = app(&p);
         a.screen = Screen::Presets;
         a.selected = 5;
-        let b = TestBackend::new(40, 20);
+        let b = TestBackend::new(40, 13);
         let mut t = Terminal::new(b).unwrap();
         t.draw(|f| draw(f, &mut a)).unwrap();
         assert_eq!(a.hits.actions.len(), 3);
@@ -17726,7 +17885,7 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 12,
-                row: 18,
+                row: 10,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             },
             &mut a,
@@ -17810,15 +17969,15 @@ mod tests {
             .collect::<String>();
         assert!(title.starts_with(BUILD_BADGE));
         assert!(title.contains("synthv1 · Preset 00"));
-        assert!(title.ends_with("PLY"));
+        assert!(!title.contains("PLY"));
         let left = title
             .chars()
             .position(|character| character == 's')
             .unwrap();
         let right = 40 - left - "synthv1 · Preset 00".chars().count();
         assert!(left.abs_diff(right) <= 1);
-        assert!((37..40).all(|x| b.get(x, 0).fg == Color::Green));
-        let buttons = (18..20)
+        assert!((37..40).all(|x| b.get(x, 0).symbol == " "));
+        let buttons = (17..19)
             .flat_map(|y| (0..40).map(move |x| b.get(x, y).symbol.as_str()))
             .collect::<String>();
         assert!(buttons.contains('['));
@@ -17827,13 +17986,9 @@ mod tests {
         a.recorder.start(Instant::now());
         t.draw(|f| draw(f, &mut a)).unwrap();
         let b = t.backend().buffer();
-        assert_eq!(
-            (37..40)
-                .map(|x| b.get(x, 0).symbol.as_str())
-                .collect::<String>(),
-            "REC"
-        );
-        assert!((37..40).all(|x| b.get(x, 0).fg == Color::Red));
+        assert_eq!(b.get(0, 19).symbol, "●");
+        assert!(matches!(b.get(0, 19).fg, Color::Red | Color::LightRed));
+        assert!((37..40).all(|x| b.get(x, 0).symbol == " "));
     }
 
     #[test]
@@ -17991,11 +18146,11 @@ mod tests {
     }
 
     #[test]
-    fn playback_aligns_each_held_note_with_its_decimal_velocity_at_40x20() {
+    fn playback_aligns_each_held_note_with_its_decimal_velocity_at_40x13() {
         let p = presets();
         let mut a = app(&p);
         configure_screenshot(&mut a, Screen::Playback);
-        let b = TestBackend::new(40, 20);
+        let b = TestBackend::new(40, 13);
         let mut t = Terminal::new(b).unwrap();
         t.draw(|f| draw(f, &mut a)).unwrap();
         let b = t.backend().buffer();
@@ -18012,9 +18167,9 @@ mod tests {
             ),
             (" D  F#   A ".into(), "100 92  104".into(),)
         );
-        assert!(row(11).contains(" D  F#   A "));
-        assert!(row(12).contains("100 92  104"));
-        assert!((0..40).all(|x| b.get(x, 14).symbol == "█"));
+        assert!(row(8).contains(" D  F#   A "));
+        assert!(row(9).contains("100 92  104"));
+        assert!(row(12).starts_with('■'));
     }
 
     #[test]
@@ -18050,32 +18205,36 @@ mod tests {
         for note in [60, 64, 66, 67] {
             a.held_notes.observe(&[0x90, note, 100]);
         }
-        let b = TestBackend::new(40, 20);
+        let b = TestBackend::new(40, 2);
         let mut t = Terminal::new(b).unwrap();
-        t.draw(|f| draw(f, &mut a)).unwrap();
+        t.draw(|f| {
+            let area = f.size();
+            draw_playback_keyboard(f, &a, area);
+        })
+        .unwrap();
         let b = t.backend().buffer();
 
         // Every column is a white-key column; octave boundaries have no gaps.
-        assert!((0..40).all(|x| b.get(x, 14).symbol == "█"));
-        assert_eq!(b.get(6, 13).symbol, "█"); // B2
-        assert_eq!(b.get(7, 13).symbol, "└"); // C3 immediately follows
+        assert!((0..40).all(|x| b.get(x, 1).symbol == "█"));
+        assert_eq!(b.get(6, 0).symbol, "█"); // B2
+        assert_eq!(b.get(7, 0).symbol, "└"); // C3 immediately follows
 
         // C4: the white natural region and lower block are red, not its └ stroke.
-        assert_eq!(b.get(14, 13).symbol, "└");
-        assert_eq!(b.get(14, 13).fg, Color::Black);
-        assert_eq!(b.get(14, 13).bg, Color::Red);
-        assert_eq!(b.get(14, 14).fg, Color::Red);
+        assert_eq!(b.get(14, 0).symbol, "└");
+        assert_eq!(b.get(14, 0).fg, Color::Black);
+        assert_eq!(b.get(14, 0).bg, Color::Red);
+        assert_eq!(b.get(14, 1).fg, Color::Red);
 
         // E4 has no sharp above it, so both complete blocks are red.
-        assert_eq!(b.get(16, 13).symbol, "█");
-        assert_eq!(b.get(16, 13).fg, Color::Red);
-        assert_eq!(b.get(16, 14).fg, Color::Red);
+        assert_eq!(b.get(16, 0).symbol, "█");
+        assert_eq!(b.get(16, 0).fg, Color::Red);
+        assert_eq!(b.get(16, 1).fg, Color::Red);
 
         // F#4 colours only the └ foreground; the unplayed F stays white.
-        assert_eq!(b.get(17, 13).symbol, "└");
-        assert_eq!(b.get(17, 13).fg, Color::Red);
-        assert_eq!(b.get(17, 13).bg, Color::White);
-        assert_eq!(b.get(17, 14).fg, Color::White);
+        assert_eq!(b.get(17, 0).symbol, "└");
+        assert_eq!(b.get(17, 0).fg, Color::Red);
+        assert_eq!(b.get(17, 0).bg, Color::White);
+        assert_eq!(b.get(17, 1).fg, Color::White);
     }
 
     #[test]
@@ -20279,10 +20438,10 @@ mod tests {
 
         assert_eq!(b.get(12, 1).bg, Color::Indexed(234));
         assert_eq!(b.get(12, 2).bg, Color::Indexed(234));
-        assert_eq!(b.get(12, 16).bg, Color::Indexed(234));
+        assert_eq!(b.get(12, 15).bg, Color::Indexed(234));
         assert_eq!(b.get(3, 1).bg, Color::Black);
         assert_eq!(b.get(3, 2).bg, Color::Black);
-        assert_eq!(b.get(3, 16).bg, Color::Black);
+        assert_eq!(b.get(3, 15).bg, Color::Black);
         assert_eq!(b.get(12, 6).bg, Color::Yellow);
         assert_eq!(b.get(3, 6).bg, Color::DarkGray);
     }

@@ -17,7 +17,7 @@ configuration, or the architecture contracts.
 - [Using SHR-DAW](USING_SHR_DAW.md) — instruments, screens, MIDI Ideas,
   source/aux/master effects, performance meters, recording, and commands.
 - [Complete screen and menu manual](MENU_MANUAL.md) — 95 deterministic images
-  covering every populated 40×20 screen, contextual editor, and controller
+  covering every populated 40×13 screen, contextual editor, and controller
   menu page, with explanations.
 - [In-app help](HELP.md) — the compact help text shown by `?` or F1.
 - [Tracker guide](TRACKER.md) — FT2 editing, pages, routing, Arrangement,

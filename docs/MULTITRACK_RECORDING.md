@@ -85,10 +85,15 @@ new `capture.track` lines exist, the first legacy pair becomes one armed linked
 left/right pair in memory. Existing stereo recording configuration therefore
 continues to produce two synchronized mono stems in one take directory.
 
-## The 40×20 workflow
+## The 40×13 workflow
 
 Open **AUDIO**. The list shows an arm dot, track number, label, and `ready` or
 `missing`. Only the selected track has a compact level readout.
+
+The body ends above the two controller rows. The final terminal row is the
+shared status row; its first cell is steady white `■` while stopped or a red
+`●` pulsing only between normal and bright red while a take is active. Useful
+recorder state or faults may follow after one space.
 
 - **RECORD:** `RECORD` starts/stops the synchronized take; `ARM` toggles the
   selected track.

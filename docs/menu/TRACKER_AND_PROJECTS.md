@@ -13,6 +13,10 @@ channel, bank, and program.
 The screenshots use a populated demonstration Project. External routes are
 shown as offline where no actual device was opened for documentation.
 
+At native 40×13 the Pattern body and compact page/lane footer end above the two
+controller rows. The final row is the shared status row, so the tracker header
+does not add a second `PLY`/`REC` label.
+
 ## FT2 Pattern — Play mode
 
 Turn the main encoder to select the previous or next column, including across
@@ -34,12 +38,13 @@ cell cursor and highlighted row remain the next edit/play location.
 
 `PAGE`, `PATTERN`, `SONG`, and `ROUTE` open the reusable centered overlay while
 the Pattern remains visible around it. Turn the master rotary or use Up/Down;
-click/Enter selects. Only the highlighted launcher remains on the bottom row in
-its original physical position. Press that same menu item, or keyboard Back/
+click/Enter selects. Only the highlighted launcher remains on the overlay's
+bottom border near its original physical position; the final row remains the
+shared status row. Press that same menu item, or keyboard Back/
 Esc, to close. There is no extra controller Back item.
 
-On 40×20 the outer border is 38×18 at `(1,1)` and its usable inner content is
-36×16 at `(2,2)`.
+On 40×13 the outer border is 38×11 at `(1,1)` and its usable inner content is
+36×9 at `(2,2)`.
 
 ![PAGE overlay over the unchanged FT2 Pattern](../images/menu/overlay-ft2-page.png)
 

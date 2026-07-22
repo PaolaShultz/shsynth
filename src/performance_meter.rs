@@ -22,8 +22,15 @@ pub enum MeterColor {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BarCell {
-    pub symbol: char,
     pub color: MeterColor,
+    pub state: LedState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LedState {
+    Off,
+    Level,
+    Peak,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -136,8 +143,12 @@ pub fn cpu_bar(width: usize, percent: f32) -> Vec<BarCell> {
         .map(|index| {
             let scale_value = 100.0 * (index + 1) as f32 / width.max(1) as f32;
             BarCell {
-                symbol: if index < filled { '█' } else { '·' },
                 color: cpu_color(scale_value),
+                state: if index < filled {
+                    LedState::Level
+                } else {
+                    LedState::Off
+                },
             }
         })
         .collect()
@@ -159,14 +170,14 @@ pub fn audio_bar(width: usize, rms_dbfs: f32, peak_dbfs: f32) -> Vec<BarCell> {
             let scale_value =
                 AUDIO_FLOOR_DBFS + -AUDIO_FLOOR_DBFS * (index + 1) as f32 / width.max(1) as f32;
             BarCell {
-                symbol: if Some(index) == peak {
-                    '│'
-                } else if index < filled {
-                    '█'
-                } else {
-                    '·'
-                },
                 color: audio_color(scale_value),
+                state: if Some(index) == peak {
+                    LedState::Peak
+                } else if index < filled {
+                    LedState::Level
+                } else {
+                    LedState::Off
+                },
             }
         })
         .collect()
@@ -501,8 +512,11 @@ cpu3 35 0 55 390 0 0 0 0 0 0\n";
         assert!((level_dbfs(2.0) - 6.0206).abs() < 0.001);
         assert!(audio_bar(20, AUDIO_FLOOR_DBFS, AUDIO_FLOOR_DBFS)
             .iter()
-            .all(|cell| cell.symbol == '·'));
-        assert_eq!(audio_bar(20, -6.0, 0.0).last().unwrap().symbol, '│');
+            .all(|cell| cell.state == LedState::Off));
+        assert_eq!(
+            audio_bar(20, -6.0, 0.0).last().unwrap().state,
+            LedState::Peak
+        );
 
         let now = Instant::now();
         let mut meter = PerformanceMeter::default();

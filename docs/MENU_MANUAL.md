@@ -1,6 +1,6 @@
 # Screen and menu manual
 
-This is the visual guide to SHR-DAW's current 40×20 workspaces, contextual
+This is the visual guide to SHR-DAW's current 40×13 workspaces, contextual
 screens, editors, and master overlays. The current controller map is
 authoritative in [Controller interface](CONTROLLER_INTERFACE.md). Screenshots
 are drawn by the real Rust UI from
@@ -23,9 +23,9 @@ The manual is split into three chapters so it remains usable on a phone:
 
 ## How to read a screen
 
-Each screenshot is a 40-column by 20-row terminal image. It is first rendered
-as a native 480×320 bitmap using the project VGA console font, then enlarged to
-960×640 by copying every pixel into an exact 2×2 square. There is no font
+Each screenshot is a 40-column by 13-row terminal image. It is first rendered
+as a native 480×208 bitmap using the project VGA console font, then enlarged to
+960×416 by copying every pixel into an exact 2×2 square. There is no font
 substitution, smoothing, interpolation, or antialiasing.
 
 The normal bottom controller strip has four page positions and four action
@@ -47,17 +47,26 @@ positions:
   unrelated synth or JACK client.
 
 A master overlay temporarily changes that strip. The caller remains visible
-around a centered double border, but row 19 shows only the highlighted action
-that opened the overlay, in its original physical item position. That same menu
+around a centered double border, whose bottom edge shows only the highlighted
+action that opened the overlay near its original physical item position. The
+final row remains the shared status row. That same menu
 item closes it; there is no fourth-button Back item. The rotary and Up/Down
 browse, click/Enter selects or confirms, and Back/Esc cancels the current field
 before cancelling and closing the overlay. Unconfirmed drafts never save on
-close. On the native 40×20 display the outer rectangle is 38×18 at `(1,1)` and
-the usable inner area is 36×16 at `(2,2)`.
+close. On the native 40×13 display the outer rectangle is 38×11 at `(1,1)` and
+the usable inner area is 36×9 at `(2,2)`.
 
 The yellow page name at the bottom is the page currently selected. The yellow
-bracketed numbers below the actions are the physical item positions. Status
-text and colors above the strip belong to the active screen.
+bracketed numbers below the actions are the physical item positions. The shared
+status row is always the final row on working screens.
+
+That row begins with exactly one transport cell: steady green `>` for play,
+steady white `■` for stop, steady white `‖` for pause, or red `●` for record.
+Record alone pulses between red and bright red without hiding the circle. Any
+text after one space is current useful state or a fault, not filler. Horizontal
+meters use only circular `●` LEDs: dark gray when unlit, one consistent green
+for safe active cells, yellow/red only at active thresholds, and a brighter
+circle in the same threshold colour for a held peak.
 
 ## Screen flow
 

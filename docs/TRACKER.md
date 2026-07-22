@@ -4,6 +4,12 @@ The FT2 screen is a vertical MIDI pattern sequencer. Its quick, top-to-bottom
 editing style is inspired by FastTracker II, but SHR-DAW is not an FT2 clone.
 It does not use FT2 code or read XM files.
 
+On the native 40×13 display, the FT2 body and its own compact page/lane footer
+end above the two controller rows. Row 13 is the shared working-screen status
+row: steady green `>` for play, steady white `■` for stop, steady white `‖` for
+pause, or a `●` that pulses only between red and bright red for record. The
+tracker header does not repeat `PLY` or `REC` state beside the Project title.
+
 ## Modes
 
 The normal FT2 screen has **PLAY**, real-time **REC**, and detailed
@@ -122,8 +128,8 @@ device profile, plus all four columns' channel, bank, program/instrument name,
 and interface availability. Turn and click/Enter to activate a
 field; Back/Esc cancels that field first. Only **APPLY ROUTING** changes the
 Project. The same highlighted ROUTE item or Back closes and cancels every
-unconfirmed change. At 40×20 the bordered outer window is 38×18 at `(1,1)` and
-the usable inner area is 36×16 at `(2,2)`.
+unconfirmed change. At 40×13 the bordered outer window is 38×11 at `(1,1)` and
+the usable inner area is 36×9 at `(2,2)`; row 13 remains the shared status row.
 
 ## Step editing
 
@@ -256,7 +262,7 @@ tempo. A loop-only Project does not start the default software synth merely
 because its blank Software Synth page exists. The loop player requires the JACK
 server sample rate to match the WAV
 sample rate. For a 44.1 kHz loop, configure/restart JACK at 44100 Hz before
-loading it. A bounded 5 ms fade is applied at cut/loop edges. The 40×20 screen
+loading it. A bounded 5 ms fade is applied at cut/loop edges. The 40×13 screen
 shows text for filename, BPMs, region, state, elapsed/total time, rate, and
 channels. A decoded loop is limited to 6,000,000 frames (about 125 seconds at
 48 kHz) so one imported file cannot exhaust Raspberry Pi memory.

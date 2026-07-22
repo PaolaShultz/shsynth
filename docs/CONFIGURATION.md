@@ -469,9 +469,11 @@ chooses 1–16. Encoder press confirms a field. **DONE** keeps all page changes;
 controls edit the selected column. In a target/channel chooser, **CONFIRM**
 keeps that field and **EXIT** cancels it.
 
-FT2 **SELECT** → **ROUTE** is the passive quick editor. Its 38×18 bordered overlay
+FT2 **SELECT** → **ROUTE** is the passive quick editor. Its 38×11 bordered overlay
 shows `TARGET`, `ENGINE`, `INSTR`, `MIDI OUT`, optional `PROFILE`, and the 16
-per-column channel/bank/program rows in a scrolling 36×16 content area. Opening and browsing use cached discovery information;
+per-column channel/bank/program rows in a scrolling 36×9 content area. The
+overlay begins at `(1,1)`, its content begins at `(2,2)`, and the final terminal
+row remains the shared status row. Opening and browsing use cached discovery information;
 they do not create a MIDI discovery client, send MIDI, synchronize routes, or
 start an engine. A field changes only after click/Enter activates it. Back/Esc
 cancels that field first. **APPLY ROUTING** validates and copies the detached

@@ -1980,9 +1980,9 @@ pub struct SequencerStatus {
     pub fallbacks: BTreeMap<PageTarget, String>,
 }
 enum Transport {
-    Play(Song, usize, usize),
+    Play(u64, Song, usize, usize),
     RefreshLoop(Song),
-    Stop,
+    Stop(u64),
     Mute(usize, bool),
     Thru(PageTarget, Vec<u8>),
     CancelThru(PageTarget, u8),
@@ -2035,13 +2035,18 @@ impl Sequencer {
         }
     }
     pub fn play(&self, song: &Song, order: usize, row: usize) {
-        if let Ok(mut status) = self.status.lock() {
+        let generation = if let Ok(mut status) = self.status.lock() {
             status.playing = true;
             status.order = order;
             status.row = row;
             status.generation = status.generation.wrapping_add(1);
-        }
-        let _ = self.tx.send(Transport::Play(song.clone(), order, row));
+            status.generation
+        } else {
+            0
+        };
+        let _ = self
+            .tx
+            .send(Transport::Play(generation, song.clone(), order, row));
     }
     /// Replace the material used at the next loop boundary without disturbing
     /// the cycle that is currently sounding.
@@ -2054,10 +2059,14 @@ impl Sequencer {
         }
     }
     pub fn stop(&self) {
-        if let Ok(mut status) = self.status.lock() {
+        let generation = if let Ok(mut status) = self.status.lock() {
             status.playing = false;
-        }
-        let _ = self.tx.send(Transport::Stop);
+            status.generation = status.generation.wrapping_add(1);
+            status.generation
+        } else {
+            0
+        };
+        let _ = self.tx.send(Transport::Stop(generation));
     }
     pub fn mute(&self, track: usize, muted: bool) {
         let _ = self.tx.send(Transport::Mute(track, muted));
@@ -2119,7 +2128,7 @@ fn run_transport(
             .unwrap_or(Duration::from_millis(50))
             .min(Duration::from_millis(50));
         match rx.recv_timeout(timeout) {
-            Ok(Transport::Play(song, order, row)) => {
+            Ok(Transport::Play(generation, song, order, row)) => {
                 cleanup_lanes(&mut outputs, &mut active_notes);
                 note_owners.clear();
                 cleanup_thru(&mut outputs, &mut thru_notes);
@@ -2133,6 +2142,9 @@ fn run_transport(
                         repeat_messages.clear();
                         transport_targets.clear();
                         if let Ok(mut s) = status.lock() {
+                            if s.generation != generation {
+                                continue;
+                            }
                             s.playing = false;
                             s.targets.clear();
                             s.fallbacks.clear();
@@ -2169,6 +2181,9 @@ fn run_transport(
                     }
                 }
                 if let Ok(mut s) = status.lock() {
+                    if s.generation != generation {
+                        continue;
+                    }
                     s.playing = true;
                     s.order = order;
                     s.row = row;
@@ -2193,7 +2208,7 @@ fn run_transport(
                     }
                 }
             },
-            Ok(Transport::Stop) => {
+            Ok(Transport::Stop(generation)) => {
                 clock.stop();
                 messages.clear();
                 repeat_messages.clear();
@@ -2207,7 +2222,9 @@ fn run_transport(
                     }
                 }
                 if let Ok(mut s) = status.lock() {
-                    s.playing = false;
+                    if s.generation == generation {
+                        s.playing = false;
+                    }
                 }
             }
             Ok(Transport::Mute(lane, value)) => {

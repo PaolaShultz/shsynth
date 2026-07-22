@@ -395,7 +395,7 @@ Options:
 
 - no option renders every frame returned by the Rust manifest;
 - `--only NAME` renders only an exact output name from that manifest;
-- `--check` requires every manifest image, verifies 960×640 dimensions, and
+- `--check` requires every manifest image, verifies 960×416 dimensions, and
   checks every 2×2 output block for identical pixels.
 
 Environment:
@@ -406,7 +406,7 @@ Environment:
 
 The default command uses the installed Rust 1.85 toolchain when present and
 runs `shr screenshots`. Rust renders the real application `draw` function into
-40×20 ratatui test buffers seeded by the deterministic `ScreenshotScenario`
+40×13 ratatui test buffers seeded by the deterministic `ScreenshotScenario`
 and `ScreenshotSpecialScenario` fixtures in `src/ui.rs`. The current manifest
 contains 105 overview/menu/context/overlay frames. JSON supplies
 each cell's symbol, foreground,
@@ -415,11 +415,11 @@ file is involved.
 
 ### Image parameters
 
-- terminal geometry: 40 columns × 20 rows;
+- terminal geometry: 40 columns × 13 rows;
 - cell geometry: 12×16 pixels;
-- native raster: 480×320 pixels;
+- native raster: 480×208 pixels;
 - final scale: exactly 2;
-- final PNG: 960×640 pixels;
+- final PNG: 960×416 pixels;
 - primary font: `/usr/share/consolefonts/Lat15-VGA16.psf.gz`;
 - fallback font: `target/Lat15-VGA16.psf`;
 - output roots: `docs/images/shr-daw-*.png` and `docs/images/menu/*.png`.
@@ -428,7 +428,10 @@ The PSF glyph is eight bits wide. Each 12-pixel cell column samples it with
 `source_x = out_x * 8 // 12`, matching the established wide terminal look.
 Ratatui's ANSI colors and bold modifier are converted through a fixed palette.
 Unsupported Unicode falls back to the font's question-mark glyph instead of a
-host-dependent replacement.
+host-dependent replacement. The font contains the required double-vertical
+pause shape at U+2551 but has no U+2016 table entry, so the renderer maps the
+TUI's exact one-cell `‖` symbol to that existing glyph. It does not substitute a
+different TUI symbol or font.
 
 ### Why the renderer is intentionally slow
 
@@ -437,7 +440,7 @@ into an exact 2×2 square. A library resize could be faster, but the explicit
 operation makes the contract obvious in code and cannot silently acquire
 interpolation, antialiasing, color blending, or a version-dependent sampling
 rule. This preserves the pixel font and makes mobile/browser display crisp
-without pretending the application has more than 40×20 cells.
+without pretending the application has more than 40×13 cells.
 
 `--check` is also deliberately exhaustive. It opens every expected image and
 checks every 2×2 block instead of trusting file metadata or the name of a resize

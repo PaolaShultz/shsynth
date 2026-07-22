@@ -302,9 +302,9 @@ clip, and non-finite state through atomics. They do not observe the separate
 loop client, recorder capture, hardware, or unrelated JACK clients. The MTR
 keeps its non-decaying numeric L/R maxima entirely in UI presentation state;
 the audio callback continues to publish only the bounded lock-free snapshots.
-The bar's short peak marker retains its existing hold and decay behavior. The
-numeric maxima reset on MTR RESET, every downward mapped synthv1 Volume movement
-even before pickup, and meter/engine session boundaries. The MTR
+The bar's brighter circular peak LED retains its existing hold and decay
+behavior. The numeric maxima reset on MTR RESET, every downward mapped synthv1
+Volume movement even before pickup, and meter/engine session boundaries. The MTR
 CPU bars are whole-core `/proc/stat` load and deliberately cannot diagnose
 per-process DSP cost, callback deadlines, scheduling jitter, or xruns; those
 belong to the explicit checkpoint counters and JACK evidence.

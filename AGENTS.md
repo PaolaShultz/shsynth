@@ -60,17 +60,39 @@ or any other audible or hardware-changing test without explicit permission.
 
 ## Product and development
 
-SHR-DAW is a responsive 40×20 Raspberry Pi mini DAW with a Rust TUI, FT2-style
+SHR-DAW is a responsive 40×13 Raspberry Pi mini DAW with a Rust TUI, FT2-style
 tracker, synth hosts, MIDI routing, loops, recording, JACK/ALSA integration,
 and a small controller. Keep live-audio paths bounded and responsive.
 
-Treat the 40×20 display as content-first. The shared controller menu may use
-two rows; do not add another persistent status, help, header, or footer row
-unless the user requests it or it reports an actionable fault. Omit healthy or
-obvious labels such as `AVAILABLE`, `ONLINE`, `CONNECTED`, and `IDLE`; assume
-the musician understands the current screen and controls. Keep navigation
-actions literal: changing a page or order must preserve the selected
+Treat the 40×13 display as content-first and do not change its established TTY
+font. Home is the only screen without the shared working-screen layout. Every
+other screen reserves row 13, the final terminal row, for one shared status
+renderer. The two controller rows sit immediately above it. Screen bodies,
+screen-specific footers, overlays, and later cleanup passes must not draw or
+clear the final row. Remove or fold redundant gray status-like lines in screen
+bodies instead of stacking local commentary above the shared status row. Omit
+healthy or obvious labels such as `AVAILABLE`, `ONLINE`, `CONNECTED`, and
+`IDLE`; assume the musician understands the current screen and controls. Keep
+navigation actions literal: changing a page or order must preserve the selected
 lane/column/cursor unless the requested behavior explicitly says otherwise.
+
+The status row begins with exactly one transport cell. Use `>` in steady green
+for play, `■` in steady white for stop, `‖` in steady white for pause, and
+`●` in red for record. Record is the only transport state that pulses: alternate
+normal and bright red without ever hiding or replacing the circle. After one
+space, show only current, useful state or fault text; do not invent per-screen
+gray messages merely to fill the row.
+
+All horizontal LED meters use the existing one-cell `●` glyph, never square bar
+glyphs. Unlit LEDs are dark gray. Lit safe LEDs use one consistent green;
+yellow and red appear only at their documented active thresholds. A held peak
+may use a brighter version of the same threshold colour, but not a different
+shape. The startup splash uses three identical circular-LED rows per channel.
+
+Master overlays preserve a one-cell reveal on the left, right, top, and bottom.
+Their launcher stays inside the overlay border; the bottom reveal remains the
+shared status row. Overlays own transient selection only and do not move,
+replace, or clear that row.
 
 Use the installed Rust 1.85 toolchain because the system Cargo may be too old:
 

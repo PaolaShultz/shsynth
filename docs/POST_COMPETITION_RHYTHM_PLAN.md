@@ -254,7 +254,7 @@ format migrations even if the swing UI lands in a later commit.
 - No shifted message escapes its Pattern or produces a stuck note.
 - Copy/paste, transpose, drum load/save, clone, preview, and Arrangement retain
   timing values.
-- The 40×20 grid exposes a compact timing marker without making ordinary notes
+- The 40×13 grid exposes a compact timing marker without making ordinary notes
   unreadable.
 
 Estimated effort: **4–7 focused days**.
@@ -450,7 +450,7 @@ Also run targeted tests for:
 - note ownership, gate, mute, stop, panic, and target failure;
 - MIDI clock and live tempo changes;
 - loop clock continuity where applicable;
-- controller navigation at 40×20; and
+- controller navigation at 40×13; and
 - arbitrary-length copy, paste, clone, load, save, preview, and REC wrap.
 
 Release-mode Pi checks should record timing results and hardware configuration.

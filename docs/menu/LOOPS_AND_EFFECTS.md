@@ -13,8 +13,8 @@ A Project may attach one privately imported mono or stereo WAV. Import copies
 the selected inbox file beneath the user's SHR-DAW data directory. The player
 uses native pitch and requires the WAV sample rate to match JACK; it does not
 time-stretch or pitch-shift audio to force a fit. The normal screen's stereo
-`LOOP OUT` bars show smoothed RMS, a short peak marker, independent session
-`MAX` values, and clip state for this WAV alone. They are deterministic preview
+`LOOP OUT` circular-LED bars show smoothed RMS, a brighter held peak,
+independent session `MAX` values, and clip state for this WAV alone. They are deterministic preview
 values in the screenshots below, not a live JACK measurement.
 
 The meter tap is after the chosen region, interpolation, transport gate, and
@@ -169,7 +169,7 @@ values without changing the processor type.
 ## FX parameter editor
 
 Parameters come from strict persisted schemas, while each effect has a curated
-performance layout of at most eight controls. At 40×20 those controls form two
+performance layout of at most eight controls. At 40×13 those controls form two
 rows of four columns that mirror the physical rotary positions. Each cell has
 the parameter title above its type-aware value; clear names such as `RATE`,
 `RATIO`, `ATTACK`, and `FEEDBACK` replace cryptic three-letter labels. Toggles

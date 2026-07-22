@@ -57,13 +57,13 @@ future features. `?` and F1 already open Help.
 
 ## Terminal size
 
-SHR-DAW is designed for a 40×20 terminal. It adapts to the terminal cell size
+SHR-DAW is designed for a 40×13 terminal. It adapts to the terminal cell size
 and reports when the window is too small. The installer does not change the
 font, desktop, display resolution, or fullscreen settings.
 
 Pixel resolution does not determine the number of terminal cells by itself.
 The terminal program, font, scaling, window borders, and fullscreen state all
-matter. Change those settings yourself if fewer than 40 columns or 20 rows fit.
+matter. Change those settings yourself if fewer than 40 columns or 13 rows fit.
 
 ## Run from a development checkout
 

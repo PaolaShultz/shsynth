@@ -217,7 +217,7 @@ not in this future-work page.
 The choices still open here are genuinely future ones: how independently owned
 loop, live-input, and hardware-return sources become mixer strips; how
 monitoring and recording taps remain unambiguous; whether external hardware
-inserts are safe and worthwhile; and how a validated free-wiring UI fits 40×20.
+inserts are safe and worthwhile; and how a validated free-wiring UI fits 40×13.
 Chain order, bypass/tails, client loss, Project migration, and publication must
 retain the current safety guarantees during that expansion. Objective DSP and
 performance measurements can establish engineering fitness, but final
@@ -265,7 +265,7 @@ rather than promising latency in advance.
 - Bypass and shutdown are click-conscious and release every owned JACK resource.
 - Project/config migration is versioned and atomic; unknown newer formats are
   refused.
-- The 40×20 workflow exposes only the controls needed to understand and perform
+- The 40×13 workflow exposes only the controls needed to understand and perform
   the chain.
 - Free-wiring publication is transactional: validate the complete graph first,
   then connect it without leaving a partial, cyclic, or doubled route.

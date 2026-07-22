@@ -1,7 +1,7 @@
 
 <img src="docs/images/shr-daw-header.jpg" alt="SHR-DAW" width="100%">
 
-SHR-DAW is a compact Raspberry Pi music workstation for a 40×20 terminal,
+SHR-DAW is a compact Raspberry Pi music workstation for a 40×13 terminal,
 optional MIDI gear, software instruments, FT2-style sequencing, WAV loops,
 effects, and JACK recording.
 
@@ -60,7 +60,7 @@ Browse the separate synthv1, Yoshimi, and FluidSynth catalogs.
 
 ### Playback
 
-<img src="docs/images/shr-daw-playback.png" alt="Playback screen with held notes, velocities, keyboard state, and mapped controls" width="100%">
+<img src="docs/images/shr-daw-playback.png" alt="Playback screen with held notes, velocities, and mapped controls" width="100%">
 
 Play the loaded sound, inspect notes and chords, shape mapped controls, and
 capture MIDI Ideas.

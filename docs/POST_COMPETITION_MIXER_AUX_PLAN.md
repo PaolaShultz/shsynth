@@ -177,7 +177,7 @@ newer formats and malformed source bindings remain non-overwriting failures.
 ### 3. Compact mixer and aux UI
 
 - Add a `MIX` screen that selects a strip, AUX 1, AUX 2, or MASTER within the
-  40x20 and four-page controller contract.
+  40×13 and four-page controller contract.
 - Show strip source/name, pre/post level, pan, mute/solo, and both send levels.
 - Show each aux's wet-only status, return level/mute, and return meter.
 - Keep the existing FX editor as the chain editor for the selected strip/bus;

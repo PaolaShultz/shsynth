@@ -1,4 +1,4 @@
-use crate::performance_meter::{self, BarCell, MeterColor};
+use crate::performance_meter::{self, BarCell, LedState, MeterColor};
 use ratatui::{
     backend::Backend,
     layout::{Alignment, Rect},
@@ -9,7 +9,7 @@ use ratatui::{
 };
 use std::time::Duration;
 
-pub const MINIMUM_VISIBLE: Duration = Duration::from_millis(900);
+pub const MINIMUM_VISIBLE: Duration = Duration::from_secs(2);
 pub const INPUT_RESCAN_INTERVAL: Duration = Duration::from_millis(500);
 
 pub const fn qualified_input_available(terminal_keyboard: bool, midi_input: bool) -> bool {
@@ -32,44 +32,40 @@ fn styled_bar(cells: &[BarCell]) -> Vec<Span<'static>> {
     cells
         .iter()
         .map(|cell| {
+            let active = cell.state != LedState::Off;
             Span::styled(
-                cell.symbol.to_string(),
+                "●",
                 Style::default()
-                    .fg(meter_color(cell.color))
-                    .add_modifier(if cell.symbol == '·' {
-                        Modifier::empty()
+                    .fg(if active {
+                        meter_color(cell.color)
                     } else {
+                        Color::DarkGray
+                    })
+                    .add_modifier(if active {
                         Modifier::BOLD
+                    } else {
+                        Modifier::empty()
                     }),
             )
         })
         .collect()
 }
 
-fn animated_level(elapsed: Duration, channel: usize) -> (f32, f32) {
-    // Fixed envelopes keep the animation deterministic while giving the two
-    // channels different, musical-looking attack and release movement.
-    const LEFT: [f32; 16] = [
+fn animated_level(elapsed: Duration) -> f32 {
+    // One deterministic envelope keeps the decorative channels coherent. The
+    // splash previews the LED language; it does not pretend to meter audio.
+    const LEVELS: [f32; 16] = [
         -36.0, -31.0, -22.0, -15.0, -8.5, -5.0, -11.0, -18.0, -13.0, -7.0, -2.4, -9.0, -17.0,
         -24.0, -19.0, -12.0,
     ];
-    const RIGHT: [f32; 16] = [
-        -30.0, -24.0, -18.0, -11.0, -6.5, -13.0, -20.0, -15.0, -9.0, -4.0, -8.0, -14.0, -10.0,
-        -3.0, -12.0, -21.0,
-    ];
     let frame = (elapsed.as_millis() / 85) as usize;
-    let rms = if channel == 0 {
-        LEFT[frame % LEFT.len()]
-    } else {
-        RIGHT[frame % RIGHT.len()]
-    };
-    (rms, (rms + 6.0).min(-0.2))
+    LEVELS[frame % LEVELS.len()]
 }
 
-fn thick_meter(label: char, width: u16, elapsed: Duration, channel: usize) -> Vec<Spans<'static>> {
+fn thick_meter(label: char, width: u16, elapsed: Duration) -> Vec<Spans<'static>> {
     let bar_width = usize::from(width.saturating_sub(4)).max(1);
-    let (rms, peak) = animated_level(elapsed, channel);
-    let cells = performance_meter::audio_bar(bar_width, rms, peak);
+    let rms = animated_level(elapsed);
+    let cells = performance_meter::audio_bar(bar_width, rms, performance_meter::AUDIO_FLOOR_DBFS);
     (0..3)
         .map(|row| {
             let mut spans = vec![Span::styled(
@@ -136,11 +132,11 @@ pub fn draw<B: Backend>(
     let right_y = left_y.saturating_add(4);
     let meter_width = area.width.saturating_sub(2);
     frame.render_widget(
-        Paragraph::new(thick_meter('L', meter_width, elapsed, 0)),
+        Paragraph::new(thick_meter('L', meter_width, elapsed)),
         meter_area(area, left_y),
     );
     frame.render_widget(
-        Paragraph::new(thick_meter('R', meter_width, elapsed, 1)),
+        Paragraph::new(thick_meter('R', meter_width, elapsed)),
         meter_area(area, right_y),
     );
 
@@ -194,7 +190,7 @@ mod tests {
     use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 
     fn render(input_available: bool) -> Buffer {
-        let backend = TestBackend::new(40, 20);
+        let backend = TestBackend::new(40, 13);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
@@ -235,22 +231,27 @@ mod tests {
     }
 
     #[test]
-    fn splash_renders_thick_stereo_meters_with_real_vu_colours() {
+    fn splash_renders_three_circular_led_rows_per_channel_at_40x13() {
         let buffer = render(true);
         let output = text(&buffer);
         assert!(output.contains("DEV · SHR-DAW"));
-        assert!(output.contains("STEREO VU · STARTUP"));
         assert!(output.contains("L ["));
         assert!(output.contains("R ["));
         assert!(output.contains("LOADING"));
 
-        for rows in [5..8, 9..12] {
+        for rows in [1..4, 5..8] {
             for y in rows {
-                let coloured = (0..40).map(|x| buffer.get(x, y).fg).collect::<Vec<Color>>();
-                assert!(coloured.contains(&Color::Green));
-                assert!(coloured.contains(&Color::LightYellow));
-                assert!(coloured.contains(&Color::Red));
+                let symbols = (0..40)
+                    .map(|x| buffer.get(x, y).symbol.as_str())
+                    .collect::<String>();
+                assert!(symbols.contains('●'));
+                assert!(!symbols.contains('█'));
+                assert!(!symbols.contains('│'));
             }
+        }
+        for x in 4..38 {
+            assert_eq!(buffer.get(x, 1).symbol, buffer.get(x, 5).symbol);
+            assert_eq!(buffer.get(x, 1).fg, buffer.get(x, 5).fg);
         }
     }
 
@@ -258,7 +259,6 @@ mod tests {
     fn splash_names_missing_input_only_in_waiting_state() {
         let waiting = text(&render(false));
         assert!(waiting.contains("CONNECT KEYBOARD OR MIDI INPUT"));
-        assert!(waiting.contains("WAITING FOR Stage Keyboard"));
 
         let loading = text(&render(true));
         assert!(!loading.contains("WAITING FOR"));

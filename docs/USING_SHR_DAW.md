@@ -130,6 +130,10 @@ presentation holds, not audio state. MTR does not report callback timing or
 xruns; see [Final performance bus](FINAL_PERFORMANCE_BUS.md) for the exact
 meter, limiter, monitoring, recording, and control contract.
 
+All horizontal meters use circular `●` LEDs. Dark gray means unlit; one green
+marks safe active level; yellow and red appear only at their active thresholds;
+and a held peak is a brighter circle of the same threshold colour.
+
 ## Command line
 
 The main program also provides these commands:

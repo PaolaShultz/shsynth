@@ -34,16 +34,23 @@ interpretation.
 The controller menu has four pages. Page 1 is OPS. On child screens, page
 4 item 4 is EXIT and returns one level. Empty buttons are hidden and silent.
 
+Home is the only screen without the shared working-screen status row. On every
+other screen the two controller rows sit immediately above it. The first status
+cell is steady green `>` for play, steady white `■` for stop, steady white `‖`
+for pause, or red `●` for record; record alone pulses between red and bright
+red without hiding the circle.
+
 Four-button controllers use encoder press to enter page-select mode. Turn to
 choose a menu page, then press again to return the encoder to screen control.
 In Help, use OPS OPEN to follow the highlighted link. In target/channel
 editors, use OPS CONFIRM; SYS EXIT cancels the field.
 
 Some navigation actions open a master overlay instead of replacing the current
-workspace. The workspace remains visible around a 38×18 border; its usable
-inside is 36×16 on a 40×20 display. While the overlay is open, the bottom row
-shows only its highlighted launcher in the same physical position. Turn the
-master rotary or use Up/Down, then click or press Enter. Press that same menu
+workspace. The workspace remains visible around a 38×11 border; its usable
+inside is 36×9 on a 40×13 display. While the overlay is open, its bottom
+border shows only the highlighted launcher near the same physical position;
+the final row remains the shared status row. Turn the master rotary or use
+Up/Down, then click or press Enter. Press that same menu
 item again, or use Back/Esc, to close. The controller strip has no separate
 Back item while an overlay is open. Back first cancels an active field, then
 cancels any unconfirmed draft and closes the overlay.
@@ -66,14 +73,14 @@ jumps during live audio.
 The dots beside synthv1 values compare the current sound to the loaded preset:
 green is lower, yellow is near original, red is higher.
 
-Playback names the held chord and notes above a continuous two-row keyboard.
-Each displayed note has its decimal MIDI Note On velocity (1–127) directly
-beneath it. Use the row to practise gentle/strong strikes, even chord attacks,
-or bass-versus-chord balance. Velocity comes from MIDI and is not an audio
-volume measurement; the controller and instrument response matter.
-At 40 columns it shows C2 through G7 when middle C is C4. A red white-key area
-means its natural note is held; a red upper `└` means the following sharp is
-held. Major triads show `maj` explicitly, such as `C maj`.
+Playback names the held chord and notes, with each note's decimal MIDI Note On
+velocity (1–127) directly beneath it. Use the rows to practise gentle/strong
+strikes, even chord attacks, or bass-versus-chord balance. Velocity comes from
+MIDI and is not an audio volume measurement; the controller and instrument
+response matter. On terminals taller than the native 40×13 layout, the spare
+space adds a continuous two-row keyboard from C2 through G7 at 40 columns. A
+red white-key area means its natural note is held; a red upper `└` means the
+following sharp is held. Major triads show `maj` explicitly, such as `C maj`.
 `display.note_names=german` uses B/H spelling; `english` uses A#/B.
 
 Playback N00B toggles the filter on the existing Player screen. While on, its
@@ -116,9 +123,11 @@ the graph enabled it shows Synth, Loop, and Input readiness, level and mute;
 master level; final L/R peak and clip; limiter gain reduction; and final-record
 elapsed time, size, drop/error state, and path.
 
-Stereo bars show live smoothed RMS and a short, decaying peak marker on a −60
-to 0 dBFS scale. Each channel's `MAX` number separately holds its highest peak
-without decay. CLIP is held in red. RESET clears `MAX`, the short markers, and
+Stereo bars use circular `●` LEDs for live smoothed RMS and a brighter,
+decaying held peak on a −60 to 0 dBFS scale. Unlit circles are dark gray; safe
+active circles use one green, while yellow and red appear only at their active
+thresholds. Each channel's `MAX` number separately holds its highest peak
+without decay. CLIP is held in red. RESET clears `MAX`, the bright peaks, and
 CLIP. Any downward movement of the mapped synthv1 Volume control clears both
 `MAX` values even when pickup blocks the actual Volume change; increases,
 equal values, and other controls leave them alone. Stopped, unavailable, and
@@ -248,7 +257,7 @@ The browser does not delete WAVs.
 The loop reports READY, NOT READY, or OUTPUT FAULT. A valid decoded region
 keeps its white position bar and green playhead even during an output fault.
 
-The normal Loop screen's `LOOP OUT` bars show only that WAV after its cut,
+The normal Loop screen's circular-LED `LOOP OUT` bars show only that WAV after its cut,
 position, interpolation, transport gate, and edge fades. They do not include
 the loaded synth, effects, recorder input, hardware gain, or other JACK clients.
 

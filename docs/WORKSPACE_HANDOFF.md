@@ -22,6 +22,13 @@ corrected starting point; the current checked-progress version is `0.3.94`.
 
 The complete deterministic documentation screenshot set is reconciled to the
 current UI; physical approval remains the next gate for UI/controller work.
+The repository-only release pass on 2026-07-22 completed at package version
+`0.3.94`: all 655 tests ran with 651 passing and four intentionally ignored;
+locked check, debug, and release builds and warning-denied Clippy passed; the
+105-image screenshot set regenerated and passed its exhaustive drift check;
+and the isolated install fixture contained only the expected public package
+tree. No JACK, synth, MIDI, playback, recording, or hardware-changing test was
+started for that pass.
 
 Multiple workers use this checkout and commit their own changes independently.
 Branch tips, commit messages, and clean/dirty snapshots are intentionally not
@@ -46,11 +53,11 @@ focused provenance are in `src/dsp/`, `src/effects/`, `src/effect_schema.rs`,
 `src/main.rs`, `docs/AUDIO_GRAPH.md`, and `docs/CONFIGURATION.md`. Do not edit
 the roadmap or historical Phase 2/3/4 measurements for this work.
 
-Offline validation is coherent: the complete suite passed 648 tests with zero
-failures and four intentionally ignored private renderers; the later
-checkpoint-only diagnostic/panic change passed its focused parser test and
-`cargo check --locked`. Locked release builds succeeded. Private raw evidence
-and audition files are in the ignored
+The earlier DSP-focused offline validation was coherent: its complete suite
+passed 648 tests with zero failures and four intentionally ignored private
+renderers; the later checkpoint-only diagnostic/panic change passed its focused
+parser test and `cargo check --locked`. Locked release builds succeeded.
+Private raw evidence and audition files are in the ignored
 `user/dsp-lab/20260722T151647Z/`; do not overwrite, stage, publish, or copy that
 directory into tracked documentation.
 
@@ -184,12 +191,13 @@ hardware/JACK names change. Read `docs/MAINTAINER_HELPERS.md` first.
   hardware pass or a checked release.
 - The established tracked screenshot set now covers every normal controller
   context plus Home, MIDI Learn, and all master overlays. Keep its exact
-  scenarios, font, 40×20 geometry, integer scaler, and validation contract in
+  scenarios, font, 40×13 geometry, integer scaler, and validation contract in
   `docs/MAINTAINER_HELPERS.md`; do not hand-edit generated PNGs.
 
 The open hands-on review is non-audible and must use a new empty FT2 Project.
-Keep transport/recording stopped and do not attach routes. Verify the shared
-38×18 overlay at `(1,1)`, its caller reveal and single highlighted launcher;
+Keep transport/recording stopped and do not attach routes. On the physical
+40×13 TTY, verify the shared 38×11 overlay at `(1,1)`, its one-cell reveal,
+launcher inside the bottom border, and uninterrupted final status row;
 encoder/keyboard parity and wrap behavior; silent hidden launchers; two-step
 Back behavior; ROUTE draft cancellation without Project mutation; the Loop
 Library's inbox/private selection and return behavior; and every entered screen,
