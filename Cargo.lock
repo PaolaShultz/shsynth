@@ -391,7 +391,7 @@ dependencies = [
 
 [[package]]
 name = "shr-daw"
-version = "1.0.0"
+version = "0.392.0"
 dependencies = [
  "alsa",
  "anyhow",
