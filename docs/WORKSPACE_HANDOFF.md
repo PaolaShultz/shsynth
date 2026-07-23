@@ -21,10 +21,13 @@ features into scope; 0.6 implements and physically accepts simultaneous
 corrected starting point; the current checked-progress version is `0.3.94`.
 
 The complete first musician/operator workflow review and its persistent repair
-ledger are in `docs/WORKFLOW_AUDIT_HANDOFF.md`. The first repair pass must work
-only its `READY` queue, update each item's tracking record, and leave its
-`DECISION` questions for the owner pass. That audit performed no compile,
-physical test, private-data inspection, or hardware/audio/MIDI action.
+ledger are in `docs/WORKFLOW_AUDIT_HANDOFF.md`. Its R01–R15 `READY` queue has
+completed the source/docs/test repair pass and is recorded there as
+`SOURCE DONE`; the combined build/test and screenshot evidence still requires
+explicit authorization. Its `DECISION` questions remain for the owner pass,
+and its physical queue remains untouched. Neither the audit nor source pass
+performed a compile, physical test, private-data inspection, or
+hardware/audio/MIDI action.
 
 The complete deterministic documentation screenshot set is reconciled to the
 current UI; physical approval remains the next gate for UI/controller work.
