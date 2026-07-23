@@ -20,6 +20,12 @@ features into scope; 0.6 implements and physically accepts simultaneous
 18-channel playback and 18-channel recording. Package version `0.3.92` is the
 corrected starting point; the current checked-progress version is `0.3.94`.
 
+The complete first musician/operator workflow review and its persistent repair
+ledger are in `docs/WORKFLOW_AUDIT_HANDOFF.md`. The first repair pass must work
+only its `READY` queue, update each item's tracking record, and leave its
+`DECISION` questions for the owner pass. That audit performed no compile,
+physical test, private-data inspection, or hardware/audio/MIDI action.
+
 The complete deterministic documentation screenshot set is reconciled to the
 current UI; physical approval remains the next gate for UI/controller work.
 The repository-only release pass on 2026-07-22 completed at package version

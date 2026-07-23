@@ -84,6 +84,9 @@ configuration, or the architecture contracts.
   model provenance, division of work, target-native workflow, and evaluation.
 - [Feature and quirk matrix](BUILD_WEEK_FEATURE_MATRIX.md) — subsystem-level
   access, persistence, failure, safety, architecture, and test inventory.
+- [Workflow audit and repair handoff](WORKFLOW_AUDIT_HANDOFF.md) — complete
+  musician/operator workflow coverage, first repair queue, deferred decisions,
+  evidence gaps, and persistent fix tracking.
 - [Workspace handoff](WORKSPACE_HANDOFF.md) — current checkout, local hardware,
   private/public boundary, and validation state for maintainers.
 
